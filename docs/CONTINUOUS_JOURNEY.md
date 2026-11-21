@@ -16,8 +16,10 @@ section report an error. Stop and hidden-tab cancellation apply during the demo.
 After both passes and scripted clearance, the same car continues from its actual
 position and speed with Carbon choosing hazards and Gemini Decisions controlling
 speed. The opening does not repeat at every 60-second window or random stuck
-restart; **Start new journey** runs it again. Live steering remains route following;
-the scripted passes do not give the live driver general overtaking ability.
+restart; **Start new journey** runs it again. The live driver can request bounded
+go-around maneuvers where known lane and road geometry proves a clear corridor.
+OSRM journey routes do not supply that geometry, so the live journey follows its
+route; the scripted opening remains an explicitly authored illustration.
 
 **Available scenarios (6)** lists Carbon's menu in the journey panel: car crash,
 stalled vehicle, car cutting in, sudden hard braking, slow-moving traffic, and a

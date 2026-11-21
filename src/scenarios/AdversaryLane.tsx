@@ -32,7 +32,8 @@ export function AdversaryLane({ settings, onChange, driver }: { settings: Advers
           onChange={e => onChange({ ...settings, seed: Math.max(0, Math.floor(Number(e.target.value) || 0)) })} /></label>}
       </div>
       <label className="adversary-check"><input type="checkbox" checked={settings.guardsIgnoreHazards}
-        onChange={e => onChange({ ...settings, guardsIgnoreHazards: e.target.checked })} />Guards ignore injected hazards (only the model can avoid them)</label>
+        onChange={e => onChange({ ...settings, guardsIgnoreHazards: e.target.checked })} />Leader guard ignores injected hazards</label>
+      <small>Go-around corridor checks, signal stops and replayed-traffic guards remain active.</small>
     </fieldset>
     {settings.mode !== 'off' && <small>Adversary runs replace the Scenario Lab event. Start with the driver button above.</small>}
     {trace?.adversary?.error && <p className="driver-error" role="alert">{trace.adversary.error}</p>}

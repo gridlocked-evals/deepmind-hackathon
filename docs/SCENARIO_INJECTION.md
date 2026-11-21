@@ -4,7 +4,8 @@ The Scenario Lab in the **Driver** panel injects scripted traffic events into
 the structured-state Gridlocked simulator. In the crash preset, two cars move
 into a visible collision, become stationary obstacles, and are removed after
 the configured clearance interval. Gemini controls the following ego car's
-speed. Its proposals, actual movement, and controller interventions are separate.
+speed and can request a low-speed pass through a clear neighboring lane. Its
+proposals, actual movement, and controller interventions are separate.
 
 ## Try the demonstration
 
@@ -128,11 +129,13 @@ Use the extended Scenario Lab export for **Import scenario / replay**; the
 compact action trace does not contain recorded scene frames.
 
 Exports include no gateway credentials or provider response bodies. Model
-reaction means a braking/stopping or reduced-speed proposal after receiving the
+reaction means a braking/stopping, reduced-speed, or go-around proposal after receiving the
 obstruction; local emergency stopping is counted separately. Scripted background
 collisions are not counted as ego contacts. Contact metrics describe sampled
 rectangle geometry, not realistic crash physics, damage, or road-safety validity.
-Near-miss scoring is unknown and rerouting is unsupported in this speed-only MVP.
+Near-miss scoring is unknown. Go around can use known same-direction neighboring
+lanes to pass a stationary obstruction and rejoin; changing the destination route
+is unsupported. Street routes without lane geometry cannot offer this maneuver.
 Injected-hazard and replayed-traffic ego contacts are counted separately. Existing
 background traffic does not react to changed ego motion and can overlap a stopped
 ego car; those sampled contacts remain in the export and are not automatically
@@ -185,10 +188,11 @@ second injector. Choose **Carbon**, **Random baseline** (with a seed) or **Off**
   If no distance is admissible, it waits. Both policies still recheck actual
   speed at injection. The policy uses its own seeded mulberry32 stream, never
   simulation randomness; numeric parameters are rounded to tenths.
-- **Eval option: guards ignore injected hazards.** The leader guard skips
+- **Eval option: leader guard ignores injected hazards.** The leader guard skips
   `event-*` actors, both in its target cap and in its hard-stop boundary. The
   model still sees them through `lead_gap_m`/`lead_speed_mps`, and the
-  observation is unchanged. Red-line and replayed-traffic guards still act.
+  observation is unchanged. Go-around corridor, red-line and replayed-traffic
+  guards still act.
 
 **Per-attack records** (`trace.adversary.attacks`) are derived from the frames,
 telemetry, contacts and event log:

@@ -1,5 +1,5 @@
 import { DriverRequestError } from './trace';
-import { MAX_DRIVER_STEPS, SPEED_LIMIT_MPS } from './types';
+import { GO_AROUND_SPEED_MPS, MAX_DRIVER_STEPS, SPEED_LIMIT_MPS } from './types';
 import type { DriverResponse } from './types';
 
 export interface DriverRunLease {
@@ -35,10 +35,11 @@ export function validateDecisionResponse(value: unknown, runId: string, step: nu
     || response.max_steps !== MAX_DRIVER_STEPS
     || response.model_id !== 'gemini-decision-1'
     || typeof response.request_id !== 'string' || !response.request_id
-    || !decision || !['accelerate', 'cruise', 'brake', 'stop'].includes(decision.action)
+    || !decision || !['accelerate', 'cruise', 'brake', 'stop', 'go_around'].includes(decision.action)
     || !Number.isFinite(decision.target_speed_mps) || decision.target_speed_mps < 0 || decision.target_speed_mps > SPEED_LIMIT_MPS
     || !Number.isFinite(decision.confidence) || decision.confidence < 0 || decision.confidence > 1
     || (decision.action === 'stop' && decision.target_speed_mps !== 0)
+    || (decision.action === 'go_around' && decision.target_speed_mps > GO_AROUND_SPEED_MPS)
     || typeof decision.reason !== 'string' || !decision.reason.trim() || decision.reason.length > 240) {
     throw new DriverRequestError('Gemini returned an invalid driving decision. The simulation has stopped.');
   }

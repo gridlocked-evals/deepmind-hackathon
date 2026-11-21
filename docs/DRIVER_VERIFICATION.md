@@ -2,6 +2,53 @@
 
 Verification recorded on November 21, 2026. The Hydrogen run below predates the continuous Decisions driver and does not measure its latency. This evidence concerns structured-state simulation, not camera perception or the visual Genie navigation loop.
 
+## Go-around choice
+
+Two live synthetic-state calls verified prompt `sim-driver-decisions-v3` and the
+conditional fifth choice. For a stopped obstruction 25 m ahead with a reported
+clear right passing corridor, `gemini-decision-1` selected `go_around` at 4 m/s in
+363 ms (`95cdab78-c64b-4159-b0f2-9b5ce343f16f`). With the same obstruction and no
+passing corridor, it selected `brake` at 0 m/s in 305 ms
+(`a8e977e2-aba7-4355-9517-f012d7e1da09`). These calls verify model choice and API
+shape; maneuver geometry and collision handling are verified separately locally.
+
+A six-decision live policy check used the authored Vestry state and a crash with
+a 20-second clearance interval. Gemini cruised, accelerated, braked as the crash
+formed, then selected `go_around` on the left at simulation time 5.0 seconds
+(3.44 m/s, 19.55 m lead gap). That choice took 306 ms; request ID
+`699407f3-4c42-4c63-9c6e-37f6c309430a`, run
+`0e3db495-775b-43f7-908f-a7fe08f09dff`. The test then held the chosen command
+locally for 15 seconds, reached a 4 m lateral offset, and rejoined without contact
+with either crash actor. This was a synthetic-state policy/physics check, not a
+full live browser drive or a test of command freshness.
+
+Local checks passed: 135 frontend tests, 551 backend tests, production build, and
+contract drift checks. One backend local-port test needed execution outside the
+sandbox; the other 550 passed inside it. Passing regressions cover unknown/narrow
+lanes, oncoming and rear-approaching traffic, occupied corridors, stops during a
+pass, obstruction removal, full two-car crash clearance, rejoining, and red lights.
+
+An isolated Chromium fixture at 1440 × 900 verified the rendered authored scene
+over 18 continuous simulated seconds. Go around began at 5.0 seconds, reached
+4 m left displacement, and returned to the route center while the crash remained
+present. There were no sampled contacts with any actor. Independent oriented-box
+checks of 112 passing frames found at least 0.735 m separating-axis clearance and
+no road-corner violations. Both trace exports retained the action, and recorded
+replay disabled driving and made no provider calls. A street route without lane
+geometry kept passing unavailable, braked, and had no lateral deviation. Neither
+browser phase had uncaught page errors. These browser responses were fixtures,
+separate from the live Decisions calls above.
+
+Integration with main `35e9399` preserved adversary and camera-evidence behavior.
+The expanded suites passed 203 frontend tests, 678 backend tests, and 70 desktop/
+mobile browser checks; production build, browser type checks, and contract drift
+checks also passed. A regression verifies that an already stopped, model-commanded
+hold is not credited as a maneuver-guard intervention, while blocked acceleration
+is. The evaluation option disables only the injected-hazard leader guard; passing
+corridor checks remain active.
+After that attribution and label correction, all 10 affected desktop/mobile
+adversary browser checks passed again against the rebuilt production bundle.
+
 ## Decisions driver migration
 
 Three live calls through the updated `DriverController`, existing backend credential,
@@ -91,7 +138,7 @@ After integrating main through `0d04e04` on November 21, 2026:
 
 ## Limits and next work
 
-The model chooses longitudinal speed. Steering and safety boundaries remain local deterministic code. Route speed limits and signals are not surveyed; mapped routes report unknown signals. The authored traffic surrounding the demo ego remains replayed and can fail to react to changed ego actions. This is not safety validation.
+The model chooses speed or an available low-speed go-around maneuver. Steering and safety boundaries remain local deterministic code. Route speed limits and signals are not surveyed; mapped routes report unknown signals and lack the neighboring-lane geometry needed for passing. The authored traffic surrounding the demo ego remains replayed and can fail to react to changed ego actions. This is not safety validation.
 
 - [#19](https://github.com/gridlocked-evals/deepmind-hackathon/issues/19): reactive traffic/physics.
 - [#60](https://github.com/gridlocked-evals/deepmind-hackathon/issues/60): portable decision trace export with synthetic provenance.

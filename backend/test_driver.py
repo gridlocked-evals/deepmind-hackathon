@@ -33,10 +33,11 @@ def request_body(step=0, run_id="test-run-0001"):
     }
 
 
-def choice_output(choice="accelerate"):
+def choice_output(choice="accelerate", *, go_around=False):
+    actions = ("stop", "brake", "cruise", "accelerate") + (("go_around",) if go_around else ())
     return {"maneuver": {"type": "choice", "choice": choice, "confidence": 0.9,
-                        "probabilities": {action: (0.91 if action == choice else 0.03)
-                                          for action in ("stop", "brake", "cruise", "accelerate")}}}
+                        "probabilities": {action: (0.9 if action == choice else 0.1 / (len(actions) - 1))
+                                          for action in actions}}}
 
 
 class FakeGateway:
@@ -83,9 +84,10 @@ def test_decision_uses_existing_gateway_and_returns_real_trace():
     context = call["context"]
     assert context.purpose == "development" and context.source_id is None and context.capture_id is None
     assert context.episode_id == "sim-driver:test-run-0001"
-    assert context.prompt_id == "sim-driver-decisions-v2:step-0"
+    assert context.prompt_id == "sim-driver-decisions-v3:step-0"
     assert "synthetic traffic simulator" in call["input_value"]
-    assert json.loads(call["input_value"].split("Observation JSON:\n")[1]) == body["observation"]
+    assert json.loads(call["input_value"].split("Observation JSON:\n")[1]) == {
+        **body["observation"], "go_around_available": False, "go_around_side": None, "go_around_active": False}
 
 
 @pytest.mark.parametrize("path,value", [
@@ -105,6 +107,10 @@ def test_decision_uses_existing_gateway_and_returns_real_trace():
     (("observation", "lead_gap_m"), 10001),
     (("observation", "lead_speed_mps"), 51),
     (("observation", "upcoming_turn_degrees"), 181),
+    (("observation", "go_around_available"), 1), (("observation", "go_around_available"), "true"),
+    (("observation", "go_around_available"), None), (("observation", "go_around_active"), 0),
+    (("observation", "go_around_active"), "false"), (("observation", "go_around_active"), None),
+    (("observation", "go_around_side"), True), (("observation", "go_around_side"), "up"),
 ])
 def test_request_boundaries_reject_before_gateway(path, value):
     client, gateway, _ = client_for()
@@ -221,6 +227,91 @@ def test_choice_maps_to_bounded_target(action, speed, limit, expected):
         assert decision["target_speed_mps"] <= speed
 
 
+@pytest.mark.parametrize("flags", [
+    {"go_around_available": True}, {"go_around_active": True},
+    {"go_around_available": True, "go_around_active": True},
+    {"go_around_side": "left"}, {"go_around_side": "right"},
+])
+def test_incoherent_go_around_capabilities_reject_before_gateway(flags):
+    client, gateway, _ = client_for()
+    body = request_body()
+    body["observation"].update(flags)
+    response = client.post("/api/driver/decision", json=body)
+    assert response.status_code == 422 and response.json()["detail"]["code"] == "invalid_input"
+    assert not gateway.calls
+
+
+@pytest.mark.parametrize("side,active,limit,expected", [
+    ("left", False, 11.176, 4.0), ("right", False, 2.5, 2.5),
+    ("left", True, 11.176, 4.0), ("right", True, 50.0, 4.0),
+])
+def test_go_around_choice_uses_only_available_corridor_with_bounded_speed(side, active, limit, expected):
+    gateway = FakeGateway()
+    gateway.output = choice_output("go_around", go_around=True)
+    client, _, _ = client_for(gateway)
+    body = request_body()
+    body["observation"].update(go_around_available=True, go_around_active=active, go_around_side=side,
+                               speed_limit_mps=limit, lead_gap_m=25.0, lead_speed_mps=0.0)
+    response = client.post("/api/driver/decision", json=body)
+    assert response.status_code == 200
+    decision = response.json()["decision"]
+    assert decision == {"action": "go_around", "target_speed_mps": expected, "confidence": 0.9,
+                        "reason": f"Decisions selected go around on the {side}; target {expected:.2f} m/s."}
+    question = gateway.calls[0][1]["questions"]["maneuver"]
+    assert set(question["criteria"]) == {"stop", "brake", "cruise", "accelerate", "go_around"}
+    assert f"clear {side} corridor" in question["criteria"]["go_around"]
+    assert "instead of waiting indefinitely" in question["instructions"]
+    assert client.post("/api/driver/decision", json=body).json() == response.json()
+    assert len(gateway.calls) == 1
+    body["observation"]["go_around_side"] = "right" if side == "left" else "left"
+    assert client.post("/api/driver/decision", json=body).status_code == 409
+
+
+@pytest.mark.parametrize("updates", [
+    {}, {"go_around_active": True, "go_around_side": "right"},
+    {"go_around_available": True, "go_around_side": "left", "lead_gap_m": None, "lead_speed_mps": None},
+    {"go_around_available": True, "go_around_side": "left", "lead_gap_m": 25.0, "lead_speed_mps": 1.0},
+    {"go_around_available": True, "go_around_side": "left", "signal": "red", "stop_distance_m": 20.0},
+    {"go_around_available": True, "go_around_side": "left", "signal": "amber", "stop_distance_m": 3.0},
+    {"go_around_available": True, "go_around_active": True, "go_around_side": "right",
+     "signal": "red", "stop_distance_m": 2.0},
+    {"go_around_available": True, "go_around_side": "left", "remaining_m": 0.0},
+])
+def test_unavailable_go_around_is_not_offered_and_cannot_be_selected(updates):
+    client, gateway, _ = client_for()
+    body = request_body()
+    body["observation"].update(lead_gap_m=25.0, lead_speed_mps=0.0)
+    body["observation"].update(updates)
+    gateway.output = choice_output("stop")
+    response = client.post("/api/driver/decision", json=body)
+    assert response.status_code == 200
+    assert "go_around" not in gateway.calls[0][1]["questions"]["maneuver"]["criteria"]
+    gateway.output = choice_output("go_around", go_around=True)
+    body["step"] = 1
+    response = client.post("/api/driver/decision", json=body)
+    assert response.status_code == 502 and response.json()["detail"]["code"] == "invalid_output"
+    assert "decision" not in response.json()
+
+
+def test_active_clear_corridor_can_finish_after_the_obstruction_is_behind():
+    client, gateway, _ = client_for()
+    body = request_body()
+    body["observation"].update(go_around_available=True, go_around_active=True, go_around_side="right")
+    # No current lead is expected while passing or rejoining; local geometry
+    # validates the retained plan rather than inventing a new obstacle here.
+    gateway.output = choice_output("go_around", go_around=True)
+    assert client.post("/api/driver/decision", json=body).status_code == 200
+
+
+def test_legacy_observations_and_explicit_disabled_capability_share_idempotency():
+    client, gateway, _ = client_for()
+    body = request_body()
+    first = client.post("/api/driver/decision", json=body)
+    body["observation"].update(go_around_available=False, go_around_active=False, go_around_side=None)
+    assert client.post("/api/driver/decision", json=body).json() == first.json()
+    assert len(gateway.calls) == 1
+
+
 def test_wrong_provider_model_is_rejected():
     gateway = FakeGateway()
     gateway.model_id = MODELS[Service.HYDROGEN]
@@ -327,7 +418,8 @@ def test_run_capacity_and_expiry_do_not_evict_inflight(monkeypatch):
     asyncio.run(scenario())
 
 
-def test_driver_calls_real_decisions_adapter_and_retains_ledger_provenance(tmp_path):
+@pytest.mark.parametrize("go_around", [False, True])
+def test_driver_calls_real_decisions_adapter_and_retains_ledger_provenance(tmp_path, go_around):
     requests = []
 
     def handler(request):
@@ -338,7 +430,10 @@ def test_driver_calls_real_decisions_adapter_and_retains_ledger_provenance(tmp_p
         assert set(payload) == {"model", "input", "questions"}
         assert payload["questions"]["maneuver"]["type"] == "choice"
         assert "target 6.500 m/s" in payload["questions"]["maneuver"]["criteria"]["accelerate"]
-        return httpx.Response(200, json={"answers": choice_output(), "usage": {
+        assert ("go_around" in payload["questions"]["maneuver"]["criteria"]) == go_around
+        if go_around:
+            assert "target 4.000 m/s" in payload["questions"]["maneuver"]["criteria"]["go_around"]
+        return httpx.Response(200, json={"answers": choice_output("go_around" if go_around else "accelerate", go_around=go_around), "usage": {
             "total_input_tokens": 200, "total_output_tokens": 0, "total_tokens": 200}})
 
     async def scenario():
@@ -346,9 +441,14 @@ def test_driver_calls_real_decisions_adapter_and_retains_ledger_provenance(tmp_p
         async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
             gateway = ModelGateway(config, http, api_key="test-driver-key")
             controller = DriverController(gateway)
-            body = DriverRequest.model_validate(request_body())
+            payload = request_body()
+            if go_around:
+                payload["observation"].update(go_around_available=True, go_around_side="right",
+                                              lead_gap_m=25.0, lead_speed_mps=0.0)
+            body = DriverRequest.model_validate(payload)
             result = await controller.decide(body)
-            assert result.decision.target_speed_mps == 6.5
+            assert result.decision.target_speed_mps == (4.0 if go_around else 6.5)
+            assert result.decision.action == ("go_around" if go_around else "accelerate")
             assert await controller.decide(body) == result
             assert len(requests) == 1
             service = next(s for s in gateway.status()["services"] if s["service"] == "decisions")

@@ -39,7 +39,7 @@ export interface RunTrace {
   schemaVersion: 'gridlocked-driver-trace.v2';
   provenance: 'synthetic-structured-state';
   modelSource: 'live-model' | 'test-fixture' | 'scripted-demo';
-  modelPolicy: { promptVersion: 'sim-driver-decisions-v2'; service: 'decisions'; modelId: 'gemini-decision-1' }
+  modelPolicy: { promptVersion: 'sim-driver-decisions-v3'; service: 'decisions'; modelId: 'gemini-decision-1' }
     | { promptVersion: 'scripted-opening-v1'; service: 'scripted'; modelId: null };
   scriptedOpening?: ScriptedOpeningTrace;
   runId: string;
@@ -55,7 +55,7 @@ export interface RunTrace {
   /** The compatible #60 action/guard trace; absent in exports made before integration. */
   driverTrace?: DriverTrace;
   eventLog: EventRecord[];
-  /** Eval option: guards ignored injected hazards (#91). Absent means false. */
+  /** Eval option: leader guards ignored injected hazards (#91); maneuver/signal guards still act. Absent means false. */
   guardsIgnoreHazards?: boolean;
   /** Adversary lane decisions, per-attack outcome records and run metrics (#91); absent when the adversary is off. */
   adversary?: AdversaryTrace;
@@ -77,7 +77,7 @@ export function createTrace(state: DriverSimulation, runId: string, modelSource:
   if (!state.events) throw new Error('Missing scenario event state.');
   const trace: RunTrace = { schemaVersion: 'gridlocked-driver-trace.v2', provenance: 'synthetic-structured-state', modelSource,
     modelPolicy: modelSource === 'scripted-demo' ? { promptVersion: 'scripted-opening-v1', service: 'scripted', modelId: null }
-      : { promptVersion: 'sim-driver-decisions-v2', service: 'decisions', modelId: 'gemini-decision-1' },
+      : { promptVersion: 'sim-driver-decisions-v3', service: 'decisions', modelId: 'gemini-decision-1' },
     runId, createdAt: new Date().toISOString(), mode: state.events.mode, plan: structuredClone(state.events.plan),
     scene: structuredClone({ ...state.scenario, frames: [] }),
     limits: { maxDecisions: MAX_DRIVER_STEPS, decisionIntervalSeconds: DECISION_INTERVAL_SECONDS, maxCommandAgeSeconds: MAX_COMMAND_AGE_SECONDS,
@@ -115,7 +115,7 @@ export function summarizeTrace(trace: RunTrace) {
   const events = trace.appliedEvents.map(event => {
     const visible = trace.steps.find(step => step.observedEventIds.includes(event.id));
     const response = trace.steps.find(step => step.observedEventIds.includes(event.id) && step.response && step.appliedSimulationTime !== null
-      && (step.response.decision.action === 'stop' || step.response.decision.action === 'brake'
+      && (step.response.decision.action === 'stop' || step.response.decision.action === 'brake' || step.response.decision.action === 'go_around'
         || step.response.decision.target_speed_mps < step.observation.speed_mps - .1));
     const cleared = trace.eventLog.find(row => row.eventId === event.id && row.kind === 'cleared');
     const stopped = trace.telemetry.find(row => row.time >= event.appliedAt && (!cleared || row.time <= cleared.time) && row.speed < .1);

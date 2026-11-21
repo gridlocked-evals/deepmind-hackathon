@@ -8,9 +8,10 @@ export const DECISION_INTERVAL_SECONDS = 1;
 export const MAX_COMMAND_AGE_SECONDS = 3;
 export const MAX_DRIVE_SECONDS = 60;
 export const SPEED_LIMIT_MPS = 11.176;
+export const GO_AROUND_SPEED_MPS = 4;
 
 /** Local controller guard that changed applied motion; route/turn shaping is not a guard. */
-export type GuardReason = 'leader_guard' | 'red_line_guard' | 'none';
+export type GuardReason = 'leader_guard' | 'red_line_guard' | 'maneuver_guard' | 'none';
 
 export interface DriverObservation {
   scenario_id: string;
@@ -24,10 +25,14 @@ export interface DriverObservation {
   lead_speed_mps: number | null;
   upcoming_turn_degrees: number;
   route_label: string;
+  /** Optional only for recordings made before bounded obstacle passing was added. */
+  go_around_available?: boolean;
+  go_around_side?: 'left' | 'right' | null;
+  go_around_active?: boolean;
 }
 
 export interface DriverDecision {
-  action: 'accelerate' | 'cruise' | 'brake' | 'stop';
+  action: 'accelerate' | 'cruise' | 'brake' | 'stop' | 'go_around';
   target_speed_mps: number;
   reason: string;
   confidence: number;

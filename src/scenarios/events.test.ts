@@ -146,6 +146,17 @@ describe('scenario injection boundary', () => {
 });
 
 describe('scenario trace and replay', () => {
+  it('counts a go-around response as a model reaction even when passing increases speed', () => {
+    const state = { ...prepareDriverDecision(advance(setup(), 5)), speed: 1 };
+    const trace = createTrace(state, 'fixture-pass-reaction', 'test-fixture');
+    const entry = beginDecision(trace, state, 0);
+    entry.response = { run_id: trace.runId, step: 0, model_id: 'gemini-decision-1', request_id: 'fixture-pass', max_steps: 60,
+      decision: { action: 'go_around', target_speed_mps: 4, confidence: .9, reason: 'Pass the stationary obstruction.' } };
+    entry.appliedSimulationTime = state.time + .2;
+    expect(summarizeTrace(trace).events[0].modelReactionTime).toBeCloseTo(5.2);
+    expect(summarizeTrace(trace).events[0].responseLatencySimulationSeconds).toBeCloseTo(.2);
+  });
+
   it('measures reaction when a response is applied after its observation, including inference motion', () => {
     let state = setup();
     const trace = createTrace(state, 'fixture-overlapped-inference', 'test-fixture');
@@ -171,7 +182,7 @@ describe('scenario trace and replay', () => {
     for (let tick = 0; tick < 600; tick++) { state = advanceDriver(state, accelerate, .1); recordFrame(trace, state); }
     finishTrace(trace, state, 'time-limit');
     expect(trace.schemaVersion).toBe('gridlocked-driver-trace.v2');
-    expect(trace.modelPolicy).toEqual({ promptVersion: 'sim-driver-decisions-v2', service: 'decisions', modelId: 'gemini-decision-1' });
+    expect(trace.modelPolicy).toEqual({ promptVersion: 'sim-driver-decisions-v3', service: 'decisions', modelId: 'gemini-decision-1' });
     expect(trace.frames).toHaveLength(601);
     expect(replayScene(trace).duration).toBe(60);
     expect(replayScene({ ...run('event'), schemaVersion: 'gridlocked-driver-trace.v1' }).duration).toBe(36);

@@ -1,7 +1,7 @@
 # Gridlocked simulator driver
 
 `POST /api/driver/decision` asks the existing **Gemini Decisions** (`gemini-decision-1`) gateway for one
-longitudinal action for the selected simulated car. The browser supplies structured
+bounded driving action for the selected simulated car. The browser supplies structured
 simulator state and applies a validated target speed through the local traffic
 physics. Traffic signals, headway, stop lines, route geometry, and acceleration
 limits remain simulator constraints.
@@ -51,6 +51,9 @@ Infinity, and out-of-range values are rejected before a gateway call.
 | `stop_distance_m`, `lead_gap_m` | 0–10,000 metres, or `null` when unavailable |
 | `upcoming_turn_degrees` | Signed angle from −180 to 180 degrees |
 | `route_label` | 1–160 characters; treated as untrusted data, never a prompt instruction |
+| `go_around_available` | Strict boolean, defaults to `false`; current corridor clearance checked by the simulator |
+| `go_around_side` | `left`, `right`, or `null` (default); known side required when available or active |
+| `go_around_active` | Strict boolean, defaults to `false`; an existing maneuver is retained even while blocked |
 
 ## Response
 
@@ -70,7 +73,7 @@ Infinity, and out-of-range values are rejected before a gateway call.
 }
 ```
 
-`action` is `accelerate`, `cruise`, `brake`, or `stop`. Target speed is finite,
+`action` is `accelerate`, `cruise`, `brake`, `stop`, or `go_around`. Target speed is finite,
 between 0 and 11.176 m/s (25 mph), and no higher than the submitted speed limit.
 `stop` requires a zero target; `brake` cannot increase the submitted speed.
 `confidence` is finite and between 0 and 1. `reason` contains 1–240 characters.
@@ -78,7 +81,11 @@ One typed [Decisions `choice` question](https://aistudio.google.com/docs/decisio
 brake at current speed minus 2.5 m/s, cruise at current speed, or accelerate at
 current speed plus 2.5 m/s. Candidate speeds are bounded to 0 through
 `min(speed_limit_mps, 11.176)` before being sent to the provider. `reason` is a
-fixed summary of that selection, not generated reasoning. Invalid provider output
+fixed summary of that selection, not generated reasoning. When `go_around_available`
+is true, a side is known, and there is a stopped lead vehicle or an active maneuver, a fifth candidate requests passing at
+`min(speed_limit_mps, 4)` m/s. An active plan alone does not authorize passing.
+The option is omitted near red/amber stop lines (within 20 m), and at the route end.
+Invalid provider output
 returns an error, with no fallback decision.
 `request_id` identifies the existing gateway's recorded call; confidence is the
 model's estimate, not a calibrated assurance of safe driving.
@@ -87,6 +94,20 @@ The browser must verify the run and step still match the active session before
 using the result. A stopped/restarted session or replaced route must discard late
 responses. It must stop after an error, 60 decisions, or 60 simulated seconds. A target is a
 simulator control input, not permission to bypass local collision/signal guards.
+
+## Passing an obstruction
+
+The simulator offers go around for stationary obstructions only when it can construct
+a bounded path into a known neighboring lane in the same direction and return after
+clearing the obstruction. Geometry, road containment, nearby vehicles and the
+remaining passing corridor are checked locally. The current clearance is rechecked
+when a response arrives and on each physics tick, because traffic can move during
+inference. A blocked path stops motion and preserves the maneuver for later
+continuation. A stop decision also retains the path without moving sideways.
+
+Mapped routes without lane geometry cannot claim passing clearance. They keep the
+four speed actions. This is an illustrative simulator maneuver, not a street-routing
+service or real-vehicle safety guarantee. Signal and collision guards remain active.
 
 ## Continuous control
 
@@ -167,7 +188,7 @@ Decisions safety score. Each step holds the following:
 - the **applied** motion: start and end simulation time, start and end speed,
   and distance travelled;
 - `guard`: whether the local leader or red-line guard changed the applied
-  motion. The reason is `leader_guard`, `red_line_guard` or `none`, and each
+  motion. The reason is `leader_guard`, `red_line_guard`, `maneuver_guard` or `none`, and each
   event records the simulation time it started.
 
 `terminal.state` is `route_complete`, `decision_limit`, `time_limit`, `stopped_by_user`,
@@ -202,7 +223,7 @@ model entitlement, remaining quota, or a successful future call.
 
 The endpoint uses `Service.DECISIONS`, `stage="simulator_driver"`, the existing typed
 choice support, and `CallContext(purpose="development")`. Its episode ID
-is `sim-driver:<run_id>` and prompt ID is `sim-driver-decisions-v2:step-<step>`. It does not
+is `sim-driver:<run_id>` and prompt ID is `sim-driver-decisions-v3:step-<step>`. It does not
 forge source/capture IDs or consume the protected demo reserve as camera evidence.
 The Decisions choice response contains no generated text or thinking tokens.
 Historical Hydrogen scenario checks and their low-thinking policy are recorded

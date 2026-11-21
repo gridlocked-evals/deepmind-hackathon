@@ -1,9 +1,11 @@
 import { DEMO_SCENE_ID, demoSignal, sampleScenario, streetPoint } from '../scene/DemoScenarioProvider';
 import type { ActorDefinition, ActorState, ScenarioBundle, SimulationFrame, Vec2 } from '../types';
-import { SPEED_LIMIT_MPS } from './types';
+import { GO_AROUND_SPEED_MPS, SPEED_LIMIT_MPS } from './types';
 import type { DriverDecision, DriverObservation, GuardReason } from './types';
 import { advanceEvents, eventTravelDistance, sampleEvents } from '../scenarios/events';
 import type { EventState } from '../scenarios/events';
+import { bypassClear, bypassPose, findBypass } from './bypass';
+import type { BypassPlan } from './bypass';
 
 export const MAX_PHYSICS_STEP = 0.1;
 export const MAX_ACCELERATION = 1.5;
@@ -27,8 +29,11 @@ export interface DriverSimulation {
   stopProgress: number | null;
   signalStop: boolean;
   events?: EventState;
+  bypass?: BypassPlan;
+  /** A completed pass may finish its already accepted command without immediately braking or replanning. */
+  completedBypass?: boolean;
   control?: { requestedTargetMps: number; constrainedTargetMps: number; interventions: string[] };
-  /** Eval option (#91): the leader guard ignores injected `event-*` actors, so only the model can avoid them. */
+  /** Eval option (#91): the leader guard ignores injected actors; maneuver and signal guards remain active. */
   guardsIgnoreHazards?: boolean;
   /** Which local guard changed the applied motion on the last tick; trace instrumentation only. */
   guard: GuardReason;
@@ -103,21 +108,31 @@ function eventActors(state: DriverSimulation, time = state.time) {
   return state.events ? sampleEvents(state.events, time, progress => routePosition(state.path, progress)) : [];
 }
 
+function trafficActors(state: DriverSimulation, time = state.time, skipInjected = false) {
+  return [...sampleScenario(state.scenario, time).actors, ...(skipInjected ? [] : eventActors(state, time))];
+}
+
 function nearestLeader(state: DriverSimulation, time = state.time, skipInjected = false) {
-  const sample = sampleScenario(state.scenario, time);
   let best: { id: string; gap: number; speed: number; progress: number; length: number } | null = null;
   const heading = routePosition(state.path, state.progress).heading;
-  for (const actor of [...sample.actors, ...(skipInjected ? [] : eventActors(state, time))]) {
+  const egoPose = bypassPose(state), routeCenter = routePosition(state.path, state.progress);
+  const egoOffset = -(egoPose.x - routeCenter.x) * Math.sin(heading) + (egoPose.y - routeCenter.y) * Math.cos(heading);
+  for (const actor of trafficActors(state, time, skipInjected)) {
     if (actor.id === state.ego.id) continue;
     const definition = state.scenario.actors.find(candidate => candidate.id === actor.id);
     if (!definition) continue;
     const injected = actor.id.startsWith('event-');
-    if (!injected && (Math.cos(actor.heading - heading) < 0.7 || definition.routeId !== state.ego.routeId)) continue;
+    if (!state.bypass && !injected && (Math.cos(actor.heading - heading) < 0.7 || definition.routeId !== state.ego.routeId)) continue;
     const projected = projectOntoRoute(state.path, [actor.x, actor.y]);
     const angle = actor.heading - heading;
-    const length = injected ? Math.abs(Math.cos(angle)) * definition.length + Math.abs(Math.sin(angle)) * definition.width : definition.length;
-    const halfWidth = injected ? (Math.abs(Math.sin(angle)) * definition.length + Math.abs(Math.cos(angle)) * definition.width + state.ego.width) / 2 : 1.5;
-    if (projected.lateralDistance > halfWidth || projected.progress + length / 2 <= state.progress - state.ego.length / 2) continue;
+    const oriented = injected || Boolean(state.bypass);
+    const length = oriented ? Math.abs(Math.cos(angle)) * definition.length + Math.abs(Math.sin(angle)) * definition.width : definition.length;
+    const egoWidth = state.bypass ? Math.abs(Math.sin(egoPose.heading - heading)) * state.ego.length + Math.abs(Math.cos(egoPose.heading - heading)) * state.ego.width : state.ego.width;
+    const halfWidth = oriented ? (Math.abs(Math.sin(angle)) * definition.length + Math.abs(Math.cos(angle)) * definition.width + egoWidth) / 2 : 1.5;
+    const center = routePosition(state.path, projected.progress);
+    const lateral = -(actor.x - center.x) * Math.sin(heading) + (actor.y - center.y) * Math.cos(heading);
+    if ((state.bypass ? Math.abs(lateral - egoOffset) > halfWidth + .3 : projected.lateralDistance > halfWidth)
+      || projected.progress + length / 2 <= state.progress - state.ego.length / 2) continue;
     const gap = projected.progress - state.progress - (state.ego.length + length) / 2;
     if (!best || gap < best.gap) best = { id: actor.id, gap, speed: injected ? Math.max(0, actor.speed * Math.cos(angle)) : actor.speed, progress: projected.progress, length };
   }
@@ -139,12 +154,17 @@ function upcomingTurn(state: DriverSimulation) {
 export function driverObservation(state: DriverSimulation): DriverObservation {
   const leader = nearestLeader(state);
   const stopDistance = state.stopProgress === null ? null : state.stopProgress - state.progress;
+  const signal = state.scenario.id === DEMO_SCENE_ID ? demoSignal(state.time) : 'unknown';
+  const nearStop = (signal === 'red' || signal === 'amber') && stopDistance !== null && stopDistance >= 0 && stopDistance <= 20;
+  const candidate = state.bypass ?? (!nearStop ? findBypass(state, leader, time => trafficActors(state, time)) : null);
+  const available = !nearStop && Boolean(candidate && (!state.bypass || bypassClear(state, candidate, time => trafficActors(state, time))));
   return { scenario_id: state.scenario.id.slice(0, 80), simulation_time: state.time, speed_mps: state.speed,
     speed_limit_mps: SPEED_LIMIT_MPS, remaining_m: Math.max(0, state.path.length - state.progress),
-    signal: state.scenario.id === DEMO_SCENE_ID ? demoSignal(state.time) : 'unknown',
+    signal,
     stop_distance_m: stopDistance !== null && stopDistance >= -0.01 ? Math.max(0, stopDistance) : null,
     lead_gap_m: leader ? Math.max(0, Math.min(10_000, leader.gap)) : null,
-    lead_speed_mps: leader?.speed ?? null, upcoming_turn_degrees: upcomingTurn(state), route_label: state.scenario.label.slice(0, 160) };
+    lead_speed_mps: leader?.speed ?? null, upcoming_turn_degrees: upcomingTurn(state), route_label: state.scenario.label.slice(0, 160),
+    go_around_available: available, go_around_side: candidate?.side ?? null, go_around_active: Boolean(state.bypass) };
 }
 
 /** Gemini chooses desired speed; this deterministic layer follows the route and enforces constraints. */
@@ -170,6 +190,14 @@ export function advanceDriver(state: DriverSimulation, decision: DriverDecision,
   const delta = Math.min(MAX_PHYSICS_STEP, Math.max(0, requestedDelta));
   if (!delta) return state;
   if (state.events) state = { ...state, events: advanceEvents(state.events, state.time, state.progress, state.path.length) };
+  if (decision.action !== 'go_around' && state.completedBypass) state = { ...state, completedBypass: false };
+  if (state.bypass && state.progress >= state.bypass.end - 1e-6) state = { ...state, bypass: undefined, completedBypass: true };
+  if (decision.action === 'go_around' && !state.bypass && !state.completedBypass) {
+    const capability = driverObservation(state);
+    if (capability.go_around_available) state = { ...state, bypass: findBypass(state, nearestLeader(state), time => trafficActors(state, time)) ?? undefined };
+  }
+  const corridorBlocked = Boolean(state.bypass && !bypassClear(state, state.bypass, time => trafficActors(state, time)));
+  const invalidBypass = decision.action === 'go_around' && !state.bypass && !state.completedBypass;
   const observation = driverObservation(state);
   let desired = decision.action === 'stop' ? 0 : Math.max(0, Math.min(SPEED_LIMIT_MPS, decision.target_speed_mps));
   const requestedTargetMps = desired, interventions: string[] = [];
@@ -177,6 +205,7 @@ export function advanceDriver(state: DriverSimulation, decision: DriverDecision,
     if (maximum < desired - 1e-8) { desired = maximum; interventions.push(reason); }
   };
   if (decision.action === 'brake') desired = Math.min(desired, state.speed);
+  if (state.bypass || decision.action === 'go_around') constrain(GO_AROUND_SPEED_MPS, 'bypass-speed');
   const remaining = state.path.length - state.progress;
   constrain(Math.min(Math.sqrt(Math.max(0, 2 * 2 * remaining)), remaining * 1.5), 'route-end');
   // Slow near sharp polyline turns; these are route steering, not model-generated steering commands.
@@ -189,7 +218,8 @@ export function advanceDriver(state: DriverSimulation, decision: DriverDecision,
     // A later target cap may be redundant after braking has saturated. Preserve
     // the earlier guard unless this cap changes the applied acceleration.
     if (accelerationFor(cap) < accelerationFor(desired) - 1e-9) guard = reason;
-    constrain(cap, reason === 'leader_guard' ? 'obstacle-spacing' : 'signal-stop');
+    constrain(cap, reason === 'leader_guard' ? 'obstacle-spacing' : reason === 'maneuver_guard'
+      ? corridorBlocked ? 'bypass-corridor-blocked' : 'bypass-unavailable' : 'signal-stop');
   };
   // The model still observes injected hazards; with the eval flag only the guard skips them.
   const guardLead = state.guardsIgnoreHazards ? nearestLeader(state, state.time, true) : undefined;
@@ -208,6 +238,9 @@ export function advanceDriver(state: DriverSimulation, decision: DriverDecision,
     const cap = Math.min(Math.sqrt(2 * 2 * observation.stop_distance_m), observation.stop_distance_m * 1.5);
     applyGuard(cap, 'red_line_guard');
   }
+  // Credit the maneuver guard only when it changes motion after the other constraints.
+  // An already stopped model command must not become an assisted avoidance just because its corridor is blocked.
+  if (corridorBlocked || invalidBypass) applyGuard(0, 'maneuver_guard');
 
   const acceleration = accelerationFor(desired);
   const unclampedSpeed = Math.max(0, Math.min(SPEED_LIMIT_MPS, state.speed + acceleration * delta));
@@ -216,19 +249,24 @@ export function advanceDriver(state: DriverSimulation, decision: DriverDecision,
   const nextLeader = nearestLeader(state, state.time + delta, state.guardsIgnoreHazards);
   if (nextLeader) bounds.push([nextLeader.progress - (state.ego.length + nextLeader.length) / 2 - MIN_GAP, 'leader_guard']);
   // Collision and end boundaries may override comfortable braking in an emergency.
-  const { progress, speed, guard: boundaryGuard } = clampAtBoundaries(state.progress,
+  const clamped = clampAtBoundaries(state.progress,
     state.progress + (state.speed + unclampedSpeed) * 0.5 * delta, unclampedSpeed, state.path.length, bounds);
+  const freezeChangesMotion = corridorBlocked && (clamped.progress > state.progress + 1e-9 || clamped.speed > 1e-9);
+  const { progress, speed, guard: boundaryGuard } = freezeChangesMotion
+    ? { progress: state.progress, speed: 0, guard: 'maneuver_guard' as const } : clamped;
   if (boundaryGuard !== 'none') interventions.push('hard-stop-boundary');
   const time = Math.round((state.time + delta) * 1e9) / 1e9;
   return { ...state, time, progress, speed, signalStop,
     events: state.events ? advanceEvents(state.events, time, progress, state.path.length) : undefined,
     control: { requestedTargetMps, constrainedTargetMps: desired, interventions },
-    braking: acceleration < -0.25 || speed < state.speed - 0.01, guard: boundaryGuard !== 'none' ? boundaryGuard : guard };
+    bypass: state.bypass && progress < state.bypass.end - 1e-6 ? state.bypass : undefined,
+    completedBypass: state.completedBypass || Boolean(state.bypass && progress >= state.bypass.end - 1e-6),
+    braking: corridorBlocked || acceleration < -0.25 || speed < state.speed - 0.01, guard: boundaryGuard !== 'none' ? boundaryGuard : guard };
 }
 
 export function driverFrame(state: DriverSimulation): SimulationFrame {
   const background = sampleScenario(state.scenario, state.time);
-  const position = state.scriptedPose ?? routePosition(state.path, state.progress);
+  const position = state.scriptedPose ?? bypassPose(state);
   const ego: ActorState = { id: state.ego.id, x: position.x, y: position.y, heading: position.heading,
     speed: state.speed, braking: state.braking };
   return { time: state.time, signal: background.signal,
