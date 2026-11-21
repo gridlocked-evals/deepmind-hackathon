@@ -1,3 +1,15 @@
+# Gotham Forge simulation workspace
+
+Interactive NYC city map, a detailed illustrative Vestry Street traffic simulation, and toggleable public camera feeds.
+
+**[Setup and controls](RUNNING.md)** · [Architecture](docs/ARCHITECTURE.md) · [Camera API](docs/CAMERA_API.md) · [Verification](docs/VERIFICATION.md)
+
+[Implementation plan](GOTHAM_FORGE_PLAN.md) · [Source attribution](THIRD_PARTY_NOTICES.md)
+
+Quick start after installing dependencies: run `npm run dev:api` and `npm run dev` in separate terminals. No model credentials are needed.
+
+---
+
 # DeepMind Hackathon: Gemini 4 NYC Hackathon Research
 
 Research and idea notes for the **Gemini 4 NYC Hackathon** (Cerebral Valley × Google DeepMind, Sat Nov 21, 2026).
