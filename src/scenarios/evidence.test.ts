@@ -2,7 +2,8 @@ import { describe, expect, it } from 'vitest';
 import { createRouteScenario } from '../navigation/routeScenario';
 import type { ExtractionReport, EvidenceFact } from '../evidence/api';
 import type { CameraSource, LngLat } from '../types';
-import { evidenceConditions, withEvidenceTraffic } from './evidence';
+import { evidenceConditions, withEvidenceHazard, withEvidenceTraffic } from './evidence';
+import { preset } from './events';
 
 const origin: LngLat = [-74.01, 40.72];
 const camera = { id: 'cam-1', coordinates: origin } as CameraSource;
@@ -31,5 +32,14 @@ describe('camera evidence in drives', () => {
     expect(result.frames.every(frame => frame.actors.length === 4 && frame.actors.every(actor => Number.isFinite(actor.x)))).toBe(true);
     expect(withEvidenceTraffic(scene('other-cam'), conditions).actors).toHaveLength(1);
     expect(withEvidenceTraffic(scene('cam-1', [-73.99, 40.72]), conditions).actors).toHaveLength(1);
+  });
+
+  it('adds the obstruction hazard only where the evidence applies, without touching the chosen plan', () => {
+    const plan = preset('car-crash');
+    const blocked = evidenceConditions(report([fact('obstruction', 'other', null)]), camera);
+    expect(withEvidenceHazard(scene(), blocked, plan)).toEqual(preset('stalled-vehicle'));
+    expect(withEvidenceHazard(scene('cam-2'), blocked, plan)).toBe(plan);
+    expect(withEvidenceHazard(scene('cam-1', [origin[0] + 0.01, origin[1]]), blocked, plan)).toBe(plan);
+    expect(withEvidenceHazard(scene(), evidenceConditions(report([]), camera), plan)).toBe(plan);
   });
 });

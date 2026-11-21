@@ -1,5 +1,7 @@
 import { createPath, routePosition } from '../agent/physics';
 import type { ExtractionReport } from '../evidence/api';
+import { preset } from './events';
+import type { ScenarioPlan } from './events';
 import type { ActorDefinition, CameraSource, LngLat, ScenarioBundle } from '../types';
 
 /** What one accepted Hydrogen extraction contributes to a simulator drive at that camera. */
@@ -34,6 +36,11 @@ export function evidenceApplies(scenario: ScenarioBundle, conditions: EvidenceCo
   const [lng, lat] = scenario.origin, [cameraLng, cameraLat] = conditions.coordinates;
   const metres = Math.hypot((lng - cameraLng) * 111_320 * Math.cos(lat * Math.PI / 180), (lat - cameraLat) * 111_320);
   return metres <= NEAR_CAMERA_M;
+}
+
+/** An observed obstruction becomes a stalled-vehicle hazard, but only on drives the evidence applies to. */
+export function withEvidenceHazard(scenario: ScenarioBundle, conditions: EvidenceConditions | null, plan: ScenarioPlan): ScenarioPlan {
+  return evidenceApplies(scenario, conditions) && conditions.obstruction ? preset('stalled-vehicle') : plan;
 }
 
 export function withEvidenceTraffic(scenario: ScenarioBundle, conditions: EvidenceConditions | null): ScenarioBundle {
