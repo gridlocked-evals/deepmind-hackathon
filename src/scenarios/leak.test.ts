@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { demoScenario } from '../scene/DemoScenarioProvider';
 import { advanceDriver, createDriverSimulation, driverFrame, driverObservation, prepareDriverDecision } from '../agent/physics';
 import type { DriverSimulation } from '../agent/physics';
@@ -7,6 +7,8 @@ import type { DriverDecision } from '../agent/types';
 import { createEvents, preset, requestEvent, withEventActors } from './events';
 import type { EventSpec, ScenarioPlan } from './events';
 import { beginDecision, createTrace, recordFrame } from './trace';
+import { loop } from './adversaryHarness';
+import type { AttackDecision } from './adversary';
 
 // #91 / Discussion #70 (b): two runs with identical visible history up to t but a different hidden
 // future must send byte-identical driver payloads at every decision step before t.
@@ -101,8 +103,16 @@ describe('no future information in the driver payload (#91, #70 b)', () => {
   // routeId filter). With the crash car's rotation, lead_gap_m and lead_speed_mps differ from an identical
   // ordinary car (e.g. at 3.1 s: 26.0644 vs 26.0745 m, 1.99988 vs 2 m/s), and a perpendicular ordinary car would be
   // ignored entirely. Fixing it changes guard behaviour for all traffic in shared physics, so it is left to #91.
-  it.fails('(e) car-crash: an ordinary actor with identical physics gives identical observations', () => {
-    expect(provenanceMismatches('car-crash')).toEqual([]);
+  it('(e) car-crash: the known provenance mismatch is confined to small lead_gap_m / lead_speed_mps differences', () => {
+    const mismatches = provenanceMismatches('car-crash');
+    expect(mismatches.length).toBeGreaterThan(0);
+    for (const { injected, ordinary } of mismatches) {
+      const a = JSON.parse(injected), b = JSON.parse(ordinary);
+      const differing = Object.keys(a).filter(key => a[key] !== b[key]);
+      expect(differing.length).toBeGreaterThan(0);
+      expect(differing.every(key => key === 'lead_gap_m' || key === 'lead_speed_mps')).toBe(true);
+      for (const key of differing) expect(Math.abs(a[key] - b[key])).toBeLessThan(.5);  // centimetres to decimetres, never a missing leader
+    }
   });
 
   // (f) Attack metadata only: ID, description, expected outcomes and trigger kind; the physical event is unchanged.
@@ -124,5 +134,29 @@ describe('no future information in the driver payload (#91, #70 b)', () => {
       // of the 3.0 s tick, so for that variant the per-tick series correctly differs at that one tick.
       if (manualAt === undefined) expect(other.ticks.map(row => row.body)).toEqual(reference.ticks.map(row => row.body));
     }
+  });
+
+  describe('(g) the real loop', () => {
+    afterEach(() => vi.unstubAllGlobals());
+    it('different Carbon reasons and hidden future attacks send identical driver requests until the visible state diverges', async () => {
+      const attack = (trigger: number, reason: string, type: AttackDecision['event_type']): AttackDecision => ({ action: 'attack', event_type: type,
+        trigger_seconds: trigger, parameters: { distanceAheadM: 60, approachSeconds: 2 }, durationSeconds: 10, reason });
+      const drive = (first: AttackDecision) => loop({ mode: 'carbon', seed: 1, guardsIgnoreHazards: true }, { carbonMs: 300, ms: 30_000,
+        carbon: body => body.previous_attacks.length ? { action: 'wait', event_type: null, trigger_seconds: null, parameters: null, durationSeconds: null, reason: 'Later.' } : first,
+        policy: observation => observation.lead_gap_m !== null && observation.lead_gap_m < 30
+          ? { action: 'stop', target_speed_mps: 0, reason: 'Stub sees an obstacle', confidence: .9 }
+          : { action: 'cruise', target_speed_mps: 6, reason: 'Stub proceeds', confidence: .8 } });
+      const a = await drive(attack(9, 'Secret plan A: crash at nine.', 'car-crash'));
+      const b = await drive(attack(21, 'Totally different plan B.', 'stalled-vehicle'));
+      // The visible state diverges at the first step whose observation shows an injected hazard in either run.
+      const firstSeen = (run: typeof a) => run.trace.steps.find(step => step.observedEventIds.length)?.step ?? Infinity;
+      const diverge = Math.min(firstSeen(a), firstSeen(b));
+      expect(diverge).toBeGreaterThan(3);
+      expect(Number.isFinite(diverge)).toBe(true);
+      expect(a.driverBodies.slice(0, diverge)).toEqual(b.driverBodies.slice(0, diverge));
+      expect(a.driverBodies.length).toBeGreaterThan(diverge);
+      expect(a.driverBodies).not.toEqual(b.driverBodies);  // not vacuous
+      for (const body of [...a.driverBodies, ...b.driverBodies]) expect(body).not.toMatch(/plan|Secret|attack|stalled|crash|trigger/i);
+    });
   });
 });

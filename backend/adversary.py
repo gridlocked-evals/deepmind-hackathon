@@ -229,18 +229,20 @@ class AdversaryController:
                         raise ValueError("Applied attack is too close to the previous attack.")
             except (ValidationError, ValueError, TypeError, AttributeError):
                 raise GatewayError(ErrorCode.INVALID_OUTPUT, request_id=getattr(result, "request_id", None)) from None
-            if decision.action == "attack" and decision.parameters.distanceAheadM < min_avoidable_distance(
-                    planning_speed(body.state, decision.trigger_seconds)):
-                raise unavoidable(request_id)
-            return AttackResponse(run_id=body.run_id, attack_index=body.attack_index, model_id=result.model_id,
-                                  request_id=request_id, decision=decision)
+            response = AttackResponse(run_id=body.run_id, attack_index=body.attack_index, model_id=result.model_id,
+                                      request_id=request_id, decision=decision)
         except GatewayError as exc:
             raise public_error(exc) from None
-        except (HTTPException, asyncio.CancelledError):
+        except asyncio.CancelledError:
             raise
         except Exception:
-            # No raw exception reaches the browser, even for an unexpected adapter bug.
+            # No raw exception reaches the browser, even an HTTPException from the gateway or an adapter bug.
             raise public_error(GatewayError(ErrorCode.UPSTREAM)) from None
+        # Raised outside the try so only this locally built HTTPException passes through unsanitized.
+        if decision.action == "attack" and decision.parameters.distanceAheadM < min_avoidable_distance(
+                planning_speed(body.state, decision.trigger_seconds)):
+            raise unavoidable(request_id)
+        return response
 
     @staticmethod
     def prompt(body: AttackRequest) -> str:

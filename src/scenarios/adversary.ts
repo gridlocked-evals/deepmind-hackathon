@@ -315,12 +315,13 @@ export function attackRecords(trace: RunTrace): AttackRecord[] {
         if (anchorProgress !== undefined && telemetry && telemetry.progress + rear > anchorProgress
           && hazards.every(actor => corners({ state: actor, def: defs.get(actor.id)! }).every(([x, y]) => (x - ego.x) * c + (y - ego.y) * s < rear))) passed = frame.time;
       }
-      if (passed === null && ego.speed < .1) held = true;
+      // The encounter's state at its end decides a safe hold, not whether the ego ever stopped.
+      if (passed === null) held = ego.speed < .1;
     });
     const contact = firstContact !== null, nearMiss = !contact && minSeparation < NEAR_MISS_M;
     const outcome: AttackOutcome = contact ? 'contact' : nearMiss ? 'near_miss' : passed !== null ? 'cleared' : 'unresolved';
     const resolvedAt = firstContact ?? passed ?? removed?.time ?? end;
-    return { ...base, void: null, outcome, resolution: outcome !== 'unresolved' ? null : held ? 'safe_hold' as const : removed ? 'removed' as const : 'horizon_censored' as const,
+    return { ...base, void: null, outcome, resolution: outcome !== 'unresolved' ? null : removed ? 'removed' as const : held ? 'safe_hold' as const : 'horizon_censored' as const,
       guardAssisted: trace.telemetry.some(item => item.time > applied.time + 1e-9 && item.time <= resolvedAt + 1e-9 && item.guard !== undefined && item.guard !== 'none'),
       minSeparationM: Number.isFinite(minSeparation) ? minSeparation : null };
   });
@@ -353,7 +354,10 @@ export function adversaryScore(records: AttackRecord[]) {
   const scored = records.filter(row => !row.void && row.outcome !== null);
   const slice = (assisted: boolean) => {
     const rows = scored.filter(row => row.guardAssisted === assisted);
-    return { cleared: rows.filter(row => row.outcome === 'cleared').length, total: rows.length };
+    // noContact and nearMiss sit beside clearance: clearance alone punishes waiting behind a lane-blocking hazard,
+    // and no-contact alone rewards stalling.
+    return { cleared: rows.filter(row => row.outcome === 'cleared').length, total: rows.length,
+      noContact: rows.filter(row => row.outcome !== 'contact').length, nearMiss: rows.filter(row => row.outcome === 'near_miss').length };
   };
   const unassisted = slice(false), assisted = slice(true);
   const outcomes = { contact: 0, near_miss: 0, cleared: 0, unresolved: 0 };
