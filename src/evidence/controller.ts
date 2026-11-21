@@ -1,5 +1,5 @@
 import type { CameraSource } from '../types';
-import { EvidenceError, evidenceApi, parseCapture, parseExtraction } from './api';
+import { EvidenceError, evidenceApi, parseCapture } from './api';
 import type { DemoCacheEntry } from './demoCache';
 import type { CaptureHistory, SavedCapture, EvidenceApi, ExtractionReport, EditBundle, ReferenceAttempt, GateRecord } from './api';
 export type EvidenceAction = 'starting' | 'stopping' | 'sealing' | 'snapshot' | 'extracting' | 'compiling' | 'generating' | 'gating' | 'refreshing';
@@ -69,8 +69,14 @@ export class EvidenceController {
     const capture = await this.api.seal(sourceId, state.history!, state.selection![0], state.selection![1]); this.update(sourceId, { capture, ...downstream });
   });
   loadCached = (entry: DemoCacheEntry) => this.action('refreshing', async sourceId => {
-    const capture = parseCapture(entry.saved, sourceId), extraction = entry.extraction ? parseExtraction(entry.extraction, capture) : null;
-    this.update(sourceId, { capture, ...downstream, ...(extraction && { extraction, extractions: [extraction] }) });
+    const capture = parseCapture(entry.saved, sourceId);
+    this.update(sourceId, { capture, ...downstream });
+  });
+  loadCachedExtraction = (entry: DemoCacheEntry, token: string) => this.action('refreshing', async (sourceId, state) => {
+    const capture = parseCapture(entry.saved, sourceId);
+    if (!entry.extractionId || state.capture?.capture.id !== capture.capture.id) throw new EvidenceError('Load this cached capture before its retained observations.');
+    const extraction = await this.api.extraction(capture, entry.extractionId, token);
+    this.update(sourceId, { extraction, extractions: [...state.extractions.filter(report => report.id !== extraction.id), extraction] });
   });
   snapshot = () => this.action('snapshot', async sourceId => { const capture = await this.api.snapshot(sourceId); this.update(sourceId, { capture, ...downstream }); });
   extract = (token: string) => this.action('extracting', async (sourceId, state) => {

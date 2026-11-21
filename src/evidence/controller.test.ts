@@ -20,7 +20,7 @@ const reference: ReferenceAttempt = { id: fixture.referenceImage.id, streetEditI
 const gate: GateRecord = { gateDecision: fixture.referenceGate as GateDecision, referenceImageId: reference.id, streetEditId: edit.streetEdit.id, state: 'accept', feedback: null };
 function mockApi(): EvidenceApi {
   return { history: vi.fn(async camera => history(camera)), recording: vi.fn(async (camera, action) => ({ ...history(camera), recording: action === 'start' })),
-    seal: vi.fn(async camera => saved(camera)), snapshot: vi.fn(async camera => saved(camera)), extract: vi.fn(async source => report(source.capture.cameraId)),
+    seal: vi.fn(async camera => saved(camera)), snapshot: vi.fn(async camera => saved(camera)), extract: vi.fn(async source => report(source.capture.cameraId)), extraction: vi.fn(async source => report(source.capture.cameraId)),
     options: vi.fn(async () => ({ presets: {}, styles: {}, maxReferenceAttempts: 3 })), edit: vi.fn(async () => edit), reference: vi.fn(async () => reference),
     references: vi.fn(async () => ({ attempts: [reference], gates: [gate] })), gate: vi.fn(async () => gate) };
 }
@@ -41,6 +41,46 @@ describe('canonical capture and bounded evidence', () => {
   });
 });
 describe('explicit per-camera workflow', () => {
+  it('loads public cached footage without accepting legacy embedded extraction bodies', async () => {
+    const api = mockApi(), controller = new EvidenceController(api);
+    controller.select({ id: cameraId });
+    const legacy = { kind: 'hls' as const, saved: saved(), extraction: report(), extractionId: report().id };
+    await controller.loadCached(legacy);
+    expect(controller.getSnapshot().capture?.capture.id).toBe(saved().capture.id);
+    expect(controller.getSnapshot().extraction).toBeNull();
+    expect(api.extraction).not.toHaveBeenCalled();
+    expect(api.extract).not.toHaveBeenCalled();
+  });
+  it('keeps a retained extraction with its capture after a camera switch, without a model call', async () => {
+    const api = mockApi(), pending = deferred<ExtractionReport>(), controller = new EvidenceController(api);
+    api.extraction = vi.fn(() => pending.promise);
+    const cached = { kind: 'hls' as const, saved: saved(), extractionId: report().id };
+    controller.select({ id: cameraId });
+    await controller.loadCached(cached);
+    const loading = controller.loadCachedExtraction(cached, token);
+    await controller.loadCachedExtraction(cached, token);
+    controller.select({ id: 'other-camera' });
+    pending.resolve(report()); await loading;
+    expect(controller.getSnapshot().extraction).toBeNull();
+    controller.select({ id: cameraId });
+    expect(controller.getSnapshot().extraction?.id).toBe(cached.extractionId);
+    expect(api.extraction).toHaveBeenCalledExactlyOnceWith(saved(), cached.extractionId, token);
+    expect(api.extract).not.toHaveBeenCalled();
+  });
+  it('retains cached footage after an unauthorized report load without falling back to paid extraction', async () => {
+    const api = mockApi(), controller = new EvidenceController(api);
+    api.extraction = vi.fn(async () => { throw new EvidenceError('Enter the operator token'); });
+    const cached = { kind: 'hls' as const, saved: saved(), extractionId: report().id };
+    controller.select({ id: cameraId });
+    await controller.loadCachedExtraction(cached, token);
+    expect(api.extraction).not.toHaveBeenCalled();
+    await controller.loadCached(cached);
+    await controller.loadCachedExtraction(cached, token);
+    expect(controller.getSnapshot().capture?.capture.id).toBe(saved().capture.id);
+    expect(controller.getSnapshot().extraction).toBeNull();
+    expect(controller.getSnapshot().error?.message).toBe('Enter the operator token');
+    expect(api.extract).not.toHaveBeenCalled();
+  });
   it('retains stopped history without starting extraction', async () => { const api = mockApi(), controller = new EvidenceController(api); controller.select({ id: cameraId }); await controller.start(); await controller.stop(); expect(controller.getSnapshot().history?.recording).toBe(false); expect(validInterval(controller.getSnapshot().history, controller.getSnapshot().selection)).toBe(true); expect(api.extract).not.toHaveBeenCalled(); });
   it('ignores a stale history response after switching cameras', async () => { const api = mockApi(), pending = deferred<CaptureHistory>(); api.history = vi.fn(() => pending.promise); const controller = new EvidenceController(api); controller.select({ id: cameraId }); const running = controller.refresh(); controller.select({ id: 'other-camera' }); pending.resolve(history()); await running; expect(controller.getSnapshot().sourceId).toBe('other-camera'); expect(controller.getSnapshot().history).toBeNull(); });
   it('keeps slow paid results with their source and never retries automatically', async () => { const api = mockApi(), pending = deferred<ExtractionReport>(); api.extract = vi.fn(() => pending.promise); const controller = new EvidenceController(api); controller.select({ id: cameraId }); await controller.snapshot(); const running = controller.extract(token); await controller.extract(token); controller.select({ id: 'other-camera' }); pending.resolve(report()); await running; expect(controller.getSnapshot().extraction).toBeNull(); controller.select({ id: cameraId }); expect(controller.getSnapshot().extraction?.id).toBe(report().id); expect(api.extract).toHaveBeenCalledTimes(1); });
@@ -56,6 +96,19 @@ describe('explicit per-camera workflow', () => {
   it('retains failed generated attempts separately from the last accepted image gate', async () => { const api = mockApi(), controller = new EvidenceController(api); controller.select({ id: cameraId }); await controller.snapshot(); await controller.extract(token); await controller.compile(fixture.observationBatch.id, 'Bike lane', 'protected_bike_lane', token); await controller.generate('photoreal', null, token); await controller.gate(token); api.reference = vi.fn(async () => ({ ...reference, id: 'ref_failed-attempt', attempt: 2, status: 'failed' as const, referenceImage: null })); await controller.generate('photoreal', null, token); expect(controller.getSnapshot().references).toHaveLength(2); expect(controller.getSnapshot().gates[0].referenceImageId).toBe(reference.id); expect(controller.getSnapshot().selectedReferenceId).toBe('ref_failed-attempt'); });
 });
 describe('operator auth, optional world and truthful gate', () => {
+  it('loads retained observations by protected GET and verifies requested report and capture identities', async () => {
+    const fetch = vi.fn(async () => new Response(JSON.stringify(report()), { status: 200 })); vi.stubGlobal('fetch', fetch);
+    await expect(evidenceApi.extraction(saved(), report().id, '')).rejects.toThrow('WORLD_API_TOKEN');
+    expect(fetch).not.toHaveBeenCalled();
+    await expect(evidenceApi.extraction(saved(), report().id, token)).resolves.toMatchObject({ id: report().id });
+    expect(fetch).toHaveBeenCalledWith(`/api/observations/extractions/${report().id}`, expect.objectContaining({ headers: { Authorization: `Bearer ${token}` } }));
+    const options = (fetch.mock.calls[0] as unknown as [string, RequestInit])[1];
+    expect(options.method ?? 'GET').toBe('GET'); expect(options.body).toBeUndefined();
+    fetch.mockResolvedValueOnce(new Response(JSON.stringify({ ...report(), id: 'extract_different' })));
+    await expect(evidenceApi.extraction(saved(), report().id, token)).rejects.toThrow('requested identity');
+    fetch.mockResolvedValueOnce(new Response(JSON.stringify({ ...report(), captureId: 'capture_different' })));
+    await expect(evidenceApi.extraction(saved(), report().id, token)).rejects.toThrow('saved source evidence');
+  });
   it('uses canonical generated schema for new domain contracts', () => { expect(parseContract('StreetEdit', fixture.streetEdit).id).toBe(fixture.streetEdit.id); expect(() => parseContract('Capture', { ...fixture.capture, schemaVersion: '1.0' })).toThrow(); });
   it('keeps Bearer token in headers and blocks empty token before any paid request', async () => {
     const fetch = vi.fn<(url: string, options?: RequestInit) => Promise<Response>>(async () => new Response(JSON.stringify(report()), { status: 200 })); vi.stubGlobal('fetch', fetch);
