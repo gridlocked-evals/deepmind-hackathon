@@ -17,14 +17,16 @@ done
 S=$(cat $L/serve_gpu${GPU}_start_epoch.txt); Rd=$(cat $L/serve_gpu${GPU}_ready_epoch.txt)
 echo "LOAD_S $(python3 -c "print(round($Rd-$S,1))")"
 nvidia-smi --query-compute-apps=pid,used_memory --format=csv > $R/gpu_after_load.csv; cat $R/gpu_after_load.csv
-export BENCH_GPU=$GPU
+export BENCH_GPU=$GPU; FAILED=0
 for tag in cold warm; do
   ts=$(date +%s.%N)
-  $PY $HERE/bench.py --port $PORT --frames $FR --gpu $GPU --out $R/$tag > $R/$tag.out 2>&1
-  echo "BENCH_$tag rc=$? wall=$(python3 -c "import time;print(round(time.time()-$ts,1))")"
+  $PY $HERE/bench.py --port $PORT --frames $FR --gpu $GPU --out $R/$tag > $R/$tag.out 2>&1; rc=$?
+  echo "BENCH_$tag rc=$rc wall=$(python3 -c "import time;print(round(time.time()-$ts,1))")"
   grep -E '"(gen_wall_s|throughput_fps|gpu_mem_peak_mib|error|status)"' $R/$tag/bench_result.json 2>/dev/null | head
+  [ $rc -eq 0 ] || { echo "BENCH_$tag FAILED, skipping remaining runs"; FAILED=1; break; }
 done
 grep -nE 'attention backend|Sim-Auto rollout|Chunk [0-9]+/|finished in|stages created|Uvicorn|Error|Traceback' $L/serve_gpu$GPU.log | tail -200 > $R/serve_key_lines.txt
 cp -r $L/perf_gpu$GPU $R/ 2>/dev/null
 echo "TOTAL_PIPELINE_S $(python3 -c "import time;print(round(time.time()-$T0,1))")"
 echo PIPELINE_DONE  # server left running for more workers / reuse
+exit $FAILED  # callers must see a failed bench, after logs are collected

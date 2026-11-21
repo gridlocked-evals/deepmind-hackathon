@@ -119,6 +119,8 @@ def main():
         result["gpu_mem_samples"] = len(samples)
     json.dump(result, open(os.path.join(a.out, "bench_result.json"), "w"), indent=2, default=str)
     print(json.dumps({k: v for k, v in result.items() if k != "polls"}, indent=2, default=str))
+    # nonzero unless the video was generated and downloaded, so wrappers stop instead of benching a busy server
+    return 0 if "mp4" in result and "error" not in result else 1
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
