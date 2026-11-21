@@ -81,7 +81,9 @@ def accept_facts(output: HydrogenOutput, manifest: dict, window: dict, frames: l
             raise ValueError("Evidence time is not bounded by cited frames")
         if fact.kind == 'count' and (len(times) != 1 or abs(fact.time.startS-times[0]) > 1e-6 or abs(fact.time.endS-times[0]) > 1e-6):
             raise ValueError("Visible counts must describe one exact frame")
-        if fact.kind == 'event' and (not motion or len(times) < 2 or min(times) == max(times)):
+        if fact.kind == 'event' and (not motion or len(times) < 2 or min(times) == max(times)
+                or len({f['frameSha256'] for f, _ in cited}) < 2
+                or len({image['sha256'] for _, image in cited}) < 2):
             raise ValueError("Temporal claims require distinct continuous-media observations")
         row = fact.model_dump(mode='json')
         row['id'] = new_id('ob')
