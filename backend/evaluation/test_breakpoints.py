@@ -8,6 +8,7 @@ from backend.evaluation.breakpoints import (
     media_ref, paired_bootstrap,
 )
 from backend.evaluation.manifest import Outcome
+from backend.gateway.contracts import ErrorCode
 
 
 def sweep(**extra):
@@ -53,13 +54,39 @@ def test_abstention_is_not_false_acceptance():
 
 def test_outage_is_inconclusive_not_breakpoint():
     s = sweep()
+    transport = dict(counts={Outcome.ERROR: 2}, errors={ErrorCode.TRANSPORT: 2})
     results = [res(s, 0.0, observation_quality=.9),
-               res(s, .25, observation_quality=.1, counts={Outcome.ERROR: 2}),
-               res(s, .5, observation_quality=.1, provider_outage=True)]
-    assert classify(s, results[1]) == ("inconclusive", "provider_outage")
-    bp = find_breakpoint(s, results)
+               res(s, .25, observation_quality=.1, **transport),
+               res(s, .5, observation_quality=.1, provider_outage=True, **transport)]
+    assert classify(s, results[1]) == ("inconclusive", "provider_outage")  # no other results: code rule alone
+    bp = find_breakpoint(s, results)  # transport errors spread across settings
     assert bp.status == "incomplete_within_tested_range" and bp.first_fail is None
     assert bp.last_pass == 0.0 and bp.inconclusive == [.25, .5] and bp.untested == [.75]
+
+
+def test_timeouts_at_a_setting_are_the_breakpoint():
+    s = sweep(dimension="input_length_s", baseline={"style": "photo"})
+    results = [res(s, 0.0, observation_quality=.9),
+               res(s, .25, observation_quality=.9, counts={Outcome.ERROR: 3},
+                   errors={ErrorCode.TIMEOUT: 2, ErrorCode.TRANSPORT: 1}, provider_outage=True)]
+    bp = find_breakpoint(s, results)
+    assert (bp.status, bp.last_pass, bp.first_fail, bp.reason) == ("found", 0.0, .25, "errors_at_limit")
+    # transport-only errors confined to one setting while others ran clean are a limit, not an outage
+    confined = res(s, .25, observation_quality=.9, errors={ErrorCode.TRANSPORT: 1})
+    assert classify(s, confined, [results[0]]) == ("fail", "errors_at_limit")
+
+
+def test_outage_flag_needs_evidence():
+    s = sweep()
+    assert classify(s, res(s, .5, observation_quality=.9, provider_outage=True)) == ("pass", "criterion_met")
+    assert classify(s, res(s, .5, observation_quality=.9, provider_outage=True, counts={Outcome.ERROR: 1})) == (
+        "fail", "errors_at_limit")  # an error with no code is not evidence
+
+
+def test_false_acceptance_beats_outage():
+    s = sweep()
+    r = res(s, .5, observation_quality=.9, false_acceptance=.1, errors={ErrorCode.TRANSPORT: 1}, provider_outage=True)
+    assert classify(s, r) == ("fail", "unsafe_false_acceptance")
 
 
 def test_breakpoint_found_and_incomplete():
@@ -107,6 +134,11 @@ def test_one_rerun_allowed_only_after_an_outage(tmp_path):
     log = SweepLog(tmp_path / "s.jsonl")
     sha = log.freeze(s)
     log.record(SettingResult(sweep_sha256=sha, setting=0.0, provider_outage=True))
+    with pytest.raises(ValueError, match="no reruns"):  # the flag alone is no outage
+        log.record(SettingResult(sweep_sha256=sha, setting=0.0, observation_quality=.9))
+    log = SweepLog(tmp_path / "s2.jsonl")
+    sha = log.freeze(s)
+    log.record(SettingResult(sweep_sha256=sha, setting=0.0, errors={ErrorCode.QUOTA: 1}))
     log.record(SettingResult(sweep_sha256=sha, setting=0.0, observation_quality=.9))  # rerun after outage
     assert find_breakpoint(s, log.results()).last_pass == 0.0
     with pytest.raises(ValueError, match="no reruns"):  # no second rerun, and never after a real result

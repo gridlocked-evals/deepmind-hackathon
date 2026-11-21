@@ -16,7 +16,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from backend.evaluation.manifest import Outcome, Sha256
-from backend.gateway.contracts import Identifier, canonical, digest
+from backend.gateway.contracts import ErrorCode, Identifier, canonical, digest
 
 Dimension = Literal["input_length_s", "visual_degradation", "style", "job_load", "world_duration_s"]
 Metric = Literal["observation_quality", "false_acceptance", "drift", "control_age_s", "coverage",
@@ -68,7 +68,13 @@ class SettingResult(BaseModel):
     latency_ms: float | None = None
     cost_usd: float | None = None
     counts: dict[Outcome, int] = {}  # attempts by manifest.Outcome
-    provider_outage: bool = False  # flagged unrelated API outage
+    errors: dict[ErrorCode, int] = {}  # errored attempts by gateway ErrorCode
+    provider_outage: bool = False  # caller's suspicion; ignored unless `errors` is evidence of an outage
+
+
+# Connection, rate-limit and quota failures say nothing about the input. UPSTREAM is excluded (it also
+# covers 4xx rejections of the input itself), as are TIMEOUT and CONCURRENCY (often the real limit on job_load).
+INFRASTRUCTURE_ERRORS = frozenset({ErrorCode.TRANSPORT, ErrorCode.QUOTA})
 
 
 MAX_OUTAGE_RERUNS = 1
@@ -107,7 +113,7 @@ class SweepLog:
         earlier = [r for r in self.results() if r.setting == result.setting]
         # Only an outage may be rerun, once: a rerun after a real pass/fail would be retry-until-pass.
         if earlier and (len(earlier) > MAX_OUTAGE_RERUNS
-                        or any(classify(sweep, r)[1] != "provider_outage" for r in earlier)):
+                        or any(classify(sweep, r, self.results())[1] != "provider_outage" for r in earlier)):
             raise ValueError(f"setting {result.setting!r} already has a result; no reruns except one after an outage")
         _append(self.path, result)
 
@@ -124,14 +130,32 @@ def _append(path: Path, model: BaseModel) -> None:
 Status = Literal["pass", "fail", "inconclusive"]
 
 
-def classify(sweep: Sweep, result: SettingResult) -> tuple[Status, str]:
-    """Outage/error -> inconclusive; unsafe false acceptance and abstention at an information limit are distinct failures."""
+def _codes(result: SettingResult) -> set[ErrorCode]:
+    return {code for code, n in result.errors.items() if n}
+
+
+def _outage(result: SettingResult, others: list[SettingResult]) -> bool:
+    """Only infrastructure errors, and (if other settings have results) seen at another setting too."""
+    codes = _codes(result)
+    if not codes or not codes <= INFRASTRUCTURE_ERRORS:
+        return False
+    others = [r for r in others if r.setting != result.setting]
+    return not others or any(codes & _codes(r) for r in others)
+
+
+def classify(sweep: Sweep, result: SettingResult, others: list[SettingResult] = ()) -> tuple[Status, str]:
+    """Unsafe false acceptance fails first; evidence-backed outage -> inconclusive; errors and abstention at a limit fail.
+
+    `others` are the sweep's other recorded results, used to tell a sweep-wide outage from a limit.
+    """
     if result.sweep_sha256 != sweep.sha256:
         raise ValueError("result belongs to a different sweep")
-    if result.provider_outage or result.counts.get(Outcome.ERROR, 0):
-        return "inconclusive", "provider_outage"  # an API outage is not the multimodal breakpoint
-    if result.false_acceptance:
+    if result.false_acceptance:  # first: an unsafe acceptance is never excused (or made re-runnable) by an outage
         return "fail", "unsafe_false_acceptance"
+    if _outage(result, list(others)):
+        return "inconclusive", "provider_outage"  # an API outage is not the multimodal breakpoint
+    if result.errors or result.counts.get(Outcome.ERROR, 0):
+        return "fail", "errors_at_limit"  # timeouts/invalid output at this setting are the measured limit
     criterion = sweep.criterion
     value = getattr(result, criterion.metric)
     if value is None:
@@ -159,7 +183,7 @@ def find_breakpoint(sweep: Sweep, results: list[SettingResult]) -> Breakpoint:
         if setting not in by_setting:
             untested.append(setting)
             continue
-        status, reason = classify(sweep, by_setting[setting])
+        status, reason = classify(sweep, by_setting[setting], results)
         if status == "fail":
             return Breakpoint(status="found", last_pass=last_pass, first_fail=setting, reason=reason,
                               inconclusive=inconclusive, untested=untested)
