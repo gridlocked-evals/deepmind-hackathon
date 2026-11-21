@@ -50,7 +50,7 @@ function harness(overrides: Partial<JourneyOptions> = {}) {
   const observations: { run: string; step: number; observation: DriverObservation }[] = [];
   const onScene = vi.fn(), onFrame = vi.fn();
   const options: JourneyOptions = { signal: controller.signal, route, clock, random: () => 0, uuid: () => `fixture-run-${++serial}`,
-    adversaryUrl: '/api/adversary/attack', onScene, onFrame,
+    adversaryUrl: '/api/adversary/attack', scriptedOpening: false, onScene, onFrame,
     onUpdate: next => { snapshot = next; }, onTrace: trace => traces.push(trace),
     driver: async (run, step, observation) => {
       observations.push({ run, step, observation });
@@ -76,6 +76,38 @@ it('continues beyond 60 decisions in place and records separate bounded windows'
   await h.stop();
   const count = h.observations.length; await h.clock.advance(5000);
   expect(h.observations).toHaveLength(count); expect(h.clock.frames.size).toBe(0);
+});
+
+it('starts with both scripted passes without model calls, then hands the same car to the live agents', async () => {
+  const fetch = carbon();
+  const h = harness({ scriptedOpening: true });
+  await h.clock.advance(20_000);
+  expect(h.snapshot().phase).toBe('opening');
+  expect(h.snapshot().opening?.events[0].rejoinedAt).not.toBeNull();
+  expect(h.snapshot().opening?.events[1].appliedAt).not.toBeNull();
+  expect(h.observations).toHaveLength(0); expect(fetch).not.toHaveBeenCalled();
+  await h.clock.advance(25_000);
+  expect(h.snapshot().opening?.complete).toBe(true);
+  expect(h.snapshot().windows).toBe(2);
+  expect(fetch).toHaveBeenCalled(); expect(h.observations.length).toBeGreaterThan(0);
+  expect(h.traces[0].modelSource).toBe('scripted-demo');
+  expect(h.traces[0].terminal.reason).toBe('scripted-complete');
+  const last = h.traces[0].frames.at(-1)!.actors.find(actor => actor.id === 'ego')!;
+  const first = h.snapshot().trace!.frames[0].actors.find(actor => actor.id === 'ego')!;
+  expect(first).toEqual(last);
+  expect(h.onScene).toHaveBeenCalledTimes(1);
+  await h.stop();
+});
+
+it('Stop during the opening cancels motion and prevents live API calls', async () => {
+  const fetch = carbon();
+  const h = harness({ scriptedOpening: true }); await h.clock.advance(8000); await h.stop();
+  const frames = h.onFrame.mock.calls.length; await h.clock.advance(50_000);
+  expect(h.onFrame).toHaveBeenCalledTimes(frames);
+  expect(h.observations).toHaveLength(0); expect(fetch).not.toHaveBeenCalled();
+  expect(h.traces[0].terminal.reason).toBe('interrupted');
+  expect(h.traces[0].scriptedOpening?.complete).toBe(false);
+  expect(h.clock.frames.size).toBe(0);
 });
 
 it('restarts a stalled car from a different NYC start after 25 simulated seconds', async () => {

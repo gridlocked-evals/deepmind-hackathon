@@ -9,19 +9,21 @@ import { adversaryBarrier, ADVERSARY_PLAN, attackRecords } from '../scenarios/ad
 import type { AttackRecord } from '../scenarios/adversary';
 import { createEvents, withEventActors } from '../scenarios/events';
 import { beginDecision, createTrace, finishTrace, recordFrame } from '../scenarios/trace';
-import type { RunTrace, Terminal, TraceStep } from '../scenarios/trace';
+import type { RunTrace, ScriptedOpeningTrace, Terminal, TraceStep } from '../scenarios/trace';
 import type { ScenarioBundle, SimulationFrame } from '../types';
 import { ProgressWatch, randomStop, STUCK_SECONDS } from './route';
+import { createOpening, playOpening } from './opening';
 
 export interface JourneySnapshot {
   trip: number; restarts: number; windows: number; distanceM: number; seconds: number; decisions: number;
-  speedMps: number; routeLabel: string; phase: 'routing' | 'driving' | 'thinking'; driverAction: string;
+  speedMps: number; routeLabel: string; phase: 'routing' | 'opening' | 'driving' | 'thinking'; driverAction: string;
+  opening: ScriptedOpeningTrace | null;
   attacks: (AttackRecord & { window: number })[];
   restartsLog: { trip: number; atSeconds: number; reason: string }[];
   trace: RunTrace | null;
 }
 export const emptySnapshot = (): JourneySnapshot => ({ trip: 0, restarts: 0, windows: 0, distanceM: 0, seconds: 0,
-  decisions: 0, speedMps: 0, routeLabel: '', phase: 'routing', driverAction: 'Waiting', attacks: [], restartsLog: [], trace: null });
+  decisions: 0, speedMps: 0, routeLabel: '', phase: 'routing', driverAction: 'Waiting', opening: null, attacks: [], restartsLog: [], trace: null });
 
 export interface JourneyOptions {
   signal: AbortSignal;
@@ -35,6 +37,8 @@ export interface JourneyOptions {
   random?: () => number;
   uuid?: () => string;
   clock?: DriverClock;
+  /** The UI always includes the authored opening; false isolates live-agent tests. */
+  scriptedOpening?: boolean;
 }
 
 /** Reuses #97's adversary, injector, outcomes and barriers. Windows retain ego position
@@ -43,7 +47,8 @@ export async function runJourney(options: JourneyOptions): Promise<void> {
   const { signal, random = Math.random, uuid = () => crypto.randomUUID() } = options;
   const stats = emptySnapshot();
   let origin = randomStop(null, random);
-  const publish = () => options.onUpdate({ ...stats, attacks: [...stats.attacks], restartsLog: [...stats.restartsLog] });
+  const publish = () => options.onUpdate({ ...stats, opening: stats.opening ? structuredClone(stats.opening) : null,
+    attacks: [...stats.attacks], restartsLog: [...stats.restartsLog] });
   while (!signal.aborted) {
     stats.phase = 'routing'; publish();
     const destination = randomStop(origin, random);
@@ -52,9 +57,34 @@ export async function runJourney(options: JourneyOptions): Promise<void> {
     stats.trip++; stats.routeLabel = `${origin.label} → ${destination.label}`;
     const scene = withEventActors(createRouteScenario(route, { ...origin, label: stats.routeLabel }, ''), ADVERSARY_PLAN);
     let state: DriverSimulation = createDriverSimulation(scene);
+    const opening = stats.trip === 1 && options.scriptedOpening !== false ? createOpening(state, uuid()) : null;
+    if (opening) state = opening.state;
+    options.onScene(scene, driverFrame(state));
+    if (opening) {
+      stats.windows++; stats.trace = opening.trace; stats.opening = opening.result; stats.phase = 'opening';
+      stats.driverAction = 'Scripted slow pass'; publish();
+      let terminal: Terminal = 'interrupted', message: string | null = null;
+      try {
+        state = await playOpening(opening, { signal, clock: options.clock,
+          onFrame(before, next) {
+            state = next; stats.distanceM += next.progress - before.progress; stats.seconds += next.time - before.time;
+            options.onFrame(driverFrame(state));
+          },
+          onPublish() { stats.speedMps = state.speed; publish(); },
+        });
+        terminal = 'scripted-complete';
+      } catch (failure) {
+        if (!signal.aborted) { terminal = 'error'; message = failure instanceof Error ? failure.message : 'Opening failed.'; }
+        throw failure;
+      } finally {
+        finishTrace(opening.trace, state, terminal, message); options.onTrace(opening.trace); publish();
+      }
+      // Carry actual position and speed into live driving, with no scripted pose or policy remaining.
+      state = { ...state, scriptedPose: undefined, control: undefined };
+      stats.driverAction = 'Waiting for Gemini Decisions';
+    }
     const watch = new ProgressWatch({ time: stats.seconds, progress: state.progress });
     let stuck = false, arrived = false;
-    options.onScene(scene, driverFrame(state));
     while (!signal.aborted && !stuck && !arrived) {
       stats.windows++;
       // Start another bounded #97 run without teleporting the ego or changing its velocity.
