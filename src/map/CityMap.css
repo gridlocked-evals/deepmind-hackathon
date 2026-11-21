@@ -1,0 +1,27 @@
+.city-map-root,.city-map-canvas{position:absolute;inset:0;overflow:hidden;background:#09121b}
+.city-map-root{isolation:isolate}
+.city-map-canvas .maplibregl-canvas:focus-visible{outline:2px solid #a4ffe1;outline-offset:-3px}
+.city-map-root .maplibregl-ctrl-bottom-right{right:16px;bottom:1px}
+.city-map-root .maplibregl-ctrl-top-right{right:16px;top:auto;bottom:var(--map-navigation-bottom,120px);transition:bottom .3s ease}
+.city-map-root .maplibregl-ctrl-group{overflow:hidden;background:rgba(13,25,34,.92);box-shadow:0 0 0 1px rgba(158,192,206,.16);border-radius:7px}
+.city-map-root .maplibregl-ctrl-group button{width:34px;height:34px}
+.city-map-root .maplibregl-ctrl-group button+button{border-top:1px solid rgba(158,192,206,.12)}
+.city-map-root .maplibregl-ctrl-group button:hover{background:rgba(133,238,210,.12)}
+.city-map-root .maplibregl-ctrl-group button:focus-visible{outline:2px solid #a4ffe1;outline-offset:-2px}
+.city-map-root .maplibregl-ctrl-icon{filter:invert(.84) sepia(.08) saturate(.7) hue-rotate(125deg)}
+.city-map-root .maplibregl-ctrl-attrib{color:#76919e;background:rgba(9,18,27,.76);font:10px/1.5 ui-sans-serif,system-ui,sans-serif}
+.city-map-root .maplibregl-ctrl-attrib a{color:#88a2af}
+.city-map-root .maplibregl-ctrl-attrib-button{filter:invert(.7)}
+.city-map-loading{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;gap:12px;pointer-events:none;color:#a1bac6;font-size:12px;letter-spacing:.025em}
+.city-map-loading span{width:7px;height:7px;border-radius:50%;background:#a4ffe1;animation:map-pulse 1.3s ease infinite}
+.map-context-status{position:absolute;left:50%;bottom:var(--map-status-bottom,120px);transform:translateX(-50%);display:flex;align-items:center;gap:8px;max-width:90%;white-space:nowrap;padding:8px 11px;background:rgba(9,18,27,.9);border:1px solid #273c49;border-radius:5px;color:#91a7b3;font-size:10px;z-index:1}
+.map-context-status__dot{width:5px;height:5px;flex:0 0 5px;background:#d8b476;border-radius:50%}
+.map-context-status__dot.is-loading{background:#a4ffe1;animation:map-pulse 1.3s ease infinite}
+.map-context-status button{border:0;background:transparent;padding:0 0 0 6px;color:#c2f8e8;font:inherit;cursor:pointer}
+.map-context-status button:focus-visible{outline:1px solid #a4ffe1;outline-offset:3px}
+.map-error{position:absolute;left:50%;top:48%;transform:translate(-50%,-50%);width:min(320px,80%);padding:24px;border:1px solid #344c5b;background:#0d1b26;color:#d8e4ec;border-radius:8px}
+.map-error strong{font-size:15px;font-weight:500}
+.map-error p{font-size:12px;line-height:1.6;color:#8ea7b6;margin:10px 0 0}
+@keyframes map-pulse{50%{opacity:.35}}
+@media(max-width:760px){.city-map-root .maplibregl-ctrl-bottom-right,.city-map-root .maplibregl-ctrl-top-right{right:4px}}
+@media(prefers-reduced-motion:reduce){.city-map-loading span,.map-context-status__dot.is-loading{animation:none}.city-map-root .maplibregl-ctrl-top-right{transition:none}}
