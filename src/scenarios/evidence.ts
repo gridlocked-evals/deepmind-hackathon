@@ -2,8 +2,6 @@ import { createPath, routePosition } from '../agent/physics';
 import { preset } from './events';
 import type { ScenarioPlan } from './events';
 import type { ExtractionReport } from '../evidence/api';
-import { preset } from './events';
-import type { ScenarioPlan } from './events';
 import type { ActorDefinition, CameraSource, LngLat, ScenarioBundle } from '../types';
 
 /** What one accepted Hydrogen extraction contributes to a simulator drive at that camera. */
