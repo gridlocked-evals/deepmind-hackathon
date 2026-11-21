@@ -75,13 +75,17 @@ def cache_video(base: str, cameras: list[dict], args) -> tuple[dict, dict]:
     for camera in cameras:
         cid, status = camera["id"], statuses.get(camera["id"], {})
         try:
-            call(base, f"/api/captures/{quote(cid)}/stop", {})
+            # A segment can land between the last poll and the stop; the clip must use the final buffer revision.
+            status = call(base, f"/api/captures/{quote(cid)}/stop", {})
         except (RuntimeError, URLError) as exc:
             print(f"  warn: could not stop {cid}: {exc}", file=sys.stderr)
         # Slow = media took too long to start, or arrived well below real time once it did.
         start_s, start_buffered = first_media.get(cid, (None, 0))
         # Measured after first arrival: the first playlist fetch returns a backlog that would inflate the rate.
-        rate = (status.get("bufferedSeconds", 0) - start_buffered) / max(1e-6, elapsed - start_s) if start_s is not None else 0
+        # Media arrives in whole segments, so allow one segment of slack before calling a feed slow.
+        bounds = status.get("history", {}).get("segmentBoundariesS") or [0]
+        slack = max((b - a for a, b in zip(bounds, bounds[1:])), default=0)
+        rate = (status.get("bufferedSeconds", 0) - start_buffered + slack) / max(1e-6, elapsed - start_s) if start_s is not None else 0
         reason = (status.get("lastError") or "no media received") if start_s is None \
             else f"first media after {start_s:.0f} s" if start_s > args.max_start_seconds \
             else f"media at {rate:.2f}x real time" if rate < args.min_realtime_ratio \
