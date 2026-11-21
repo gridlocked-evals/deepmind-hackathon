@@ -397,17 +397,53 @@ class WorldSession:
 
 
 class WorldManager:
-    def __init__(self, gateway, limits: WorldLimits | None = None):
+    def __init__(self, gateway, limits: WorldLimits | None = None, *, gates=None):
         self.gateway = gateway
         self.limits = limits or WorldLimits()
         self.references = ReferenceStore(gateway.config.data_dir)
+        # The #8 gate store. When set, every production session must claim its accepted gate.
+        self.gates = gates
         self.sessions = {}
 
     def create(self, request: WorldRequest):
         record, image = self.references.load(request)
-        return self._create(prompt=request.prompt, image=image, context=request.context,
+        if self.gates is not None:
+            self._check_gate(record)
+        session = self._create(prompt=request.prompt, image=image, context=request.context,
             seconds=request.seconds, max_usd=request.max_usd,
             provenance={**record.model_dump(), "accepted_reference": request.accepted_reference, "development_only": False})
+        if self.gates is not None:
+            self._claim(session, record)
+        return session
+
+    def _check_gate(self, record):
+        """The handoff must still match the live gate record before anything is created."""
+        from ..artifacts import ArtifactError
+        from ..gates import authorize_world, gate_artifact
+        try:
+            auth = authorize_world(self.gates, record.reference_id, record.gate_decision_id)
+            if (auth["imageSha256"] != "sha256:" + record.reference_sha256
+                    or digest(gate_artifact(self.gates, record.gate_decision_id)) != record.gate_artifact_sha256):
+                raise ArtifactError("Gate record changed since publication.", status=409)
+        except (ArtifactError, OSError):
+            raise GatewayError(ErrorCode.INVALID_INPUT) from None
+
+    def _claim(self, session, record):
+        """Claim the accepted gate for exactly this session; no paid request is sent before a client attaches."""
+        from ..artifacts import ArtifactError
+        from ..gates import bind_world_ids, claim_world
+        try:
+            claim_world(self.gates, record.reference_id, record.gate_decision_id)
+            binding = bind_world_ids(self.gates, gate_id=record.gate_decision_id, reference_id=record.reference_id,
+                                     world_session_id="world_" + session.id,
+                                     image_sha256="sha256:" + record.reference_sha256)
+        except ArtifactError:
+            # Lost a race for the gate (or it changed): this session must never reach Genie.
+            session.reason = "gate_refused"
+            session.stopping.set()
+            self.sessions.pop(session.id, None)
+            raise GatewayError(ErrorCode.INVALID_INPUT) from None
+        session.recording.event("gate_bound", gate_decision_id=record.gate_decision_id, binding_id=binding["id"])
 
     def development(self, *, prompt, image, seconds=15, max_usd=Decimal("2.5")):
         data = valid_reference(image)
