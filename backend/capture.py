@@ -491,10 +491,13 @@ class CaptureStore:
             if path.is_file():
                 path.chmod(0o444)
         os.replace(tmp, self.root / episode_id)
-        self.enforce_budget(protect=episode_id)
-        if self.usage_bytes() > self.budget_bytes:
+        # Check fit before evicting: evicting and then rejecting this episode anyway would lose data for nothing.
+        evictable = sum(self._size(p) for p in self.root.iterdir()
+                        if _EPISODE_ID.match(p.name) and p.name != episode_id and not self.pins(p.name))
+        if self.usage_bytes() - evictable > self.budget_bytes:
             self._remove(self.root / episode_id)
             raise CaptureError("Capture budget is exhausted by pinned episodes.", budgetBytes=self.budget_bytes)
+        self.enforce_budget(protect=episode_id)
         return manifest
 
     # -- access -----------------------------------------------------------
@@ -577,6 +580,10 @@ class CaptureStore:
     def usage_bytes(self) -> int:
         return sum(f.stat().st_size for f in self.root.rglob("*") if f.is_file())
 
+    @staticmethod
+    def _size(path: Path) -> int:
+        return sum(f.stat().st_size for f in path.rglob("*") if f.is_file())
+
     def _remove(self, path: Path):
         for f in path.rglob("*"):
             f.chmod(0o644) if f.is_file() else None
@@ -593,7 +600,7 @@ class CaptureStore:
                 break
             if path.name == protect or self.pins(path.name):
                 continue
-            size = sum(f.stat().st_size for f in path.rglob("*") if f.is_file())
+            size = self._size(path)
             self._remove(path)
             usage -= size
             removed.append(path.name)
