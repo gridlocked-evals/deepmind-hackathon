@@ -146,13 +146,14 @@ function addCameraLayers(map: MapInstance) {
 /** Pick the road geometry actually visible under the pointer, never an invented grid. */
 function streetAt(map: MapInstance, pointer: maplibregl.Point): NavigationPoint | null {
   if (map.getZoom() < 13) return null;
-  const layers = map.getStyle().layers.filter(layer =>
+  const styleLayers = map.getStyle()?.layers ?? [];
+  const layers = styleLayers.filter(layer =>
     layer.type === 'line' && /road|bridge|tunnel/.test(layer.id) && !/rail|path|ferry/.test(layer.id)).map(layer => layer.id);
   if (!layers.length) return null;
   const features: Pick<maplibregl.GeoJSONFeature, 'geometry' | 'properties'>[] = map.queryRenderedFeatures([[pointer.x - 24, pointer.y - 24], [pointer.x + 24, pointer.y + 24]], { layers });
   const roadFeatureCount = features.length;
   // OpenMapTiles keeps names in a separate source layer; road paint often has none.
-  const namedLayers = map.getStyle().layers.filter(layer => layer.type === 'symbol'
+  const namedLayers = styleLayers.filter(layer => layer.type === 'symbol'
     && 'source-layer' in layer && layer['source-layer'] === 'transportation_name');
   for (const source of new Set(namedLayers.map(layer => 'source' in layer ? layer.source : '').filter(Boolean))) {
     features.push(...map.querySourceFeatures(source, { sourceLayer: 'transportation_name' }));
@@ -616,7 +617,9 @@ export default function CityMap(props: CityMapProps) {
   useEffect(() => {
     const map = mapRef.current;
     if (!map || !ready) return;
-    for (const layer of map.getStyle().layers) {
+    // Replacing the fallback style leaves getStyle() undefined until the next
+    // frame. style.load applies the latest visibility once its layers exist.
+    for (const layer of map.getStyle()?.layers ?? []) {
       if ('source' in layer && (layer.source === 'gotham-cameras' || layer.source === 'gotham-selected-camera')) {
         map.setLayoutProperty(layer.id, 'visibility', props.viewMode === 'city' ? 'visible' : 'none');
       }
