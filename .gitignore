@@ -15,3 +15,5 @@ gateway.local.json
 
 # Local browser review captures
 .impeccable/review/
+playwright-report/
+test-results/
