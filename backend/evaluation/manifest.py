@@ -199,21 +199,22 @@ class Attempt(BaseModel):
 
 
 class ResultsLedger:
-    """Append-only JSON lines; every attempt is kept, failures included."""
+    """Append-only JSON lines; every attempt is kept, failures included. `model` sets the row type."""
 
-    def __init__(self, path: str | Path):
+    def __init__(self, path: str | Path, model: type[BaseModel] = Attempt):
         self.path = Path(path)
+        self.model = model
 
-    def append(self, attempt: Attempt) -> None:
+    def append(self, attempt: BaseModel) -> None:
         with self.path.open("ab") as handle:
             handle.write(canonical(attempt.model_dump(mode="json")) + b"\n")
             handle.flush()
             os.fsync(handle.fileno())
 
-    def read(self) -> list[Attempt]:
+    def read(self) -> list:
         if not self.path.exists():
             return []
-        return [Attempt.model_validate_json(line) for line in self.path.read_bytes().splitlines() if line]
+        return [self.model.model_validate_json(line) for line in self.path.read_bytes().splitlines() if line]
 
 
 def report(attempts: list[Attempt]) -> dict:
