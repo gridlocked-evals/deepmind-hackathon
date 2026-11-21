@@ -34,4 +34,8 @@ No `LICENSE`, `COPYING`, or `NOTICE` file, or explicit license declaration in th
 
 Map rendering uses MapLibre with OpenFreeMap/OpenStreetMap data; map attribution remains visible in the interface. Camera video and images are provided by 511NY/NYSDOT and NYC DOT. Historical crash records come from NYC Open Data. Their source links and access conditions are recorded in [data sources](design/data-sources.md).
 
+Driving routes use the [OSRM Route API](https://project-osrm.org/docs/v5.24.0/api/#route-service) via the public `router.project-osrm.org` demonstration service, using [OpenStreetMap contributor data](https://www.openstreetmap.org/copyright). OSRM provides street geometry and a routing estimate; this app generates its own illustrative vehicle motion. The selected endpoint coordinates are sent directly to that service when the user requests a route. Access is best-effort and subject to the [OSRM demo-service usage policy](https://github.com/Project-OSRM/osrm-backend/wiki/Api-usage-policy); sustained production use should use an appropriately provisioned routing service. Basemap-only local previews are distinct from OSRM driving routes and do not verify directionality.
+
+The NYC DOT directory is loaded from its [official camera endpoint](https://webcams.nyctmc.org/api/cameras). [NYC DOT describes these sources](https://www.nyc.gov/html/dot/html/motorist/atis.shtml) as frequently updated still images across the five boroughs. Camera coverage and availability change over time.
+
 Third-party packages retain their own notices and license terms. This document records the interface adaptation and source attribution; it does not replace notices distributed with installed dependencies or grant rights to provider footage.
