@@ -53,4 +53,3 @@ this was not live Gemini acceptance. A stopped six-decision run exported
 IDs matching the fixture log, and the final partial hold from 15 to 16.4326 simulation
 seconds. A scripted first-request failure exported `error` with zero steps. Returning
 to replay removed the export control. Both JSON downloads were parsed and checked.
-
