@@ -4,8 +4,9 @@ GPU=$1; PORT=$2; FR=$3; TAG=$4; HERE=$(cd "$(dirname "$0")" && pwd); W=${COSMOS3
 R=$W/runs/${TAG}_gpu${GPU}_f${FR}_$(date +%H%M%S); mkdir -p $R; exec > $R/pipeline.log 2>&1
 LOGSTART=$(wc -l < $L/serve_gpu$GPU.log)
 for tag in cold warm; do ts=$(date +%s.%N)
-  $PY $HERE/bench.py --port $PORT --frames $FR --gpu $GPU --out $R/$tag > $R/$tag.out 2>&1
-  echo "BENCH_$tag rc=$? wall=$(python3 -c "import time;print(round(time.time()-$ts,1))")"; done
+  $PY $HERE/bench.py --port $PORT --frames $FR --gpu $GPU --out $R/$tag > $R/$tag.out 2>&1; rc=$?
+  echo "BENCH_$tag rc=$rc wall=$(python3 -c "import time;print(round(time.time()-$ts,1))")"
+  [ $rc -eq 0 ] || { echo "BENCH_$tag FAILED, skipping remaining runs"; break; }; done
 tail -n +$LOGSTART $L/serve_gpu$GPU.log > $R/serve_log_slice.txt
 grep -nE 'attention backend|Sim-Auto rollout|Chunk [0-9]+/|finished in|Error|Selected' $R/serve_log_slice.txt | cut -c1-300 > $R/serve_key_lines.txt
 echo BENCH_ONLY_DONE
