@@ -50,12 +50,16 @@ class Episode(BaseModel):
 
 
 def check_lineage(episodes: tuple[Episode, ...]) -> None:
-    """Unique ids; derivatives name a known parent and inherit its split."""
+    """Unique ids; no content hash in both splits; derivatives name a known parent and inherit its split."""
     by_id: dict[str, Episode] = {}
+    split_of: dict[str, str] = {}
     for episode in episodes:
         if episode.episode_id in by_id:
             raise ValueError(f"duplicate episode {episode.episode_id}")
         by_id[episode.episode_id] = episode
+        for h in episode.source_hashes:
+            if split_of.setdefault(h, episode.split) != episode.split:
+                raise ValueError(f"{episode.episode_id}: source hash {h} appears in both dev and test")
     for episode in episodes:
         if episode.parent_id is None:
             continue
