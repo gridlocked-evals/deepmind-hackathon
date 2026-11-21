@@ -17,3 +17,17 @@ def test_frame_clock_and_noul():
     assert yes_probability({"type": "noul", "noul": .9, "confidence": .8}) == .9
     with pytest.raises(ValueError):
         yes_probability({"type": "choice"})
+
+
+def test_load_recording_reads_genie_runtime_output(tmp_path):
+    from backend.evaluation.common import load_recording
+    from backend.worlds.evidence import Recording
+    rec = Recording(tmp_path, "sess-1")
+    rec.frame(b"a", (2, 2))
+    rec.frame(b"b", (2, 2))
+    rec.event("steering_sent", text_sha256="x")
+    rec.frame(b"c", (2, 2))
+    frames, steers = load_recording(tmp_path / "worlds" / "sess-1")
+    assert [f.index for f in frames] == [0, 1, 2] and frames[0].session_id == "sess-1"
+    assert open(frames[2].path, "rb").read() == b"c"
+    assert [s["frame_index"] for s in steers] == [1]

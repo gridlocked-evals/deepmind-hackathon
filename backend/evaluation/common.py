@@ -6,7 +6,9 @@ stream (#9), never wall-clock time.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 import math
+from pathlib import Path
 from typing import Any, Awaitable, Protocol
 
 from backend.gateway.contracts import CallContext, CallResult
@@ -57,3 +59,18 @@ def wilson_interval(successes: int, trials: int, z: float = 1.96) -> tuple[float
     centre = (p + z * z / (2 * trials)) / denom
     half = z * math.sqrt(p * (1 - p) / trials + z * z / (4 * trials * trials)) / denom
     return (max(0.0, centre - half), min(1.0, centre + half))
+
+
+def load_recording(session_dir: str | Path) -> tuple[list[RecordedFrame], list[dict]]:
+    """Read a #9 Genie recording (worlds/<session>/frames/*.jpg + events.jsonl).
+
+    Returns frames in stream order and the `steering_sent` events; each event's
+    `frame_index` (newest frame at send time) is an attack's send frame for #24.
+    """
+    root = Path(session_dir)
+    events = [json.loads(line) for line in (root / "events.jsonl").read_bytes().splitlines() if line]
+    frames = [RecordedFrame(root.name, e["frame_index"], e["sha256"], str(root / e["file"]))
+              for e in events if e["kind"] == "frame"]
+    if [f.index for f in frames] != list(range(len(frames))):
+        raise ValueError(f"{root}: frame indices are not a gap-free stream")
+    return frames, [e for e in events if e["kind"] == "steering_sent"]
