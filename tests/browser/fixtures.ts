@@ -121,6 +121,8 @@ export class DriverHarness {
   readonly routeRequests: string[] = [];
   readonly pageErrors: string[] = [];
   readonly consoleErrors: string[] = [];
+  private readonly pendingBasemap: Route[] = [];
+  private delayedBasemap = false;
   private opened = false;
 
   constructor(readonly page: Page, private readonly context: BrowserContext, private readonly baseURL: string) {
@@ -154,7 +156,8 @@ export class DriverHarness {
         this.routeRequests.push(request.url());
         await route.fulfill({ headers: { 'access-control-allow-origin': '*' }, json: streetRoute(destination) });
       } else if (get && url.href === 'https://tiles.openfreemap.org/styles/liberty') {
-        await route.fulfill({ headers: { 'access-control-allow-origin': '*' }, json: BASEMAP });
+        if (this.delayedBasemap) this.pendingBasemap.push(route);
+        else await route.fulfill({ headers: { 'access-control-allow-origin': '*' }, json: BASEMAP });
       } else if (get && url.origin === 'https://tiles.openfreemap.org' && /^\/fonts\/[^/]+\/\d+-\d+\.pbf$/.test(url.pathname)) {
         // Empty protobuf = no glyphs. The authored Three scene still renders normally.
         await route.fulfill({ contentType: 'application/x-protobuf', headers: { 'access-control-allow-origin': '*' }, body: '' });
@@ -184,15 +187,22 @@ export class DriverHarness {
     await route.abort('blockedbyclient');
   }
 
-  async open(options: { unabortableDecisions?: boolean } = {}) {
+  async open(options: { unabortableDecisions?: boolean; delayedBasemap?: boolean } = {}) {
     if (this.opened) throw new Error('Create a new test page instead of opening the fixture twice');
     this.opened = true;
+    this.delayedBasemap = options.delayedBasemap ?? false;
     await this.page.clock.install({ time: new Date('2026-11-21T00:00:00Z') });
     if (options.unabortableDecisions) await this.useUnabortableDecisions();
     await this.page.goto(this.baseURL);
     await expect(this.page.locator('.maplibregl-canvas')).toBeVisible();
     await expect(this.page.locator('.city-map-loading, .map-loading')).toHaveCount(0);
     await expect(this.page.locator('.map-error')).toHaveCount(0);
+    if (options.delayedBasemap) {
+      await expect.poll(() => this.pendingBasemap.length, { message: 'Basemap request held while the fallback scene loads' }).toBeGreaterThan(0);
+      // Preserve the pending fetch's real 10-second timeout. Jumping to the
+      // usual one-minute boundary would cancel it before the test releases it.
+      await this.page.clock.pauseAt(await this.page.evaluate(() => Date.now() + 100));
+    }
     // Close the mobile modal before interacting with the rest of the workspace.
     await this.closeTools();
     const cameras = this.page.locator('.topbar-actions').getByRole('button', { name: 'Cameras', exact: true });
@@ -203,7 +213,20 @@ export class DriverHarness {
     await this.page.getByRole('slider', { name: 'Simulation timeline' }).press('Home');
     // Boot with ordinary timers, then advance to a fixed pause boundary. All
     // subsequent animation and timeout progression belongs to the test.
-    await this.page.clock.pauseAt(new Date('2026-11-21T00:01:00Z'));
+    if (!options.delayedBasemap) await this.page.clock.pauseAt(new Date('2026-11-21T00:01:00Z'));
+  }
+
+  async releaseBasemap() {
+    await expect.poll(() => this.pendingBasemap.length, { message: 'Waiting for the delayed basemap request' }).toBeGreaterThan(0);
+    this.delayedBasemap = false;
+    await Promise.all(this.pendingBasemap.splice(0).map(route => route.fulfill({
+      headers: { 'access-control-allow-origin': '*' }, json: BASEMAP,
+    })));
+  }
+
+  async dispose() {
+    await this.gateway.dispose();
+    await Promise.allSettled(this.pendingBasemap.splice(0).map(route => route.abort('aborted')));
   }
 
   /** Keep native fetch + routing, but model a transport that ignores abort. */
@@ -305,7 +328,7 @@ export const test = base.extend<{ driver: DriverHarness }>({
     try {
       await use(driver);
     } finally {
-      await driver.gateway.dispose();
+      await driver.dispose();
       if (testInfo.status !== testInfo.expectedStatus || driver.unexpectedRequests.length || driver.pageErrors.length) {
         await testInfo.attach('browser-diagnostics.json', {
           contentType: 'application/json',
