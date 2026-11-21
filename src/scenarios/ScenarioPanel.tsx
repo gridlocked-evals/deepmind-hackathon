@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react';
+import { useLayoutEffect, useRef, useState } from 'react';
 import type { GeminiDriver } from '../agent/types';
 import type { ScenarioBundle } from '../types';
 import { eventTypes, parseScenario, preset } from './events';
@@ -12,12 +12,19 @@ export function ScenarioPanel({ plan, onChange, driver, onReplay, onBaseline }: 
   const [error, setError] = useState('');
   const importRevision = useRef(0), active = useRef(driver.active);
   active.current = driver.active;
+  useLayoutEffect(() => {
+    // A file selection belongs to the plan and replay context that opened it.
+    // Commit/unmount invalidation also covers a run starting and then stopping.
+    importRevision.current++;
+    return () => { importRevision.current++; };
+  }, [plan, onChange, onReplay, driver.active]);
   const event = plan.events[0], trace = driver.trace;
   const summary = trace ? summarizeTrace(trace) : null;
   const baseline = [...driver.traces].reverse().find(item => item.mode === 'baseline');
   const eventRun = [...driver.traces].reverse().find(item => item.mode === 'event');
   const comparison = baseline && eventRun ? compareTraces(baseline, eventRun) : null;
   const change = (next: ScenarioPlan) => {
+    importRevision.current++;
     try { onChange(parseScenario(next)); setError(''); } catch (failure) { setError((failure as Error).message); }
   };
   const patchEvent = (patch: Partial<typeof event>) => change({ ...plan, events: [{ ...event, ...patch }, ...plan.events.slice(1)] });
@@ -26,8 +33,9 @@ export function ScenarioPanel({ plan, onChange, driver, onReplay, onBaseline }: 
     const revision = ++importRevision.current;
     try {
       if (file.size > 8_000_000) throw new Error('Choose a JSON file smaller than 8 MB.');
-      const raw = JSON.parse(await file.text());
+      const text = await file.text();
       if (active.current || revision !== importRevision.current) return;
+      const raw = JSON.parse(text);
       if (raw.schemaVersion === 'gridlocked-driver-trace.v1') {
         const scene = replayScene(raw);
         onChange(parseScenario(raw.plan));
@@ -35,7 +43,9 @@ export function ScenarioPanel({ plan, onChange, driver, onReplay, onBaseline }: 
       }
       else change(parseScenario(raw));
       setError('');
-    } catch (failure) { setError((failure as Error).message); }
+    } catch (failure) {
+      if (!active.current && revision === importRevision.current) setError((failure as Error).message);
+    }
   };
   return <section className="scenario-panel" aria-labelledby="scenario-heading">
     <div className="scenario-heading"><h3 id="scenario-heading">Make something happen</h3><span>SCENARIO LAB</span></div>
@@ -69,7 +79,7 @@ export function ScenarioPanel({ plan, onChange, driver, onReplay, onBaseline }: 
       })}
     </div>
     <small>Manual triggers apply before the next decision. The crash is scripted; Gemini controls the following car.</small>
-    <button type="button" className="scenario-baseline" disabled={!driver.canStart} onClick={onBaseline}>Run baseline without hazards</button>
+    <button type="button" className="scenario-baseline" disabled={!driver.canStart} onClick={() => { importRevision.current++; onBaseline(); }}>Run baseline without hazards</button>
     {trace && summary && !driver.replaying && <details className="scenario-results" open={trace.terminal.reason !== 'running'}>
       <summary>{trace.mode === 'baseline' ? 'Baseline' : 'Event run'} · {trace.terminal.reason.replaceAll('-', ' ')}</summary>
       <p>{summary.progressM.toFixed(1)} m travelled · {summary.scriptedCrashCount} scripted crash{summary.scriptedCrashCount === 1 ? '' : 'es'}</p>
@@ -77,7 +87,7 @@ export function ScenarioPanel({ plan, onChange, driver, onReplay, onBaseline }: 
       {summary.replayedTrafficContactFrames > 0 && <small>Replayed traffic does not react to ego and can pass through it. These overlaps are retained, not scored as model failures.</small>}
       {summary.events.map(row => <p key={row.id}>Model reaction: {row.responseLatencySimulationSeconds === null ? 'not observed' : `${row.responseLatencySimulationSeconds.toFixed(1)} sim s after first input`}. Stop: {row.stoppedAt === null ? 'not observed' : `${row.stoppedAt.toFixed(1)}s`}. Recovery: {row.resumedAt === null ? 'not observed' : `${row.resumedAt.toFixed(1)}s`}.</p>)}
       <div className="scenario-file-controls"><button type="button" onClick={() => downloadJson(trace, `gridlocked-${trace.mode}-${trace.runId}.json`)}>Export trace</button>
-        <button type="button" disabled={driver.active} onClick={() => { const scene = replayScene(trace); onChange(parseScenario(trace.plan)); onReplay(scene); }}>Replay recorded run</button></div>
+        <button type="button" disabled={driver.active} onClick={() => { importRevision.current++; const scene = replayScene(trace); onChange(parseScenario(trace.plan)); onReplay(scene); }}>Replay recorded run</button></div>
       {comparison && <><p>Baseline: {comparison.baseline.progressM.toFixed(1)} m · Event: {comparison.event.progressM.toFixed(1)} m. Descriptive comparison; model decisions can vary.</p><button type="button" onClick={() => downloadJson({ ...comparison, runs: [baseline, eventRun] }, 'gridlocked-comparison.json')}>Export comparison</button></>}
       <small>Near-miss measurement is unknown; rerouting is unsupported. Recorded replays make no model calls.</small>
     </details>}
