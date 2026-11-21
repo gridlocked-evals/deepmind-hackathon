@@ -94,6 +94,9 @@ def test_invalid_output_counts_toward_error_rate():
     one = {Outcome.SUCCESS: 9, Outcome.INVALID_OUTPUT: 1}  # coded once, not double-counted: 10% < 20%
     assert classify(s, res(s, .5, observation_quality=.9, counts=one, errors={ErrorCode.INVALID_OUTPUT: 1})) == (
         "pass", "criterion_met")
+    refused = {Outcome.SUCCESS: 7, Outcome.REFUSAL: 3}  # refusals are a model-side limit too
+    assert classify(s, res(s, .5, observation_quality=.9, counts=refused)) == ("fail", "errors_at_limit")
+
 
 def test_outage_flag_needs_evidence():
     s = sweep()
