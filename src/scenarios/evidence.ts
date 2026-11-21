@@ -26,7 +26,7 @@ export function evidenceConditions(report: ExtractionReport, camera: CameraSourc
   // Counts describe one frame each, so the largest lower bound is the most vehicles seen at once.
   const seen = accepted.filter(fact => fact.kind === 'count' && fact.semanticClass === 'vehicle').map(fact => fact.count?.lower ?? 0);
   return { cameraId: camera.id, coordinates: camera.coordinates, extractionId: report.id,
-    vehicles: Math.min(MAX_VEHICLES, Math.max(0, ...seen)), obstruction: accepted.some(fact => fact.kind === 'obstruction') };
+    vehicles: Math.min(MAX_VEHICLES, Math.max(0, ...seen)), obstruction: accepted.some(fact => fact.kind === 'obstruction' && fact.state === 'blocked') };
 }
 
 /** Evidence only applies to a drivable street scenario tagged with, and starting near, the same camera. */

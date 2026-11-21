@@ -8,13 +8,21 @@ import { preset } from './events';
 const origin: LngLat = [-74.01, 40.72];
 const camera = { id: 'cam-1', coordinates: origin } as CameraSource;
 const fact = (kind: string, semanticClass: string, lower: number | null, disposition: EvidenceFact['disposition'] = 'accepted') =>
-  ({ kind, semanticClass, disposition, count: { lower, upper: null } }) as EvidenceFact;
+  ({ kind, semanticClass, disposition, state: kind === 'obstruction' ? 'blocked' : 'unknown', count: { lower, upper: null } }) as EvidenceFact;
 const report = (facts: EvidenceFact[]) => ({ id: 'ext-1', sourceId: 'cam-1', facts }) as ExtractionReport;
 const scene = (cameraId = 'cam-1', start: LngLat = origin) => createRouteScenario(
   { coordinates: [start, [start[0], start[1] + 0.003]], distanceMeters: 333, durationSeconds: 40, source: 'test', steps: [] },
   { coordinates: start, label: 'Test St' }, cameraId);
 
 describe('camera evidence in drives', () => {
+  it.each(['clear', 'unknown'])('does not turn an accepted %s obstruction assessment into a blocked hazard', state => {
+    const assessment = { ...fact('obstruction', 'other', null), state };
+    const conditions = evidenceConditions(report([assessment]), camera);
+    expect(conditions.obstruction).toBe(false);
+    const plan = preset('car-crash');
+    expect(withEvidenceHazard(scene(), conditions, plan)).toBe(plan);
+  });
+
   it('uses the largest accepted vehicle count, ignores other facts, and flags obstructions', () => {
     const conditions = evidenceConditions(report([fact('count', 'vehicle', 3), fact('count', 'vehicle', 5), fact('count', 'vehicle', 9, 'abstained'),
       fact('count', 'pedestrian', 7), fact('obstruction', 'other', null)]), camera);
