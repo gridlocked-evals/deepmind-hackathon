@@ -142,4 +142,6 @@ class GatewayConfig(BaseModel):
 
 def backend_key(profile: str = "primary") -> str | None:
     # A missing selected credential must never silently switch projects.
-    return os.getenv("WORKSHOP_API_KEY" if profile == "workshop" else "GEMINI_API_KEY") or None
+    if profile == "workshop":
+        return os.getenv("WORKSHOP_API_KEY") or None
+    return os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY") or None

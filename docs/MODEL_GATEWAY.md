@@ -17,7 +17,9 @@ establish project throughput limits or submission eligibility.
 Install `backend/requirements.txt` into the project virtual environment. Copy
 `.env.example` to `.env`, then set `GEMINI_API_KEY` (primary) and optionally
 `WORKSHOP_API_KEY`. Select one explicitly with `GEMINI_KEY_PROFILE=primary` or
-`workshop`; there is no automatic project fallback. Environment variables take
+`workshop`; there is no automatic project fallback. The primary profile also
+accepts the existing `GOOGLE_API_KEY` alias when `GEMINI_API_KEY` is unset or empty.
+Environment variables take
 precedence over `.env`. Neither key uses a
 `VITE_` prefix or reaches the frontend. Credentials, raw upstream error bodies,
 and connection authorization tokens are excluded from the gateway records.
