@@ -136,7 +136,8 @@ def _error_rates(result: SettingResult) -> tuple[bool, float]:
     """(any infrastructure error, share of attempts that failed with a non-infrastructure or uncoded error)."""
     infra = sum(n for code, n in result.errors.items() if code in INFRASTRUCTURE_ERRORS)
     coded = sum(result.errors.values())
-    other = coded - infra + max(0, result.counts.get(Outcome.ERROR, 0) - coded)  # uncoded errors count as real
+    failed = result.counts.get(Outcome.ERROR, 0) + result.counts.get(Outcome.INVALID_OUTPUT, 0)
+    other = coded - infra + max(0, failed - coded)  # uncoded errors/invalid outputs count as real; coded ones once
     attempts = max(sum(result.counts.values()), coded)
     return infra > 0, (other / attempts if attempts else 0.0)
 
