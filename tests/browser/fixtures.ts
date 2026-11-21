@@ -5,7 +5,8 @@ import type { CameraSource } from '../../src/types';
 
 export { expect };
 
-export const FIXTURE_MODEL = 'gemini-browser-fixture';
+// Match the gateway's Decisions contract; this model is never contacted.
+export const FIXTURE_MODEL = 'gemini-decision-1';
 export const FIXTURE_CAMERAS = {
   start: camera('start', 'Browser fixture start', [-74.011485, 40.722891]),
   short: camera('short', 'Browser fixture nearby destination', [-74.011485, 40.722999]),
@@ -24,7 +25,7 @@ function camera(id: string, name: string, coordinates: [number, number]): Camera
 const MODEL_STATUS: ModelGatewayStatus = {
   schema_version: 1, key_profile: 'primary', config_hash: 'offline-browser-fixture', rates_expired: false,
   services: [{
-    service: 'hydrogen', model_id: FIXTURE_MODEL, state: 'configured', reason: null,
+    service: 'decisions', model_id: FIXTURE_MODEL, state: 'configured', reason: null,
     configured: true, enabled: true, optional: false, last_request_id: null,
     last_provider_request_id: null, last_latency_ms: null, verified_at: null,
     usage_reported: false, project_quota: 'Offline fixture; no provider calls',
@@ -93,7 +94,7 @@ export class Gateway {
     if (!route || call.replied) throw new Error(`Driver request ${index} was already replied to`);
     const { status = 200, raw, body, decision, ...envelope } = overrides;
     const response: DriverResponse = {
-      run_id: call.run_id, step: call.step, max_steps: 12,
+      run_id: call.run_id, step: call.step, max_steps: 60,
       model_id: FIXTURE_MODEL, request_id: `browser-decision-${index}`,
       decision: { ...DEFAULT_DECISION, ...decision }, ...envelope,
     };
@@ -266,10 +267,11 @@ export class DriverHarness {
     await expect(this.page.locator('.driver-panel')).toBeVisible();
   }
 
-  /** Production closes the tools on mobile; call openDriver to inspect the panel again. */
-  async startDriver() {
+  /** Use the real baseline control to exclude hazards; production closes mobile tools after starting. */
+  async startDriver(mode: 'baseline' | 'event' = 'baseline') {
     await this.openDriver();
-    await this.page.getByRole('button', { name: /^(Start|Restart) Gemini drive$/ }).click();
+    await this.page.getByRole('button', { name: mode === 'baseline'
+      ? 'Run baseline without hazards' : /^(Start scenario with Gemini|Restart scenario)$/, exact: true }).click();
   }
 
   async planRoute(kind: 'short' | 'long') {
@@ -295,7 +297,7 @@ export class DriverHarness {
   async decisionCount() {
     // The transport's text is visually collapsed at narrow widths.
     const text = await this.page.locator('.playback-identity').textContent();
-    return Number(text?.match(/(\d+)\/12 decisions/)?.[1] ?? 0);
+    return Number(text?.match(/(\d+)\/60 decisions/)?.[1] ?? 0);
   }
 }
 

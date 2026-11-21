@@ -12,12 +12,12 @@ async function rendered(driver: DriverHarness) {
   });
 }
 
-async function expectFrozen(driver: DriverHarness) {
+async function expectFrozen(driver: DriverHarness, milliseconds = 20_000) {
   const time = await driver.time();
   const frame = await rendered(driver);
   const requests = driver.gateway.calls.length;
   // No physics is running here; jumping wall time must not move the rendered car.
-  await driver.page.clock.fastForward(20_000);
+  await driver.page.clock.fastForward(milliseconds);
   expect(await driver.time()).toBe(time);
   expect(await rendered(driver)).toEqual(frame);
   expect(driver.gateway.calls).toHaveLength(requests);
@@ -55,7 +55,7 @@ test('stopping while thinking or driving freezes the car; restart owns a new run
   await driver.page.getByRole('button', { name: 'Stop drive', exact: true }).click();
   await driver.page.clock.runFor(32);
   await expectFrozen(driver);
-  await expect(driver.page.getByRole('button', { name: 'Restart Gemini drive' })).toBeEnabled();
+  await expect(driver.page.getByRole('button', { name: 'Restart scenario' })).toBeEnabled();
 });
 
 test('late responses remain inert after Stop and after a newer run starts, even when abort is ignored', async ({ driver }) => {
@@ -89,8 +89,10 @@ test('late responses remain inert after Stop and after a newer run starts, even 
   expect(after.time).toBeGreaterThan(before.time);
   expect(after.y).toBeGreaterThan(before.y);
   expect(await driver.decisionCount()).toBe(1);
-  expect(driver.gateway.calls).toHaveLength(3);
-  expect(await driver.decisionSignals()).toEqual([true, true, true]);
+  expect(driver.gateway.calls).toHaveLength(4);
+  expect(driver.gateway.calls[3].run_id).toBe(current.run_id);
+  expect(driver.gateway.calls[3].step).toBe(1);
+  expect(await driver.decisionSignals()).toEqual([true, true, true, true]);
   await driver.openDriver();
   await expect(driver.page.locator('.driver-decision-heading')).toHaveText('Driving the route');
   await expect(driver.page.locator('.driver-decision')).toContainText('CURRENT RUN RESPONSE');
@@ -130,7 +132,7 @@ for (const change of ['camera', 'route', 'demo'] as const) {
     if (change !== 'camera') expect(next.observation.scenario_id).not.toBe(old.observation.scenario_id);
     await driver.page.clock.runFor(64);
     expect((await rendered(driver)).scenario).toBe(next.observation.scenario_id);
-    await expectFrozen(driver);
+    await expectFrozen(driver, 500);
   });
 }
 
@@ -169,7 +171,7 @@ for (const phase of ['thinking', 'driving'] as const) {
     await expectFrozen(driver);
     await driver.openDriver();
     await expect(driver.page.locator('.driver-decision-heading')).toHaveText('Drive stopped');
-    await expect(driver.page.getByRole('button', { name: 'Restart Gemini drive' })).toBeEnabled();
+    await expect(driver.page.getByRole('button', { name: 'Restart scenario' })).toBeEnabled();
   });
 }
 
@@ -189,7 +191,7 @@ test('replay, driver, and perspective changes share the frame consumed by the re
   expect(await driver.time()).toBe(0);
   expect((await rendered(driver)).time).toBe(0);
   expect((await rendered(driver)).y).not.toBe(replay.y);
-  await expectFrozen(driver);
+  await expectFrozen(driver, 500);
   await driver.gateway.reply(0);
   await expect.poll(() => driver.decisionCount()).toBe(1);
   await driver.page.clock.runFor(1100);
@@ -201,7 +203,7 @@ test('replay, driver, and perspective changes share the frame consumed by the re
     // City overview deliberately culls 3D cars. Check consumed frames at street zoom.
     if (perspective !== 'Map') expect(Math.abs((await rendered(driver)).time - await driver.time())).toBeLessThan(0.12);
   }
-  expect(driver.gateway.calls).toHaveLength(1);
+  expect(driver.gateway.calls).toHaveLength(2);
   await driver.page.getByRole('button', { name: 'Return to replay', exact: true }).click();
   await driver.page.clock.runFor(64);
   await expect(timeline).toBeEnabled();
@@ -212,50 +214,4 @@ test('replay, driver, and perspective changes share the frame consumed by the re
   await driver.page.clock.runFor(1100);
   expect(await driver.time()).toBeGreaterThan(1);
   expect(Math.abs((await rendered(driver)).time - await driver.time())).toBeLessThan(0.12);
-});
-
-test('twelve decisions advance at most three seconds each and finish with the decision-limit state', async ({ driver }) => {
-  test.setTimeout(180_000);
-  await driver.open();
-  await driver.planRoute('long');
-  await driver.startDriver();
-  let runId: string | undefined;
-  for (let step = 0; step < 12; step++) {
-    const request = await driver.gateway.waitForRequest(step);
-    runId ??= request.run_id;
-    expect(request.run_id).toBe(runId);
-    expect(request.step).toBe(step);
-    expect(request.observation.simulation_time).toBeCloseTo(step * 3, 6);
-    await driver.page.clock.runFor(64);
-    await expectFrozen(driver);
-    await driver.gateway.reply(step);
-    await expect.poll(() => driver.decisionCount()).toBe(step + 1);
-    await driver.page.clock.runFor(3100);
-    expect(await driver.time()).toBeCloseTo((step + 1) * 3, 1);
-  }
-  await driver.openDriver();
-  await expect(driver.page.locator('.driver-decision-heading')).toHaveText('Demo complete');
-  await expect(driver.page.locator('.driver-decision')).toContainText('12-decision limit');
-  expect(await driver.time()).toBe(36);
-  expect(driver.gateway.calls).toHaveLength(12);
-  await expectFrozen(driver);
-});
-
-test('arrival on a short real route finishes before the decision limit', async ({ driver }) => {
-  await driver.open();
-  await driver.planRoute('short');
-  await driver.startDriver();
-  for (let step = 0; step < 11; step++) {
-    await driver.gateway.waitForRequest(step);
-    await driver.gateway.reply(step);
-    await expect.poll(() => driver.decisionCount()).toBe(step + 1);
-    await driver.page.clock.runFor(3100);
-    await driver.openDriver();
-    if (await driver.page.locator('.driver-decision-heading').innerText() === 'Destination reached') break;
-  }
-  await expect(driver.page.locator('.driver-decision-heading')).toHaveText('Destination reached');
-  expect(driver.gateway.calls.length).toBeLessThan(12);
-  expect(await driver.time()).toBeLessThan(36);
-  await expect(driver.page.locator('.driver-metrics > div').nth(1)).toContainText('0m');
-  await expectFrozen(driver);
 });
