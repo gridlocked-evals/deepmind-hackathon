@@ -20,8 +20,8 @@ An earlier authored-Vestry run produced three successful model responses during 
 ## Local checks
 
 - `npm run build` passed. Vite retains the existing large main-bundle warning from MapLibre/Three.
-- `npm test`: 44 tests passed before merging subsequent main changes.
-- `.venv/bin/python -m pytest backend -q`: 304 tests passed before merging subsequent main changes.
+- `npm test`: 44 tests passed after integrating main through `b983633`.
+- `.venv/bin/python -m pytest backend -q`: 350 tests passed after integrating main through `b983633`.
 - Driver checks cover speed/acceleration/braking bounds, signal and lead-vehicle constraints, route completion, stale run identities, malformed responses, strict API schemas, bounded admission, idempotency, and redacted failures.
 - Browser checks covered route search/planning, route playback → Gemini control, actual decision history, the 12-decision stop, restart/Stop with a late response, return to replay, and desktop/mobile layout at 1440×900, 390×844, and 731×727.
 
