@@ -1,0 +1,626 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-11-21T19:34:43.464002+00:00",
+  "title": "Design System: Gridlocked",
+  "extensions": {
+    "colorMeta": {
+      "paper": {
+        "role": "neutral",
+        "displayName": "Warm Paper",
+        "canonical": "#f5f4ed",
+        "tonalRamp": [
+          "oklch(15% 0.0093 99.98)",
+          "oklch(27% 0.0093 99.98)",
+          "oklch(38% 0.0093 99.98)",
+          "oklch(49% 0.0093 99.98)",
+          "oklch(61% 0.0093 99.98)",
+          "oklch(72% 0.0093 99.98)",
+          "oklch(84% 0.0093 99.98)",
+          "oklch(95% 0.0093 99.98)"
+        ]
+      },
+      "ink": {
+        "role": "neutral",
+        "displayName": "Charcoal Ink",
+        "canonical": "#20272a",
+        "tonalRamp": [
+          "oklch(15% 0.0114 225.56)",
+          "oklch(27% 0.0114 225.56)",
+          "oklch(38% 0.0114 225.56)",
+          "oklch(49% 0.0114 225.56)",
+          "oklch(61% 0.0114 225.56)",
+          "oklch(72% 0.0114 225.56)",
+          "oklch(84% 0.0114 225.56)",
+          "oklch(95% 0.0114 225.56)"
+        ]
+      },
+      "muted": {
+        "role": "neutral",
+        "displayName": "Quiet Sage Gray",
+        "canonical": "#626864",
+        "tonalRamp": [
+          "oklch(15% 0.0097 156.88)",
+          "oklch(27% 0.0097 156.88)",
+          "oklch(38% 0.0097 156.88)",
+          "oklch(49% 0.0097 156.88)",
+          "oklch(61% 0.0097 156.88)",
+          "oklch(72% 0.0097 156.88)",
+          "oklch(84% 0.0097 156.88)",
+          "oklch(95% 0.0097 156.88)"
+        ]
+      },
+      "line": {
+        "role": "neutral",
+        "displayName": "Paper Rule",
+        "canonical": "#d9dcd3",
+        "tonalRamp": [
+          "oklch(15% 0.0125 121.72)",
+          "oklch(27% 0.0125 121.72)",
+          "oklch(38% 0.0125 121.72)",
+          "oklch(49% 0.0125 121.72)",
+          "oklch(61% 0.0125 121.72)",
+          "oklch(72% 0.0125 121.72)",
+          "oklch(84% 0.0125 121.72)",
+          "oklch(95% 0.0125 121.72)"
+        ]
+      },
+      "yellow": {
+        "role": "primary",
+        "displayName": "Taxi Yellow",
+        "canonical": "#f2c94c",
+        "tonalRamp": [
+          "oklch(15% 0.1463 90.49)",
+          "oklch(27% 0.1463 90.49)",
+          "oklch(38% 0.1463 90.49)",
+          "oklch(49% 0.1463 90.49)",
+          "oklch(61% 0.1463 90.49)",
+          "oklch(72% 0.1463 90.49)",
+          "oklch(84% 0.1463 90.49)",
+          "oklch(95% 0.1463 90.49)"
+        ]
+      },
+      "yellow-border": {
+        "role": "primary",
+        "displayName": "Taxi Yellow Edge",
+        "canonical": "#dbb439",
+        "tonalRamp": [
+          "oklch(15% 0.1417 90.56)",
+          "oklch(27% 0.1417 90.56)",
+          "oklch(38% 0.1417 90.56)",
+          "oklch(49% 0.1417 90.56)",
+          "oklch(61% 0.1417 90.56)",
+          "oklch(72% 0.1417 90.56)",
+          "oklch(84% 0.1417 90.56)",
+          "oklch(95% 0.1417 90.56)"
+        ]
+      },
+      "yellow-hover": {
+        "role": "primary",
+        "displayName": "Taxi Yellow Hover",
+        "canonical": "#f9d878",
+        "tonalRamp": [
+          "oklch(15% 0.1213 90.86)",
+          "oklch(27% 0.1213 90.86)",
+          "oklch(38% 0.1213 90.86)",
+          "oklch(49% 0.1213 90.86)",
+          "oklch(61% 0.1213 90.86)",
+          "oklch(72% 0.1213 90.86)",
+          "oklch(84% 0.1213 90.86)",
+          "oklch(95% 0.1213 90.86)"
+        ]
+      },
+      "field": {
+        "role": "neutral",
+        "displayName": "Field Paper",
+        "canonical": "#fffefa",
+        "tonalRamp": [
+          "oklch(15% 0.0054 95.10)",
+          "oklch(27% 0.0054 95.10)",
+          "oklch(38% 0.0054 95.10)",
+          "oklch(49% 0.0054 95.10)",
+          "oklch(61% 0.0054 95.10)",
+          "oklch(72% 0.0054 95.10)",
+          "oklch(84% 0.0054 95.10)",
+          "oklch(95% 0.0054 95.10)"
+        ]
+      },
+      "field-border": {
+        "role": "neutral",
+        "displayName": "Field Edge",
+        "canonical": "#bfc5ba",
+        "tonalRamp": [
+          "oklch(15% 0.0165 130.46)",
+          "oklch(27% 0.0165 130.46)",
+          "oklch(38% 0.0165 130.46)",
+          "oklch(49% 0.0165 130.46)",
+          "oklch(61% 0.0165 130.46)",
+          "oklch(72% 0.0165 130.46)",
+          "oklch(84% 0.0165 130.46)",
+          "oklch(95% 0.0165 130.46)"
+        ]
+      },
+      "focus": {
+        "role": "semantic",
+        "displayName": "Workspace Focus",
+        "canonical": "#987110",
+        "tonalRamp": [
+          "oklch(15% 0.1131 83.35)",
+          "oklch(27% 0.1131 83.35)",
+          "oklch(38% 0.1131 83.35)",
+          "oklch(49% 0.1131 83.35)",
+          "oklch(61% 0.1131 83.35)",
+          "oklch(72% 0.1131 83.35)",
+          "oklch(84% 0.1131 83.35)",
+          "oklch(95% 0.1131 83.35)"
+        ]
+      },
+      "search-focus": {
+        "role": "semantic",
+        "displayName": "Search Focus",
+        "canonical": "#a98728",
+        "tonalRamp": [
+          "oklch(15% 0.1161 88.13)",
+          "oklch(27% 0.1161 88.13)",
+          "oklch(38% 0.1161 88.13)",
+          "oklch(49% 0.1161 88.13)",
+          "oklch(61% 0.1161 88.13)",
+          "oklch(72% 0.1161 88.13)",
+          "oklch(84% 0.1161 88.13)",
+          "oklch(95% 0.1161 88.13)"
+        ]
+      },
+      "selected-row": {
+        "role": "neutral",
+        "displayName": "Selected Row",
+        "canonical": "#e4e7dc",
+        "tonalRamp": [
+          "oklch(15% 0.0150 119.12)",
+          "oklch(27% 0.0150 119.12)",
+          "oklch(38% 0.0150 119.12)",
+          "oklch(49% 0.0150 119.12)",
+          "oklch(61% 0.0150 119.12)",
+          "oklch(72% 0.0150 119.12)",
+          "oklch(84% 0.0150 119.12)",
+          "oklch(95% 0.0150 119.12)"
+        ]
+      },
+      "signal-green": {
+        "role": "semantic",
+        "displayName": "Signal Green",
+        "canonical": "#2e7247",
+        "tonalRamp": [
+          "oklch(15% 0.0976 153.17)",
+          "oklch(27% 0.0976 153.17)",
+          "oklch(38% 0.0976 153.17)",
+          "oklch(49% 0.0976 153.17)",
+          "oklch(61% 0.0976 153.17)",
+          "oklch(72% 0.0976 153.17)",
+          "oklch(84% 0.0976 153.17)",
+          "oklch(95% 0.0976 153.17)"
+        ]
+      },
+      "signal-amber": {
+        "role": "semantic",
+        "displayName": "Signal Amber",
+        "canonical": "#8a6510",
+        "tonalRamp": [
+          "oklch(15% 0.1042 81.87)",
+          "oklch(27% 0.1042 81.87)",
+          "oklch(38% 0.1042 81.87)",
+          "oklch(49% 0.1042 81.87)",
+          "oklch(61% 0.1042 81.87)",
+          "oklch(72% 0.1042 81.87)",
+          "oklch(84% 0.1042 81.87)",
+          "oklch(95% 0.1042 81.87)"
+        ]
+      },
+      "signal-red": {
+        "role": "semantic",
+        "displayName": "Signal Red",
+        "canonical": "#b3362d",
+        "tonalRamp": [
+          "oklch(15% 0.1629 28.24)",
+          "oklch(27% 0.1629 28.24)",
+          "oklch(38% 0.1629 28.24)",
+          "oklch(49% 0.1629 28.24)",
+          "oklch(61% 0.1629 28.24)",
+          "oklch(72% 0.1629 28.24)",
+          "oklch(84% 0.1629 28.24)",
+          "oklch(95% 0.1629 28.24)"
+        ]
+      },
+      "error-surface": {
+        "role": "semantic",
+        "displayName": "Error Paper",
+        "canonical": "#f6e5dc",
+        "tonalRamp": [
+          "oklch(15% 0.0223 49.92)",
+          "oklch(27% 0.0223 49.92)",
+          "oklch(38% 0.0223 49.92)",
+          "oklch(49% 0.0223 49.92)",
+          "oklch(61% 0.0223 49.92)",
+          "oklch(72% 0.0223 49.92)",
+          "oklch(84% 0.0223 49.92)",
+          "oklch(95% 0.0223 49.92)"
+        ]
+      },
+      "error-ink": {
+        "role": "semantic",
+        "displayName": "Error Ink",
+        "canonical": "#82371f",
+        "tonalRamp": [
+          "oklch(15% 0.1100 38.05)",
+          "oklch(27% 0.1100 38.05)",
+          "oklch(38% 0.1100 38.05)",
+          "oklch(49% 0.1100 38.05)",
+          "oklch(61% 0.1100 38.05)",
+          "oklch(72% 0.1100 38.05)",
+          "oklch(84% 0.1100 38.05)",
+          "oklch(95% 0.1100 38.05)"
+        ]
+      },
+      "error-border": {
+        "role": "semantic",
+        "displayName": "Error Edge",
+        "canonical": "#b35035",
+        "tonalRamp": [
+          "oklch(15% 0.1356 36.19)",
+          "oklch(27% 0.1356 36.19)",
+          "oklch(38% 0.1356 36.19)",
+          "oklch(49% 0.1356 36.19)",
+          "oklch(61% 0.1356 36.19)",
+          "oklch(72% 0.1356 36.19)",
+          "oklch(84% 0.1356 36.19)",
+          "oklch(95% 0.1356 36.19)"
+        ]
+      },
+      "map-surface": {
+        "role": "neutral",
+        "displayName": "Geographic Night",
+        "canonical": "#09121b",
+        "tonalRamp": [
+          "oklch(15% 0.0231 249.16)",
+          "oklch(27% 0.0231 249.16)",
+          "oklch(38% 0.0231 249.16)",
+          "oklch(49% 0.0231 249.16)",
+          "oklch(61% 0.0231 249.16)",
+          "oklch(72% 0.0231 249.16)",
+          "oklch(84% 0.0231 249.16)",
+          "oklch(95% 0.0231 249.16)"
+        ]
+      },
+      "map-focus": {
+        "role": "semantic",
+        "displayName": "Map Mint Focus",
+        "canonical": "#a4ffe1",
+        "tonalRamp": [
+          "oklch(15% 0.0970 171.26)",
+          "oklch(27% 0.0970 171.26)",
+          "oklch(38% 0.0970 171.26)",
+          "oklch(49% 0.0970 171.26)",
+          "oklch(61% 0.0970 171.26)",
+          "oklch(72% 0.0970 171.26)",
+          "oklch(84% 0.0970 171.26)",
+          "oklch(95% 0.0970 171.26)"
+        ]
+      },
+      "scene-ink": {
+        "role": "neutral",
+        "displayName": "Scene Heading",
+        "canonical": "#f0f3ed",
+        "tonalRamp": [
+          "oklch(15% 0.0085 128.56)",
+          "oklch(27% 0.0085 128.56)",
+          "oklch(38% 0.0085 128.56)",
+          "oklch(49% 0.0085 128.56)",
+          "oklch(61% 0.0085 128.56)",
+          "oklch(72% 0.0085 128.56)",
+          "oklch(84% 0.0085 128.56)",
+          "oklch(95% 0.0085 128.56)"
+        ]
+      },
+      "scene-muted": {
+        "role": "neutral",
+        "displayName": "Scene Description",
+        "canonical": "#c3cbd0",
+        "tonalRamp": [
+          "oklch(15% 0.0112 234.85)",
+          "oklch(27% 0.0112 234.85)",
+          "oklch(38% 0.0112 234.85)",
+          "oklch(49% 0.0112 234.85)",
+          "oklch(61% 0.0112 234.85)",
+          "oklch(72% 0.0112 234.85)",
+          "oklch(84% 0.0112 234.85)",
+          "oklch(95% 0.0112 234.85)"
+        ]
+      }
+    },
+    "typographyMeta": {
+      "display": {
+        "displayName": "Display",
+        "purpose": "Main scene heading; responsive sizes are documented in DESIGN.md."
+      },
+      "headline": {
+        "displayName": "Headline",
+        "purpose": "Task rail heading."
+      },
+      "title": {
+        "displayName": "Title",
+        "purpose": "Default camera feed heading."
+      },
+      "body": {
+        "displayName": "Body",
+        "purpose": "Planner explanatory paragraph; individual components retain their measured variants."
+      },
+      "label": {
+        "displayName": "Label",
+        "purpose": "Supporting interface labels."
+      },
+      "action": {
+        "displayName": "Action",
+        "purpose": "Primary full-width rail action."
+      },
+      "telemetry": {
+        "displayName": "Telemetry",
+        "purpose": "Default actor speed instrument; compact variants are responsive."
+      },
+      "metadata": {
+        "displayName": "Metadata",
+        "purpose": "Model identifier, source facts, and small numerical metadata."
+      }
+    },
+    "shadows": [
+      {
+        "name": "playback",
+        "value": "0 3px 20px #0002",
+        "purpose": "Paper transport bar over the map."
+      },
+      {
+        "name": "layer-menu",
+        "value": "0 8px 22px #0003",
+        "purpose": "Layers popover."
+      },
+      {
+        "name": "feed",
+        "value": "0 8px 30px #0003",
+        "purpose": "Floating or docked camera media frame."
+      },
+      {
+        "name": "location",
+        "value": "0 10px 30px #0003",
+        "purpose": "Selected-location action card."
+      },
+      {
+        "name": "map-pick",
+        "value": "0 6px 25px #0003",
+        "purpose": "Yellow map-selection instruction."
+      },
+      {
+        "name": "mobile-perspective",
+        "value": "0 3px 18px #0003",
+        "purpose": "Perspective control below the mobile header."
+      },
+      {
+        "name": "mobile-rail",
+        "value": "14px 0 35px #0003",
+        "purpose": "Modal rail above the geographic scene."
+      },
+      {
+        "name": "help-dialog",
+        "value": "0 30px 80px #0004",
+        "purpose": "Help dialog above its backdrop."
+      }
+    ],
+    "motion": [
+      {
+        "name": "button-color",
+        "value": "background-color 150ms, color 150ms",
+        "purpose": "Default ease; state feedback only, no transform animation."
+      },
+      {
+        "name": "map-control-position",
+        "value": "bottom .3s ease",
+        "purpose": "Reposition map navigation above measured overlays."
+      },
+      {
+        "name": "map-perspective",
+        "value": "1500ms",
+        "purpose": "Map, Intersection, and Follow viewpoint changes."
+      },
+      {
+        "name": "camera-selection",
+        "value": "1050ms",
+        "purpose": "Fly to a newly selected source camera."
+      },
+      {
+        "name": "route-fit",
+        "value": "750ms",
+        "purpose": "Fit the planned route to visible map bounds."
+      },
+      {
+        "name": "location-focus",
+        "value": "650ms",
+        "purpose": "Fly to a selected map location."
+      },
+      {
+        "name": "map-padding",
+        "value": "300ms",
+        "purpose": "Adjust visible-map padding after overlay changes."
+      },
+      {
+        "name": "cluster-expansion",
+        "value": "350ms",
+        "purpose": "Expand a selected geographic camera cluster."
+      },
+      {
+        "name": "follow-smoothing",
+        "value": "155ms",
+        "purpose": "Exponential camera smoothing constant: 1 - exp(-delta / 155)."
+      },
+      {
+        "name": "loading-orbit",
+        "value": "1s linear infinite",
+        "purpose": "Workspace loading spinner."
+      },
+      {
+        "name": "map-status-pulse",
+        "value": "1.3s ease infinite",
+        "purpose": "Map loading/status dot opacity pulse."
+      },
+      {
+        "name": "reduced-motion",
+        "value": "prefers-reduced-motion: reduce",
+        "purpose": "Disable CSS transitions, smooth scrolling, and loading animations; map flights use 0ms and follow smoothing is immediate. Simulation remains functional and user-controlled."
+      }
+    ],
+    "breakpoints": [
+      {
+        "name": "wide-min",
+        "value": "1700px"
+      },
+      {
+        "name": "compact-header-max",
+        "value": "1150px"
+      },
+      {
+        "name": "compact-rail-max",
+        "value": "960px"
+      },
+      {
+        "name": "modal-rail-max",
+        "value": "760px"
+      },
+      {
+        "name": "small-phone-max",
+        "value": "370px"
+      }
+    ]
+  },
+  "components": [
+    {
+      "name": "Start Gemini drive",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "Primary full-width driver action; native disabled state mirrors model availability and prerequisites.",
+      "html": "<button class=\"ds-start\"><svg width=\"14\" height=\"14\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" aria-hidden=\"true\"><path d=\"m8 5 11 7-11 7V5Z\"/></svg>Start Gemini drive</button>",
+      "css": ".ds-start{font-family:'DM Sans',sans-serif;cursor:pointer;transition:background-color 150ms,color 150ms;display:flex;align-items:center;justify-content:center;gap:8px;width:100%;background:var(--yellow,#f2c94c);color:var(--ink,#20272a);border:1px solid #dbb439;border-radius:4px;padding:12px 10px;font-size:12px;font-weight:700}.ds-start:hover{background:#f9d878}.ds-start:disabled{cursor:not-allowed;opacity:.45}.ds-start:focus-visible{outline:2px solid #987110;outline-offset:4px}@media(prefers-reduced-motion:reduce){.ds-start{transition:none}}"
+    },
+    {
+      "name": "Stop drive",
+      "kind": "button",
+      "refersTo": "button-stop",
+      "description": "Dark action replaces Start during an active model run. Stop cancels the run rather than resuming replay.",
+      "html": "<button class=\"ds-stop\"><svg width=\"14\" height=\"14\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" aria-hidden=\"true\"><rect x=\"4\" y=\"4\" width=\"16\" height=\"16\" rx=\"2\"/></svg>Stop drive</button>",
+      "css": ".ds-stop{font-family:'DM Sans',sans-serif;cursor:pointer;transition:background-color 150ms,color 150ms;display:flex;align-items:center;justify-content:center;gap:8px;width:100%;background:var(--ink,#20272a);color:var(--paper,#f5f4ed);border:1px solid var(--ink,#20272a);border-radius:4px;padding:12px 10px;font-size:12px;font-weight:700}.ds-stop:hover{background:#495044}.ds-stop:focus-visible{outline:2px solid #987110;outline-offset:4px}@media(prefers-reduced-motion:reduce){.ds-stop{transition:none}}"
+    },
+    {
+      "name": "Traffic demo",
+      "kind": "button",
+      "refersTo": "button-secondary",
+      "description": "Outlined topbar action restores the authored 25-vehicle scene. Active state is conveyed by aria-pressed and surface tint.",
+      "html": "<button class=\"ds-demo\" aria-pressed=\"false\">Traffic demo</button>",
+      "css": ".ds-demo{font-family:'DM Sans',sans-serif;cursor:pointer;transition:background-color 150ms,color 150ms;display:inline-flex;align-items:center;justify-content:center;min-height:36px;padding:0 12px;font-size:12px;font-weight:600;border-radius:5px;border:1px solid #bcc2b7;background:transparent;color:var(--ink,#20272a)}.ds-demo:hover,.ds-demo[aria-pressed=true]{background:#e4e7dd}.ds-demo:focus-visible{outline:2px solid #987110;outline-offset:4px}@media(max-width:760px){.ds-demo{min-height:33px;padding:0 8px;font-size:11px}}@media(prefers-reduced-motion:reduce){.ds-demo{transition:none}}"
+    },
+    {
+      "name": "Camera search",
+      "kind": "input",
+      "refersTo": "search-field",
+      "description": "Search uses the wrapper focus ring, an accessible input name, and a visible slash shortcut.",
+      "html": "<label class=\"ds-search\"><svg width=\"16\" height=\"16\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" aria-hidden=\"true\"><circle cx=\"11\" cy=\"11\" r=\"8\"/><path d=\"m21 21-4.35-4.35\"/></svg><input aria-label=\"Search cameras\" placeholder=\"Street, avenue, or borough\"><kbd>/</kbd></label>",
+      "css": ".ds-search{display:flex;align-items:center;gap:8px;padding:11px 10px;background:#fffefa;border:1px solid #bfc5ba;border-radius:4px;color:#65705f;font-family:'DM Sans',sans-serif}.ds-search:focus-within{outline:2px solid #a98728;outline-offset:2px}.ds-search input{width:100%;min-width:0;background:none;border:0;outline:none;color:var(--ink,#20272a);font-family:inherit;font-size:12px}.ds-search input::placeholder{color:#747a71}.ds-search kbd{font:10px var(--mono,'IBM Plex Mono',monospace);border:1px solid var(--line,#d9dcd3);border-radius:3px;padding:1px 4px;color:#72796f}"
+    },
+    {
+      "name": "Map perspective",
+      "kind": "nav",
+      "refersTo": "perspective-active",
+      "description": "Three native pressed-state buttons for Map, Intersection, and Follow. This is not an ARIA tablist.",
+      "html": "<nav class=\"ds-perspective\" aria-label=\"Map perspective\"><button aria-pressed=\"true\">Map</button><button aria-pressed=\"false\">Intersection</button><button aria-pressed=\"false\">Follow</button></nav>",
+      "css": ".ds-perspective{display:inline-flex;gap:2px;padding:4px;background:#e6e8df;border-radius:6px}.ds-perspective button{font-family:'DM Sans',sans-serif;cursor:pointer;transition:background-color 150ms,color 150ms;border:0;background:transparent;display:flex;align-items:center;gap:7px;padding:8px 13px;font-size:12px;font-weight:600;border-radius:3px;color:#5b645e}.ds-perspective button[aria-pressed=true]{background:var(--ink,#20272a);color:var(--paper,#f5f4ed)}.ds-perspective button:hover:not([aria-pressed=true]){background:#d8ddd2}.ds-perspective button:focus-visible{outline:2px solid #987110;outline-offset:4px}@media(prefers-reduced-motion:reduce){.ds-perspective button{transition:none}}"
+    },
+    {
+      "name": "Workspace task switch",
+      "kind": "nav",
+      "refersTo": "rail-navigation",
+      "description": "Equal-width Cameras, Route, and Driver actions with a 2px active underline and aria-pressed state.",
+      "html": "<div class=\"ds-task-nav\" aria-label=\"Workspace tools\"><button aria-pressed=\"false\">Cameras</button><button aria-pressed=\"false\">Route</button><button aria-pressed=\"true\">Driver</button></div>",
+      "css": ".ds-task-nav{display:grid;grid-template-columns:1fr 1fr 1fr;border-bottom:1px solid var(--line,#d9dcd3);background:var(--paper,#f5f4ed)}.ds-task-nav button{font-family:'DM Sans',sans-serif;cursor:pointer;transition:background-color 150ms,color 150ms;display:flex;align-items:center;justify-content:center;gap:7px;min-height:40px;font-size:12px;color:var(--muted,#626864);border:0;border-bottom:2px solid transparent;background:none;margin-bottom:-1px}.ds-task-nav button:hover{color:var(--ink,#20272a)}.ds-task-nav button[aria-pressed=true]{color:var(--ink,#20272a);border-color:var(--ink,#20272a);font-weight:700}.ds-task-nav button:focus-visible{outline:2px solid #987110;outline-offset:4px}@media(prefers-reduced-motion:reduce){.ds-task-nav button{transition:none}}"
+    },
+    {
+      "name": "Selected camera row",
+      "kind": "custom",
+      "refersTo": "camera-row-selected",
+      "description": "Flat camera selection row with source icon, readable location and source type, pale surface, selection dot, and an offset left marker.",
+      "html": "<button class=\"ds-camera\" aria-pressed=\"true\"><svg width=\"17\" height=\"17\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" aria-hidden=\"true\"><path d=\"M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3l-2.5-3Z\"/><circle cx=\"12\" cy=\"13\" r=\"3\"/></svg><span class=\"ds-camera-copy\"><strong>Vestry / West Street</strong><span>Manhattan · Video</span></span><span class=\"ds-camera-dot\" aria-hidden=\"true\"></span></button>",
+      "css": ".ds-camera{font-family:'DM Sans',sans-serif;cursor:pointer;transition:background-color 150ms,color 150ms;display:flex;text-align:left;align-items:center;gap:10px;width:100%;padding:13px 10px;border:0;border-bottom:1px solid #e5e7de;position:relative;border-radius:4px;background:transparent;color:var(--ink,#20272a)}.ds-camera:hover{background:#e9ece2}.ds-camera[aria-pressed=true]{background:#e4e7dc}.ds-camera[aria-pressed=true]:before{content:\"\";position:absolute;left:-12px;top:13px;bottom:13px;width:3px;background:#b28b24}.ds-camera-copy{display:flex;flex-direction:column;gap:5px;min-width:0}.ds-camera-copy strong{font-size:13px;font-weight:550;line-height:1.35}.ds-camera-copy>span{font-size:11px;color:var(--muted,#626864)}.ds-camera-dot{width:6px;height:6px;border-radius:50%;background:#967317;margin-left:auto}.ds-camera:focus-visible{outline:2px solid #987110;outline-offset:4px}@media(prefers-reduced-motion:reduce){.ds-camera{transition:none}}"
+    },
+    {
+      "name": "Driver state badge",
+      "kind": "chip",
+      "refersTo": "driver-status",
+      "description": "Text badge for the current mode; thinking and driving use pale yellow. Announcement belongs to the separate driver status heading.",
+      "html": "<span class=\"ds-driver-status ds-driver-status-thinking\">Thinking</span>",
+      "css": ".ds-driver-status{display:inline-block;padding:4px 6px;background:#e4e8db;color:#5b6552;border-radius:3px;font:9px 'DM Sans',sans-serif;white-space:nowrap}.ds-driver-status-thinking,.ds-driver-status-driving{background:#f3e2a4;color:#644b0b}"
+    },
+    {
+      "name": "Actor telemetry",
+      "kind": "card",
+      "refersTo": "actor-telemetry",
+      "description": "Compact map instrument. Speed is numeric; units and signal names remain prose. The signal dot is accompanied by a written label.",
+      "html": "<section class=\"ds-actor\" aria-label=\"Selected actor telemetry\"><span class=\"ds-actor-label\">EGO VEHICLE</span><div class=\"ds-speed\">14<span>mph</span></div><div class=\"ds-actor-meta\">Gridlocked 01<span class=\"ds-signal\">green · demo signal</span></div></section>",
+      "css": ".ds-actor{width:174px;padding:16px;background:var(--paper,#f5f4ed);color:var(--ink,#20272a);border:1px solid var(--line,#d9dcd3);border-radius:5px;font-family:'DM Sans',sans-serif}.ds-actor-label{font-size:10px;font-weight:650;color:#59654f}.ds-speed{font:500 43px/1.3 var(--mono,'IBM Plex Mono',monospace);margin:8px 0 5px;letter-spacing:-2px}.ds-speed>span{font:12px 'DM Sans',sans-serif;color:var(--muted,#626864);letter-spacing:0;margin-left:7px}.ds-actor-meta{display:flex;flex-direction:column;gap:9px;font-size:10px;color:var(--muted,#626864)}.ds-signal{display:flex;align-items:center;gap:6px;color:#2e7247}.ds-signal:before{content:'';width:6px;height:6px;border-radius:50%;background:currentColor}@media(max-width:960px){.ds-actor{width:137px;padding:13px}.ds-speed{font-size:35px}}@media(max-width:760px){.ds-actor{width:123px;padding:12px}.ds-speed{font-size:31px;margin:5px 0}}"
+    },
+    {
+      "name": "Simulation playback",
+      "kind": "custom",
+      "refersTo": "playback",
+      "description": "Paper transport instrument with separate simulation clock. Model control disables the range and replaces play/pause with Stop in the app. This snippet shows replay.",
+      "html": "<section class=\"ds-playback\" aria-label=\"Simulation playback controls\"><span class=\"ds-demo-tag\">DEMO</span><button class=\"ds-play\" aria-label=\"Play simulation\"><svg width=\"14\" height=\"14\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" aria-hidden=\"true\"><path d=\"m8 5 11 7-11 7V5Z\"/></svg></button><div class=\"ds-timeline\"><input aria-label=\"Simulation timeline\" type=\"range\" min=\"0\" max=\"60\" value=\"30\"><div class=\"ds-times\"><span>00:30</span><span>01:00</span></div></div></section>",
+      "css": ".ds-playback{height:68px;border:1px solid #c6cbbf;background:var(--paper,#f5f4ed);color:var(--ink,#20272a);border-radius:6px;display:flex;align-items:center;gap:20px;padding:0 18px;box-shadow:0 3px 20px #0002}.ds-demo-tag{display:flex;align-items:center;justify-content:center;min-width:37px;height:30px;font:10px var(--mono,'IBM Plex Mono',monospace);color:#5b4812;background:#f1e3ad;border-radius:3px}.ds-play{font-family:'DM Sans',sans-serif;cursor:pointer;transition:background-color 150ms,color 150ms;border:0;width:34px;height:34px;border-radius:50%;display:flex;align-items:center;justify-content:center;background:var(--ink,#20272a);color:var(--paper,#f5f4ed)}.ds-play:hover{background:#465143}.ds-play:focus-visible{outline:2px solid #987110;outline-offset:4px}.ds-timeline{flex:1;min-width:50px;padding-top:10px}.ds-timeline input{display:block;appearance:none;-webkit-appearance:none;height:3px;background:linear-gradient(to right,#536445 0%,#536445 50%,#d4dacd 50%,#d4dacd 100%);border:0;border-radius:3px;width:100%;margin:0;cursor:pointer}.ds-timeline input::-webkit-slider-thumb{appearance:none;width:9px;height:9px;background:#536445;border:0;border-radius:50%}.ds-timeline input::-moz-range-thumb{width:9px;height:9px;background:#536445;border:0;border-radius:50%}.ds-timeline input:focus-visible{outline:2px solid #987110;outline-offset:4px}.ds-times{font:9px var(--mono,'IBM Plex Mono',monospace);color:var(--muted,#626864);display:flex;justify-content:space-between;margin-top:9px}.ds-times span:first-child{color:var(--ink,#20272a)}@media(max-width:760px){.ds-playback{height:65px;padding:0 11px;gap:10px}.ds-play{width:31px;height:31px}.ds-times{font-size:8px}}@media(prefers-reduced-motion:reduce){.ds-play{transition:none}}"
+    }
+  ],
+  "narrative": {
+    "northStar": "The New York Street Operations Desk",
+    "overview": "Warm paper, charcoal ink, and taxi yellow frame a dark geographic scene. The interface feels like a compact street operations desk: solid materials, flat rows, thin rules, and clear numbers. Camera imagery and rendered vehicles supply the visual detail.\n\nThe map remains the main visual field. Controls use restrained color changes and small functional shadows; the rail provides a consistent reading order for camera selection, route planning, and actual model decisions. The map retains its existing dark controls and mint geographic accents as a separate visual layer.",
+    "keyCharacteristics": [
+      "Warm paper controls with a sparse taxi-yellow action accent.",
+      "DM Sans for interface language; IBM Plex Mono for speed, time, and numeric metadata.",
+      "Flat task rows and measured dividers, with floating instruments above the map.",
+      "One Cameras / Route / Driver rail; a modal overlay at narrow widths.",
+      "Explicit source and state labels for camera media, simulation playback, and model control."
+    ],
+    "rules": [
+      {
+        "name": "The Paper and Map Rule",
+        "body": "Use the warm paper palette for workspace controls and preserve the dark geographic layer. Mint belongs to existing map controls and geographic rendering.",
+        "section": "colors"
+      },
+      {
+        "name": "The Numeric Voice Rule",
+        "body": "Use IBM Plex Mono for measurements, clocks, counts, and model identifiers; keep explanations, units, and actions in DM Sans.",
+        "section": "typography"
+      },
+      {
+        "name": "The Flat Rail Rule",
+        "body": "Keep the rail flat. Use separators and spacing inside it; reserve shadows for surfaces floating over the geographic scene.",
+        "section": "elevation"
+      }
+    ],
+    "dos": [
+      "Do keep one shared task rail with a visible active underline and text label.",
+      "Do use taxi yellow for the next consequential action and charcoal for Stop drive or a selected perspective.",
+      "Do retain visible keyboard focus, pressed and expanded states, and readable loading or failure copy.",
+      "Do preserve the mobile rail focus trap, inert background, Escape dismissal, and focus restoration.",
+      "Do keep camera provenance and simulated-motion labels distinct from real model decisions.",
+      "Do account for measured overlays when framing the map and keep mobile captions clear of attribution.",
+      "Do disable interface transitions and loading animation for reduced motion while preserving functional simulation controls."
+    ],
+    "donts": [
+      "Don't replace flat paper controls with glass, decorative gradients, or repeated dashboard cards.",
+      "Don't use mint as a new workspace action color or spread taxi yellow across every surface.",
+      "Don't turn the driver panel into a chat transcript; show status, measurements, the latest decision, and optional history.",
+      "Don't fabricate a model decision, substitute a replay for a failed model response, or imply that camera images drive this simulation.",
+      "Don't style all interface text as monospace or enlarge metadata into competing headlines.",
+      "Don't claim every control has a 44px target or that this extraction constitutes a complete accessibility audit."
+    ]
+  }
+}
