@@ -23,6 +23,7 @@ from .worlds.runtime import WorldManager
 
 DOT_URL = "https://webcams.nyctmc.org/api/cameras"
 DOT_PAGE = "https://webcams.nyctmc.org/map"
+DOT_BOROUGHS = {name.upper(): name for name in ("Manhattan", "Brooklyn", "Queens", "Bronx", "Staten Island")}
 ROOT = Path(__file__).resolve().parent.parent
 
 
@@ -94,16 +95,24 @@ def normalize_dot(rows: object) -> list[dict]:
     if not isinstance(rows, list):
         raise ValueError("Invalid camera directory")
     cameras = []
+    seen = set()
     for row in rows:
-        if not isinstance(row, dict) or str(row.get("area", "")).upper() != "MANHATTAN":
+        if not isinstance(row, dict):
+            continue
+        borough = DOT_BOROUGHS.get(str(row.get("area", "")).strip().upper())
+        if borough is None:
             continue
         try:
             lat, lon = float(row["latitude"]), float(row["longitude"])
         except (ValueError, TypeError, KeyError):
             continue
         identifier = str(row.get("id", ""))
-        if not (40.68 <= lat <= 40.89 and -74.04 <= lon <= -73.90 and re.fullmatch(r"[A-Za-z0-9-]{1,100}", identifier)):
+        # A broad NYC envelope validates coordinates without clipping outer-borough
+        # streets and bridge cameras. The provider's area supplies the borough.
+        if not (40.45 <= lat <= 40.95 and -74.30 <= lon <= -73.65
+                and re.fullmatch(r"[A-Za-z0-9-]{1,100}", identifier)) or identifier in seen:
             continue
+        seen.add(identifier)
         image_url = row.get("imageUrl")
         try:
             parsed = urlsplit(image_url) if isinstance(image_url, str) else None
@@ -114,7 +123,7 @@ def normalize_dot(rows: object) -> list[dict]:
             image_url = f"{DOT_URL}/{identifier}/image"
         cameras.append({
             "id": identifier, "name": str(row.get("name") or "NYC DOT camera"),
-            "kind": "snapshot", "coordinates": [lon, lat], "provider": "NYC DOT",
+            "kind": "snapshot", "coordinates": [lon, lat], "provider": "NYC DOT", "borough": borough,
             "sourceUrl": f"{DOT_PAGE}?cameras={identifier}",
             "playbackUrl": image_url, "thumbnailUrl": image_url,
             "description": "Periodic street image · source capture time unavailable",
@@ -144,6 +153,9 @@ async def cameras(request: Request):
     items, metadata = await camera_cache.get(lambda: fetch_dot(request.app.state.http))
     return {"cameras": items, "metadata": {
         **metadata, "sourceUrl": DOT_PAGE, "directoryUrl": DOT_URL,
+        "coverage": "NYC five boroughs", "total": len(items),
+        "boroughCounts": {borough: sum(camera["borough"] == borough for camera in items)
+                          for borough in DOT_BOROUGHS.values()},
         "sourceKind": "snapshot", "captureClock": "unknown",
         "notice": "NYC DOT supplies periodic images. Retrieval time is not source capture time.",
     }}

@@ -136,7 +136,7 @@ def test_dot_normalization_filters_and_distinguishes_images():
     rows = [
         {"id": "dot-1", "name": "Example crossing", "area": "MANHATTAN", "latitude": 40.72, "longitude": -74.01, "isOnline": True, "imageUrl": "https://evil.example/image.jpg"},
         {"id": "outside", "area": "MANHATTAN", "latitude": 5, "longitude": 5},
-        {"id": "wrong-area", "area": "QUEENS", "latitude": 40.72, "longitude": -74.01},
+        {"id": "wrong-area", "area": "WESTCHESTER", "latitude": 40.72, "longitude": -74.01},
         {"id": "../unsafe", "area": "MANHATTAN", "latitude": 40.72, "longitude": -74.01},
     ]
     normalized = normalize_dot(rows)
@@ -145,6 +145,39 @@ def test_dot_normalization_filters_and_distinguishes_images():
     assert normalized[0]["capturedAt"] is None
     assert normalized[0]["playbackUrl"] == "https://webcams.nyctmc.org/api/cameras/dot-1/image"
     assert normalized[0]["availability"] == "unverified"
+    assert normalized[0]["borough"] == "Manhattan"
+
+
+def test_dot_includes_all_five_boroughs_and_offline_cameras_without_duplicates():
+    locations = [
+        ("Manhattan", 40.771797, -73.979217),
+        ("Queens", 40.673832, -73.734442),
+        ("Brooklyn", 40.60632, -73.989087),
+        ("Bronx", 40.864552, -73.813781),
+        ("Staten Island", 40.529434, -74.161351),
+    ]
+    rows = [{"id": f"dot-{index}", "area": borough, "latitude": lat,
+             "longitude": lon, "isOnline": index != 4}
+            for index, (borough, lat, lon) in enumerate(locations)]
+    rows.extend([rows[0], {**rows[1], "id": "invalid", "latitude": "NaN"}])
+    normalized = normalize_dot(rows)
+    assert len(normalized) == 5
+    assert {camera["borough"] for camera in normalized} == {row[0] for row in locations}
+    assert normalized[-1]["availability"] == "unavailable"
+    assert normalized[-1]["coordinates"] == [-74.161351, 40.529434]
+
+
+def test_dot_citywide_metadata(monkeypatch):
+    async def directory(_loader):
+        return [{"id": "q", "borough": "Queens"}, {"id": "b", "borough": "Bronx"}], {"mode": "connected"}
+    monkeypatch.setattr("backend.main.camera_cache.get", directory)
+    with TestClient(app) as client:
+        response = client.get("/api/cameras").json()
+    assert response["metadata"]["coverage"] == "NYC five boroughs"
+    assert response["metadata"]["total"] == 2
+    assert response["metadata"]["boroughCounts"] == {
+        "Manhattan": 0, "Brooklyn": 0, "Queens": 1, "Bronx": 1, "Staten Island": 0,
+    }
 
 
 def test_stale_cache_keeps_original_success_time():

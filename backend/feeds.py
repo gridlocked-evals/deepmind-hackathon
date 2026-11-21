@@ -19,7 +19,7 @@ HLS_SOURCES = {
     f"511ny-{identifier}": {
         "id": f"511ny-{identifier}", "providerCameraId": identifier,
         "name": f"West Street at {street}", "kind": "hls",
-        "coordinates": [lon, lat], "provider": "511NY / NYSDOT",
+        "coordinates": [lon, lat], "provider": "511NY / NYSDOT", "borough": "Manhattan",
         "sourceUrl": f"https://511ny.org/camera/{identifier}",
         "playbackUrl": f"/api/feeds/511ny-{identifier}/index.m3u8",
         "resolution": resolution, "capturedAt": None,
