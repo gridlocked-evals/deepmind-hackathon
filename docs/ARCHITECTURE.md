@@ -60,6 +60,15 @@ The HLS proxy accepts registered camera IDs rather than arbitrary upstream URLs.
 
 The [model gateway](MODEL_GATEWAY.md) adds backend Hydrogen/Carbon/Nano Banana inference, typed Decisions judgments and a bounded Genie development probe. It records immutable request/result evidence and persistent per-stage budgets, with read-only status at `/api/models/status`. All five services passed [live capability checks](MODEL_GATEWAY_VERIFICATION.md) on November 21, 2026. It does not connect the camera capture, mayor edit or playable-world stages, and its local contracts do not replace the domain schema freeze in issue #2.
 
+The [Genie runtime](GENIE_RUNTIME.md) now owns live session creation, scoped provider
+authorization, a video WebSocket relay, received-frame recordings, separate key/text
+ownership and explicit termination. Its production boundary loads exact reference
+and gate hashes from a trusted backend store. The real #8 gate and frontend are
+not wired to that boundary yet. A synthetic development session verified 208 frames
+and acknowledged termination; [the measurement record](GENIE_RUNTIME_VERIFICATION.md)
+separates visible responses from unmeasured limits. The runtime reuses gateway
+reservations and leaves unconfirmed sessions blocked for recovery.
+
 - Add a backend `ScenarioProvider`, runtime payload validation, and loading/error state in `App` to replace its static bundle import. Preserve the metric axes, actor IDs, ordered frame times, provenance, and version identity.
 - Generalize the renderer before accepting arbitrary intersections. Base polygons and actor states come from the bundle, but curbs, markings, signal placement, furniture, and route-progress coloring still use Vestry-specific constants. The renderer currently supports one ego plus up to 63 surrounding actors, three vehicle kinds, and one scene-wide signal state.
 - Add capture and replay contracts before claiming video/simulation synchronization. Camera identity alone is insufficient: captured media, calibration, scene/branch version, and relative time must be joined explicitly.
