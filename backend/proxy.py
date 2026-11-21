@@ -165,10 +165,28 @@ async def proxy_media(request: Request, camera_id: str, url: str) -> Response:
         finalized = True
         try:
             if response is not None:
-                # Starlette's disconnect listener cancels an AnyIO task group.
-                # Shield resource cleanup, but never hold a slot indefinitely.
-                with anyio.move_on_after(UPSTREAM_CLOSE_SECONDS, shield=True):
-                    await response.aclose()
+                # Close in a separate task and wait it out, but never hold a slot indefinitely.
+                # The shield stops AnyIO scope cancellation (Starlette's disconnect listener), which is
+                # re-delivered on every await and would spin this loop; the catch handles a direct
+                # Task.cancel(), which a shield does not stop and which is delivered once.
+                close = asyncio.ensure_future(response.aclose())
+                loop = asyncio.get_running_loop()
+                deadline = loop.time() + UPSTREAM_CLOSE_SECONDS
+                cancelled = None
+                with anyio.CancelScope(shield=True):
+                    while not close.done() and (left := deadline - loop.time()) > 0:
+                        try:
+                            await asyncio.wait([close], timeout=left)
+                        except asyncio.CancelledError as exc:
+                            cancelled = exc
+                if not close.done():
+                    # Hard deadline: unlike wait_for, never wait for the close to honour cancellation.
+                    close.cancel()
+                    close.add_done_callback(lambda task: task.cancelled() or task.exception())
+                if cancelled is not None:
+                    raise cancelled
+                if close.done() and not close.cancelled():
+                    close.result()
         finally:
             slots.release()
 

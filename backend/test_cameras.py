@@ -143,6 +143,7 @@ class TrackedMediaStream(httpx.AsyncByteStream):
         self.started = asyncio.Event()
         self.close_calls = 0
         self.closed = False
+        self.close_started, self.close_gate = asyncio.Event(), None
 
     async def __aiter__(self):
         self.started.set()
@@ -154,6 +155,9 @@ class TrackedMediaStream(httpx.AsyncByteStream):
 
     async def aclose(self):
         self.close_calls += 1
+        self.close_started.set()
+        if self.close_gate:
+            await self.close_gate.wait()
         if self.stall_close:
             await asyncio.Event().wait()
         # Checkpoint makes cancellation during cleanup observable.
@@ -248,6 +252,106 @@ def test_media_task_cancellation_closes_upstream_and_releases_capacity(monkeypat
                 await task
             assert stream.closed and stream.close_calls == 1
             assert slots._value == 8
+    asyncio.run(run())
+
+
+def test_media_task_cancellation_during_close_finishes_cleanup(monkeypatch):
+    async def run():
+        slots = asyncio.Semaphore(8)
+        monkeypatch.setattr(proxy, "_slots", slots)
+        stream = TrackedMediaStream()
+        stream.close_gate = asyncio.Event()
+        async with httpx.AsyncClient(transport=httpx.MockTransport(lambda _: httpx.Response(
+                200, stream=stream, headers={"Content-Type": "video/mp2t"}))) as client:
+            response, scope, receive = await media_response(client)
+
+            async def send(_message):
+                pass
+
+            task = asyncio.create_task(response(scope, receive, send))
+            await stream.close_started.wait()
+            task.cancel()
+            await asyncio.sleep(0)
+            stream.close_gate.set()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            assert stream.closed and stream.close_calls == 1
+            assert slots._value == 8
+    asyncio.run(run())
+
+
+def test_scope_cancellation_during_close_does_not_spin(monkeypatch):
+    import anyio
+    waits = []
+    real_wait = asyncio.wait
+
+    def counting_wait(fs, *args, **kwargs):
+        waits.append(1)
+        return real_wait(fs, *args, **kwargs)
+
+    async def run():
+        slots = asyncio.Semaphore(8)
+        monkeypatch.setattr(proxy, "_slots", slots)
+        monkeypatch.setattr(proxy.asyncio, "wait", counting_wait)
+        stream = TrackedMediaStream()
+        stream.close_gate = asyncio.Event()
+        async with httpx.AsyncClient(transport=httpx.MockTransport(lambda _: httpx.Response(
+                200, stream=stream, headers={"Content-Type": "video/mp2t"}))) as client:
+            response, scope, receive = await media_response(client)
+
+            async def send(_message):
+                pass
+
+            groups = []
+
+            async def serve():  # a task group like Starlette's disconnect listener
+                async with anyio.create_task_group() as group:
+                    groups.append(group)
+                    group.start_soon(response, scope, receive, send)
+
+            server = asyncio.create_task(serve())
+            await stream.close_started.wait()
+            groups[0].cancel_scope.cancel()
+            await asyncio.sleep(0.2)  # close is held open; an unshielded loop spins here
+            stream.close_gate.set()
+            await server
+            assert stream.closed and stream.close_calls == 1
+            assert slots._value == 8
+        monkeypatch.undo()
+        assert len(waits) < 10, f"cleanup loop spun {len(waits)} times"
+    asyncio.run(run())
+
+
+def test_close_that_ignores_cancellation_cannot_hold_a_slot(monkeypatch):
+    class StubbornStream(TrackedMediaStream):
+        async def aclose(self):
+            self.close_calls += 1
+            while not self.closed:
+                try:
+                    await self.release.wait()
+                    self.closed = True
+                except asyncio.CancelledError:
+                    pass  # a close that swallows cancellation
+
+    async def run():
+        slots = asyncio.Semaphore(8)
+        monkeypatch.setattr(proxy, "_slots", slots)
+        monkeypatch.setattr(proxy, "UPSTREAM_CLOSE_SECONDS", .05)
+        stream = StubbornStream()
+        stream.release = asyncio.Event()
+        async with httpx.AsyncClient(transport=httpx.MockTransport(lambda _: httpx.Response(
+                200, stream=stream, headers={"Content-Type": "video/mp2t"}))) as client:
+            response, scope, receive = await media_response(client)
+
+            async def send(_message):
+                pass
+
+            try:
+                await asyncio.wait_for(response(scope, receive, send), timeout=1)
+                assert slots._value == 8  # released at the deadline, though the close never finished
+            finally:
+                stream.release.set()  # let the abandoned close end so the loop can shut down
+                await asyncio.sleep(0)
     asyncio.run(run())
 
 
