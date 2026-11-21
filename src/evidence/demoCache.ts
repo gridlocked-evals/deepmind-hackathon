@@ -1,9 +1,9 @@
 import { useEffect, useState } from 'react';
 import { apiUrl } from './api';
-import type { ExtractionReport, SavedCapture } from './api';
+import type { SavedCapture } from './api';
 
 /** Footage pre-captured by scripts/cache_demo_footage.py, served at GET /api/demo-cache. */
-export interface DemoCacheEntry { kind: 'hls' | 'snapshot'; saved: SavedCapture; extraction?: ExtractionReport }
+export interface DemoCacheEntry { kind: 'hls' | 'snapshot'; saved: SavedCapture; extractionId?: string }
 export interface DemoCache { createdAt: string; cameras: Record<string, DemoCacheEntry>; dropped: Record<string, string> }
 
 export function useDemoCache(): DemoCache | null {

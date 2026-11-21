@@ -4,7 +4,7 @@ import { createEvents, preset, requestEvent, withEventActors } from '../scenario
 import type { ScenarioPlan } from '../scenarios/events';
 import { runContinuousDriver } from './continuous';
 import type { DriverClock } from './continuous';
-import { createDriverSimulation } from './physics';
+import { createDriverSimulation, prepareDriverDecision } from './physics';
 import type { DriverSimulation } from './physics';
 import { MAX_DRIVER_STEPS } from './types';
 import type { DriverObservation, DriverResponse } from './types';
@@ -212,4 +212,31 @@ describe('continuous Decisions driver', () => {
     expect(run.state().time).toBeCloseTo(60, 8);
     expect(run.requests.length).toBeLessThanOrEqual(MAX_DRIVER_STEPS);
   });
+});
+
+it('preserves synchronous barrier updates before advancing the next physics frame', async () => {
+  const plan = preset(); plan.events[0].trigger = { kind: 'manual' };
+  const clock = new Clock(100), controller = new AbortController();
+  let current: DriverSimulation = eventState(plan);
+  let appliedAt: number | null = null;
+  const result = runContinuousDriver({ initial: current, signal: controller.signal, clock,
+    readState: () => current,
+    barrier: { everySeconds: 3, until: 3, run: state => {
+      if (state.time === 3) {
+        current = prepareDriverDecision({ ...current, events: requestEvent(current.events!, 'hazard-1', state.time) });
+        appliedAt = current.events!.applied[0].appliedAt;
+      }
+      return null;
+    } },
+    requestDecision: async step => response(step),
+    onDecision: () => undefined,
+    onFrame: (_, state) => { current = state; },
+    onPublish: state => { current = state; },
+  }).catch(error => error);
+  await flush(); await clock.advance(3500);
+  expect(appliedAt).toBe(3);
+  expect(current.events!.applied).toHaveLength(1);
+  expect(current.events!.applied[0].appliedAt).toBe(3);
+  expect(current.time).toBeGreaterThan(3);
+  controller.abort(); await result;
 });

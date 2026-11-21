@@ -219,6 +219,14 @@ describe('scenario trace and replay', () => {
     expect(trace.telemetry.some(row => row.control?.requestedTargetMps !== row.control?.constrainedTargetMps)).toBe(true);
     expect(trace.terminal.reason).toBe('interrupted');
   });
+  it('with guards ignoring hazards, the same non-reacting model ends in contact rather than a guard stop (#91)', () => {
+    let state: DriverSimulation = { ...setup(), guardsIgnoreHazards: true };
+    const trace = createTrace(state, 'fixture-guards-off', 'test-fixture');
+    for (let tick = 0; tick < 130; tick++) { state = advanceDriver(state, accelerate, .1); recordFrame(trace, state); }
+    finishTrace(trace, state, 'interrupted');
+    expect(trace.guardsIgnoreHazards).toBe(true);
+    expect(summarizeTrace(trace).injectedHazardContactFrames).toBeGreaterThan(0);
+  });
   it('exports ordered exact observations, decisions, applied frames and replayable outcomes', () => {
     const trace = run('event');
     expect(trace.steps).toHaveLength(12); expect(trace.frames).toHaveLength(361);

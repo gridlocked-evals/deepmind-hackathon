@@ -23,6 +23,7 @@ import json
 import os
 from pathlib import Path
 import sys
+from threading import Lock
 import time
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote
@@ -56,51 +57,86 @@ def latest_clip(status: dict, clip_s: float) -> tuple[float, float, str] | None:
     return end - start, end - start, status["history"]["bufferRevision"]
 
 
-def cache_video(base: str, cameras: list[dict], args, kept: dict, dropped: dict) -> None:
-    """Fills kept/dropped in place so the caller can release pins if a later step fails."""
-    recording: list[str] = []
+def unpin(base: str, entries) -> None:
+    for entry in entries:
+        try:
+            call(base, f"/api/captures/{quote(entry['saved']['capture']['id'])}/pins/{PIN_JOB}", method="DELETE")
+        except (RuntimeError, URLError, TimeoutError, ValueError):
+            pass
+
+
+class PinAttempts:
+    """Remember pins inside workers, even when their result is never consumed."""
+    def __init__(self):
+        self._lock = Lock()
+        self._entries = {}
+
+    def remember(self, saved):
+        with self._lock:
+            self._entries[saved["capture"]["id"]] = {"saved": saved}
+
+    def entries(self):
+        with self._lock:
+            return list(self._entries.values())
+
+
+def cache_video(base: str, cameras: list[dict], args, kept: dict | None = None,
+                pins: PinAttempts | None = None) -> tuple[dict, dict]:
+    if kept is None:
+        kept = {}
+    dropped = {}
+    started = time.monotonic()
     first_media: dict[str, tuple[float, float]] = {}  # camera -> (elapsed s, buffered s) when media first arrived
     statuses: dict[str, dict] = {}
-    started = time.monotonic()
+    stopped_at: dict[str, float] = {}
+    attempted = []
+    recording = []
+    stop_errors = {}
     try:
         for camera in cameras:
+            # A timed-out start may still have succeeded on the server.
+            attempted.append(camera["id"])
             try:
                 call(base, f"/api/captures/{quote(camera['id'])}/recording", {})
                 recording.append(camera["id"])
             except (RuntimeError, URLError, TimeoutError) as exc:
                 dropped[camera["id"]] = f"could not start recording: {exc}"
         print(f"Recording {len(recording)} video cameras for {args.record_seconds:.0f} s…", flush=True)
-        while time.monotonic() - started < args.record_seconds:
+        while recording and time.monotonic() - started < args.record_seconds:
             time.sleep(2)
             for cid in recording:
                 try:
                     status = call(base, f"/api/captures/{quote(cid)}/buffer")
                 except (RuntimeError, URLError, TimeoutError):
-                    continue  # one failed poll is not fatal; the final state comes from /stop
-                statuses[cid] = status
+                    continue  # a transient poll failure does not invalidate the final stop status
                 if status["bufferedSeconds"] > 0 and cid not in first_media:
                     first_media[cid] = (time.monotonic() - started, status["bufferedSeconds"])
     finally:
-        # Always stop what was started, even on errors or Ctrl-C, so no recorder keeps pulling video.
-        elapsed = time.monotonic() - started
-        for cid in recording:
+        # Stop every recorder before any slow decoding/sealing. The stop response
+        # holds the final boundaries and revision; a last poll can already be stale.
+        for cid in attempted:
             try:
-                # A segment can land between the last poll and the stop; the clip must use the final buffer revision.
                 statuses[cid] = call(base, f"/api/captures/{quote(cid)}/stop", {})
-            except (RuntimeError, URLError, TimeoutError) as exc:
+                stopped_at[cid] = time.monotonic() - started
+            except (RuntimeError, URLError, TimeoutError, ValueError) as exc:
+                stop_errors[cid] = f"stop failed: {exc}"
                 print(f"  warn: could not stop {cid}: {exc}", file=sys.stderr)
     for cid in recording:
         status = statuses.get(cid, {})
+        if cid in stop_errors:
+            dropped[cid] = stop_errors[cid]
+            continue
         # Slow = media took too long to start, or arrived well below real time once it did.
         start_s, start_buffered = first_media.get(cid, (None, 0))
         # Measured after first arrival: the first playlist fetch returns a backlog that would inflate the rate.
-        # Media arrives in whole segments, so allow one segment of slack before calling a feed slow.
+        rate = (status.get("bufferedSeconds", 0) - start_buffered) / max(1e-6, stopped_at[cid] - start_s) if start_s is not None else 0
+        # Admission allows one segment of arrival slack; retain the measured rate in metadata.
         bounds = status.get("history", {}).get("segmentBoundariesS") or [0]
         slack = max((b - a for a, b in zip(bounds, bounds[1:])), default=0)
-        rate = (status.get("bufferedSeconds", 0) - start_buffered + slack) / max(1e-6, elapsed - start_s) if start_s is not None else 0
+        admitted_rate = (status.get("bufferedSeconds", 0) - start_buffered + slack) / max(1e-6, stopped_at[cid] - start_s) if start_s is not None else 0
         reason = (status.get("lastError") or "no media received") if start_s is None \
             else f"first media after {start_s:.0f} s" if start_s > args.max_start_seconds \
-            else f"media at {rate:.2f}x real time" if rate < args.min_realtime_ratio \
+            else f"media at {rate:.2f}x real time" if admitted_rate < args.min_realtime_ratio \
             else f"{status.get('repeatedSegments')} repeated segments" if status.get("repeatedSegments") else None
         clip = None if reason else latest_clip(status, args.clip_seconds)
         if reason or not clip:
@@ -111,6 +147,8 @@ def cache_video(base: str, cameras: list[dict], args, kept: dict, dropped: dict)
         try:
             saved = call(base, "/api/captures", {"cameraId": cid, "secondsAgo": seconds_ago, "durationS": duration,
                                                  "holdoutS": 0, "bufferRevision": revision})
+            if pins is not None:
+                pins.remember(saved)  # the server may pin successfully even if the response is lost
             call(base, f"/api/captures/{quote(saved['capture']['id'])}/pins", {"jobId": PIN_JOB})
         except (RuntimeError, URLError) as exc:
             dropped[cid] = f"save failed: {exc}"
@@ -118,21 +156,11 @@ def cache_video(base: str, cameras: list[dict], args, kept: dict, dropped: dict)
             continue
         kept[cid] = {"kind": "hls", "saved": saved, "firstMediaS": round(start_s, 1), "realtimeRatio": round(rate, 2)}
         print(f"  keep {cid}: {duration:.1f} s clip, {rate:.2f}x real time")
+    return kept, dropped
 
 
-def capture_ids(cameras: dict) -> set[str]:
-    return {entry["saved"]["capture"]["id"] for entry in cameras.values()}
-
-
-def release(base: str, ids: set[str]) -> None:
-    for capture_id in ids:
-        try:
-            call(base, f"/api/captures/{quote(capture_id)}/pins/{PIN_JOB}", method="DELETE")
-        except (RuntimeError, URLError, TimeoutError):
-            print(f"  warn: could not unpin {capture_id}", file=sys.stderr)
-
-
-def cache_snapshot(base: str, camera: dict, max_seconds: float) -> tuple[str, dict | str]:
+def cache_snapshot(base: str, camera: dict, max_seconds: float,
+                   pins: PinAttempts | None = None) -> tuple[str, dict | str]:
     for attempt in range(4):
         t0 = time.monotonic()
         try:
@@ -147,6 +175,8 @@ def cache_snapshot(base: str, camera: dict, max_seconds: float) -> tuple[str, di
     if took > max_seconds:
         return camera["id"], f"snapshot took {took:.1f} s"
     try:
+        if pins is not None:
+            pins.remember(saved)
         call(base, f"/api/captures/{quote(saved['capture']['id'])}/pins", {"jobId": PIN_JOB})
     except (RuntimeError, URLError) as exc:
         return camera["id"], f"pin failed: {exc}"
@@ -170,58 +200,60 @@ def main() -> int:
     base = args.base.rstrip("/")
 
     call(base, "/api/health")
+    # The previous run's pins stay until the replacement index is written: the old index still references them.
     try:
-        previous = capture_ids(json.loads(OUT.read_text()).get("cameras", {})) if OUT.exists() else set()
-    except (ValueError, KeyError, TypeError):
-        previous = set()
+        previous = list(json.loads(OUT.read_text()).get("cameras", {}).values()) if OUT.exists() else []
+        if any(not isinstance(entry["saved"]["capture"]["id"], str) for entry in previous):
+            raise ValueError("Invalid previous capture identity")
+    except (ValueError, KeyError, TypeError, AttributeError):
+        previous = []
     kept: dict = {}
-    dropped: dict = {}
+    pins = PinAttempts()
     try:
-        run(base, args, kept, dropped)
+        video = call(base, "/api/vision/cameras")
+        video = video.get("cameras", video) if isinstance(video, dict) else video
+        kept, dropped = cache_video(base, video, args, kept, pins)
+
+        if not args.skip_snapshots:
+            dot = call(base, "/api/cameras", timeout=120)["cameras"]
+            dot = [c for c in dot if c.get("kind") == "snapshot"]
+            print(f"Saving {len(dot)} DOT snapshots (drop if slower than {args.snapshot_max_seconds:g} s)…", flush=True)
+            with ThreadPoolExecutor(args.snapshot_workers) as pool:
+                for index, (cid, result) in enumerate(pool.map(lambda c: cache_snapshot(base, c, args.snapshot_max_seconds, pins), dot), 1):
+                    (kept if isinstance(result, dict) else dropped)[cid] = result
+                    if index % 50 == 0:
+                        print(f"  {index}/{len(dot)}", flush=True)
+
+        if args.token:
+            for cid, entry in kept.items():
+                if entry["kind"] != "hls":
+                    continue
+                capture_id = entry["saved"]["capture"]["id"]
+                print(f"Hydrogen extraction for {cid} (paid)…", flush=True)
+                try:
+                    report = call(base, "/api/observations/extract", {"cameraId": cid, "captureId": capture_id},
+                                  token=args.token, timeout=600)
+                    entry["extractionId"] = report["id"]
+                except (RuntimeError, URLError, TimeoutError) as exc:
+                    print(f"  extraction failed for {cid}: {exc}", file=sys.stderr)
+        else:
+            print("No WORLD_API_TOKEN: skipped Hydrogen extraction; the UI can still run it on a cached clip.")
+
+        OUT.parent.mkdir(parents=True, exist_ok=True)
+        tmp = OUT.with_suffix(".tmp")
+        tmp.write_text(json.dumps({"schemaVersion": "demo-cache.v1", "createdAt": datetime.now(timezone.utc).isoformat(),
+                                   "cameras": kept, "dropped": dropped}))
+        tmp.replace(OUT)
     except BaseException:
-        # The old cache file and its pins stay valid; only this run's new pins are released.
-        release(base, capture_ids(kept))
+        # The executor context has joined every worker before rollback. Some
+        # successful/uncertain pins may never have reached the kept dictionary.
+        unpin(base, pins.entries())
         raise
-    # Release the previous run's footage only after the new cache is written.
-    release(base, previous - capture_ids(kept))
+    retained = {entry["saved"]["capture"]["id"] for entry in kept.values()}
+    unpin(base, [entry for entry in pins.entries() if entry["saved"]["capture"]["id"] not in retained])
+    unpin(base, [entry for entry in previous if entry["saved"]["capture"]["id"] not in retained])
     print(f"\nKept {len(kept)} cameras, dropped {len(dropped)}. Wrote {OUT}")
     return 0 if kept else 1
-
-
-def run(base: str, args, kept: dict, dropped: dict) -> None:
-    video = call(base, "/api/vision/cameras")
-    video = video.get("cameras", video) if isinstance(video, dict) else video
-    cache_video(base, video, args, kept, dropped)
-
-    if not args.skip_snapshots:
-        dot = call(base, "/api/cameras", timeout=120)["cameras"]
-        dot = [c for c in dot if c.get("kind") == "snapshot"]
-        print(f"Saving {len(dot)} DOT snapshots (drop if slower than {args.snapshot_max_seconds:g} s)…", flush=True)
-        with ThreadPoolExecutor(args.snapshot_workers) as pool:
-            for index, (cid, result) in enumerate(pool.map(lambda c: cache_snapshot(base, c, args.snapshot_max_seconds), dot), 1):
-                (kept if isinstance(result, dict) else dropped)[cid] = result
-                if index % 50 == 0:
-                    print(f"  {index}/{len(dot)}", flush=True)
-
-    if args.token:
-        for cid, entry in kept.items():
-            if entry["kind"] != "hls":
-                continue
-            capture_id = entry["saved"]["capture"]["id"]
-            print(f"Hydrogen extraction for {cid} (paid)…", flush=True)
-            try:
-                entry["extraction"] = call(base, "/api/observations/extract", {"cameraId": cid, "captureId": capture_id},
-                                           token=args.token, timeout=600)
-            except (RuntimeError, URLError, TimeoutError) as exc:
-                print(f"  extraction failed for {cid}: {exc}", file=sys.stderr)
-    else:
-        print("No WORLD_API_TOKEN: skipped Hydrogen extraction; the UI can still run it on a cached clip.")
-
-    OUT.parent.mkdir(parents=True, exist_ok=True)
-    tmp = OUT.with_suffix(".tmp")
-    tmp.write_text(json.dumps({"schemaVersion": "demo-cache.v1", "createdAt": datetime.now(timezone.utc).isoformat(),
-                               "cameras": kept, "dropped": dropped}))
-    tmp.replace(OUT)
 
 
 if __name__ == "__main__":

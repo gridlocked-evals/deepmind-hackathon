@@ -4,6 +4,8 @@ import type { GeminiDriver } from './types';
 import { ScenarioPanel } from '../scenarios/ScenarioPanel';
 import type { ScenarioPlan } from '../scenarios/events';
 import type { ScenarioBundle } from '../types';
+import { AdversaryLane } from '../scenarios/AdversaryLane';
+import type { AdversarySettings } from '../scenarios/adversary';
 
 export interface DriverPanelProps {
   driver: GeminiDriver;
@@ -11,6 +13,8 @@ export interface DriverPanelProps {
   plan: ScenarioPlan;
   onPlanChange: (plan: ScenarioPlan) => void;
   onReplay: (scene: ScenarioBundle) => void;
+  adversary?: AdversarySettings;
+  onAdversaryChange?: (settings: AdversarySettings) => void;
 }
 
 function downloadTrace(driver: GeminiDriver) {
@@ -22,7 +26,7 @@ function downloadTrace(driver: GeminiDriver) {
   setTimeout(() => URL.revokeObjectURL(url), 0);
 }
 
-export function DriverPanel({ driver, onStart, plan, onPlanChange, onReplay }: DriverPanelProps) {
+export function DriverPanel({ driver, onStart, plan, onPlanChange, onReplay, adversary, onAdversaryChange }: DriverPanelProps) {
   const latest = driver.decisionLog.at(-1);
   const statusLabel = driver.replaying ? 'Recorded playback' : driver.status === 'thinking' ? 'Gemini is deciding'
     : driver.status === 'driving' ? 'Driving the route'
@@ -62,6 +66,7 @@ export function DriverPanel({ driver, onStart, plan, onPlanChange, onReplay }: D
       <span className="driver-model">{latest?.model_id ?? driver.modelAvailability.modelId ?? 'Server-side Gemini'}</span>
     </div>
     <ScenarioPanel plan={plan} onChange={onPlanChange} driver={driver} onReplay={onReplay} onBaseline={() => (onStart ?? driver.start)('baseline')} />
+    {adversary && onAdversaryChange && <AdversaryLane settings={adversary} onChange={onAdversaryChange} driver={driver} />}
     {driver.decisionLog.length > 0 && <details className="driver-history">
       <summary>Decision history <span>{driver.decisionLog.length}</span></summary>
       <ol>{driver.decisionLog.map(entry => <li key={entry.request_id}>

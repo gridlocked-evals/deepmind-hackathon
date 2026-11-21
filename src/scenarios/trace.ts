@@ -3,7 +3,8 @@ import { driverFrame, driverObservation, observedEventIds } from '../agent/physi
 import type { DriverSimulation } from '../agent/physics';
 import type { DriverTrace } from '../agent/trace';
 import { DECISION_INTERVAL_SECONDS, MAX_COMMAND_AGE_SECONDS, MAX_DRIVER_STEPS, MAX_DRIVE_SECONDS } from '../agent/types';
-import type { DriverObservation, DriverResponse } from '../agent/types';
+import type { DriverObservation, DriverResponse, GuardReason } from '../agent/types';
+import type { AdversaryTrace } from './adversary';
 import { EVENT_STEP, parseScenario } from './events';
 import type { EventRecord, ScenarioPlan } from './events';
 
@@ -25,6 +26,8 @@ export interface Telemetry {
   speed: number;
   control: DriverSimulation['control'] | null;
   egoContacts: string[];
+  /** The local guard that changed applied motion on this tick (#60 semantics); absent in older exports. */
+  guard?: GuardReason;
 }
 export interface RunTrace {
   schemaVersion: 'gridlocked-driver-trace.v2';
@@ -44,6 +47,10 @@ export interface RunTrace {
   /** The compatible #60 action/guard trace; absent in exports made before integration. */
   driverTrace?: DriverTrace;
   eventLog: EventRecord[];
+  /** Eval option: guards ignored injected hazards (#91). Absent means false. */
+  guardsIgnoreHazards?: boolean;
+  /** Adversary lane decisions, per-attack outcome records and run metrics (#91); absent when the adversary is off. */
+  adversary?: AdversaryTrace;
   appliedEvents: { id: string; appliedAt: number; anchorProgress: number }[];
   terminal: { reason: Terminal; simulationTime: number; message: string | null };
 }
@@ -67,6 +74,7 @@ export function createTrace(state: DriverSimulation, runId: string, modelSource:
     limits: { maxDecisions: MAX_DRIVER_STEPS, decisionIntervalSeconds: DECISION_INTERVAL_SECONDS, maxCommandAgeSeconds: MAX_COMMAND_AGE_SECONDS,
       maxSimulationSeconds: MAX_DRIVE_SECONDS, physicsStepSeconds: EVENT_STEP },
     steps: [], telemetry: [], frames: [], eventLog: [], appliedEvents: [], terminal: { reason: 'running', simulationTime: 0, message: null } };
+  if (state.guardsIgnoreHazards) trace.guardsIgnoreHazards = true;
   recordFrame(trace, state);
   trace.initialFrame = structuredClone(trace.frames[0]);
   return trace;
@@ -83,7 +91,7 @@ export function recordFrame(trace: RunTrace, state: DriverSimulation) {
     return actor.id !== ego.id && definition && footprintContact(ego, state.ego, actor, definition);
   }).map(actor => actor.id);
   const row = { time: state.time, frame: Math.round(state.time / EVENT_STEP), progress: state.progress, speed: state.speed,
-    control: state.control ?? null, egoContacts };
+    control: state.control ?? null, egoContacts, guard: state.guard };
   if (trace.frames.at(-1)?.time === state.time) { trace.frames.pop(); trace.telemetry.pop(); }
   trace.frames.push(structuredClone(frame)); trace.telemetry.push(structuredClone(row));
   trace.eventLog = structuredClone(state.events?.log ?? []);

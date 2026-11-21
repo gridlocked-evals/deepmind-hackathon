@@ -44,6 +44,7 @@ describe('camera evidence in drives', () => {
     const blocked = evidenceConditions(report([fact('obstruction', 'other', null, 'accepted', 'blocked')]), camera);
     expect(evidencePlan(scene(), blocked, chosen).events[0].type).toBe('stalled-vehicle');
     expect(evidencePlan(scene('other-cam'), blocked, chosen)).toBe(chosen);
+    expect(evidencePlan(scene('cam-1', [origin[0] + 0.01, origin[1]]), blocked, chosen)).toBe(chosen);
     expect(evidencePlan(scene(), { ...blocked, obstruction: false }, chosen)).toBe(chosen);
     expect(evidencePlan(scene(), null, chosen)).toBe(chosen);
   });
