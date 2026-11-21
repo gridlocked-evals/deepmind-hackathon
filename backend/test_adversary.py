@@ -1,12 +1,14 @@
 """Adversary budget, validation and transport tests; never use a provider or credentials."""
 import asyncio
 from copy import deepcopy
+from datetime import date
 import json
 from types import SimpleNamespace
 from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
+import httpx
 import pytest
 
 from backend.adversary import (
@@ -14,6 +16,7 @@ from backend.adversary import (
     REACTION_SECONDS, RUN_SECONDS, min_avoidable_distance, router,
 )
 from backend.driver import MAX_REQUEST_BYTES
+from backend.gateway import GatewayConfig, ModelGateway
 from backend.gateway.contracts import ErrorCode, GatewayError, Service
 
 URL = "/api/adversary/attack"
@@ -171,6 +174,59 @@ def test_cancellation_stores_failure_and_prevents_duplicate_bill():
         with pytest.raises(HTTPException) as exc:
             await controller.attack(body)
         assert exc.value.detail["code"] == "cancelled" and len(gateway.calls) == 1
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("dispatched", [False, True])
+def test_cancelled_real_gateway_retains_only_actual_attempt_id(tmp_path, dispatched):
+    async def scenario():
+        entered, release = asyncio.Event(), asyncio.Event()
+        calls = []
+
+        async def handler(request):
+            calls.append(request)
+            entered.set()
+            await release.wait()
+            return httpx.Response(200, json={"status": "completed", "steps": [{"type": "model_output",
+                "content": [{"type": "text", "text": json.dumps(ATTACK)}]}]})
+
+        config = GatewayConfig(data_dir=tmp_path / "ledger", rates_valid_through=date(2030, 1, 1),
+                               max_concurrency=1)
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+            gateway = ModelGateway(config, http, api_key="test-adversary-key")
+            controller = AdversaryController(gateway)
+            body = AttackRequest.model_validate(request_body())
+            if not dispatched:
+                await gateway.slots.acquire()
+            task = asyncio.create_task(controller.attack(body))
+            if dispatched:
+                await entered.wait()
+            else:
+                await asyncio.sleep(0)
+            task.cancel("private cancellation detail")
+            with pytest.raises(asyncio.CancelledError) as cancelled:
+                await task
+            if not dispatched:
+                gateway.slots.release()
+            records = gateway.ledger.attempts()
+            expected_id = records[0]["request_id"] if dispatched else None
+            assert getattr(cancelled.value, "request_id", None) == expected_id
+            assert cancelled.value.args == ("private cancellation detail",)
+            assert len(records) == int(dispatched) and len(calls) == int(dispatched)
+            if dispatched:
+                assert records[0]["outcome"] == "cancelled" and records[0]["usage"] is None
+                assert records[0]["charged_tokens"] > 0
+            with pytest.raises(HTTPException) as duplicate:
+                await controller.attack(body)
+            assert duplicate.value.detail["code"] == "cancelled"
+            assert duplicate.value.detail["request_id"] == expected_id
+            assert "private cancellation detail" not in json.dumps(duplicate.value.detail)
+            assert len(calls) == int(dispatched) and controller.runs[body.run_id].calls == 1
+            assert controller.in_flight == 0 and gateway.slots._value == 1
+            release.set()
+            next_body = AttackRequest.model_validate(request_body(run_id="next-run-0002"))
+            assert (await controller.attack(next_body)).decision.action == "attack"
+            assert len(calls) == int(dispatched) + 1
     asyncio.run(scenario())
 
 

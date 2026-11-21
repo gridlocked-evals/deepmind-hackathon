@@ -173,8 +173,9 @@ class AdversaryController:
                 else:
                     run.last_wait = slot
                 return slot.response
-            except asyncio.CancelledError:
-                slot.error = public_error(GatewayError(ErrorCode.CANCELLED))
+            except asyncio.CancelledError as exc:
+                slot.error = public_error(GatewayError(ErrorCode.CANCELLED,
+                    request_id=getattr(exc, "request_id", None)))
                 run.slots[body.attack_index] = slot
                 raise
             except HTTPException as exc:
