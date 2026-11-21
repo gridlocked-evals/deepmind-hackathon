@@ -1,3 +1,4 @@
+import { DriverRequestError } from './trace';
 import { MAX_DRIVER_STEPS, SPEED_LIMIT_MPS } from './types';
 import type { DriverResponse } from './types';
 
@@ -38,7 +39,7 @@ export function validateDecisionResponse(value: unknown, runId: string, step: nu
     || !Number.isFinite(decision.target_speed_mps) || decision.target_speed_mps < 0 || decision.target_speed_mps > SPEED_LIMIT_MPS
     || !Number.isFinite(decision.confidence) || decision.confidence < 0 || decision.confidence > 1
     || typeof decision.reason !== 'string' || !decision.reason.trim() || decision.reason.length > 240) {
-    throw new Error('Gemini returned an invalid driving decision. The simulation has stopped.');
+    throw new DriverRequestError('Gemini returned an invalid driving decision. The simulation has stopped.');
   }
   return response as DriverResponse;
 }

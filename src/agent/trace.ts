@@ -54,6 +54,16 @@ export interface HoldRecorder {
   start: DriverSimulation;
   events: GuardEvent[];
   last: GuardReason;
+  /** Set once the hold's step is in the trace; finalizeHold is a no-op afterwards. */
+  finalized: boolean;
+}
+
+/** An error whose message is safe to export: the hook's own fixed text or the server's redacted detail.message. */
+export class DriverRequestError extends Error {}
+
+/** The error text written to a trace; anything not known to be redacted (e.g. a non-JSON body) is replaced. */
+export function traceError(failure: unknown): string {
+  return failure instanceof DriverRequestError ? failure.message : 'The driving request failed.';
 }
 
 export function createTrace(runId: string, initial: DriverSimulation): DriverTrace {
@@ -69,7 +79,7 @@ export function createTrace(runId: string, initial: DriverSimulation): DriverTra
 }
 
 export function startHold(start: DriverSimulation): HoldRecorder {
-  return { start, events: [], last: 'none' };
+  return { start, events: [], last: 'none', finalized: false };
 }
 
 /** Call after every advanceDriver() tick; zero-length ticks are ignored. */
@@ -79,9 +89,13 @@ export function recordTick(hold: HoldRecorder, before: DriverSimulation, after: 
   hold.last = after.guard;
 }
 
-/** Records a decision and the motion actually applied; a hold cut short by Stop ends at the stop time. */
-export function addStep(trace: DriverTrace, response: DriverResponse, observation: DriverObservation,
+/** Records a decision and the motion actually applied, once per hold: Stop calls it synchronously before
+ * the terminal state, so an immediate export already has the partial step, and the hold's own cleanup
+ * then finds it done. A hold cut short by Stop ends at the stop time (zero motion if before its first tick). */
+export function finalizeHold(trace: DriverTrace, response: DriverResponse, observation: DriverObservation,
   hold: HoldRecorder, end: DriverSimulation) {
+  if (hold.finalized) return;
+  hold.finalized = true;
   trace.model_id ??= response.model_id;
   trace.steps.push({
     step: response.step, request_id: response.request_id, observation, proposed: response.decision,
@@ -96,9 +110,20 @@ export function finishTrace(trace: DriverTrace | null, terminal: TraceTerminal) 
   if (trace && !trace.terminal) trace.terminal = terminal;
 }
 
+const TERMINAL_STATES = new Set(['route_complete', 'decision_limit', 'stopped_by_user', 'interrupted', 'error']);
+const isObject = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null;
+
 export function readDriverTrace(json: string): DriverTrace {
   const value = JSON.parse(json) as Partial<DriverTrace> | null;
   if (value?.schema !== DRIVER_TRACE_SCHEMA) throw new Error(`Unsupported driver trace schema: ${String(value?.schema)}`);
   if (value.provenance?.source !== 'synthetic_simulator_state') throw new Error('Driver trace is not synthetic simulator state.');
+  // Minimal structure, so downstream code can rely on the shape without a full schema validator.
+  const steps = value.steps as unknown;
+  if (typeof value.run_id !== 'string' || !isObject(value.bounds) || !Array.isArray(steps)
+    || !steps.every(step => isObject(step) && isObject(step.applied)
+      && typeof step.applied.start_time === 'number' && typeof step.applied.end_time === 'number')
+    || !(value.terminal === null || (isObject(value.terminal) && TERMINAL_STATES.has(String(value.terminal.state))))) {
+    throw new Error('Driver trace is malformed.');
+  }
   return value as DriverTrace;
 }
