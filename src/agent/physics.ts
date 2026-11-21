@@ -28,6 +28,8 @@ export interface DriverSimulation {
   signalStop: boolean;
   events?: EventState;
   control?: { requestedTargetMps: number; constrainedTargetMps: number; interventions: string[] };
+  /** Eval option (#91): the leader guard ignores injected `event-*` actors, so only the model can avoid them. */
+  guardsIgnoreHazards?: boolean;
   /** Which local guard changed the applied motion on the last tick; trace instrumentation only. */
   guard: GuardReason;
 }
@@ -99,11 +101,11 @@ function eventActors(state: DriverSimulation, time = state.time) {
   return state.events ? sampleEvents(state.events, time, progress => routePosition(state.path, progress)) : [];
 }
 
-function nearestLeader(state: DriverSimulation, time = state.time) {
+function nearestLeader(state: DriverSimulation, time = state.time, skipInjected = false) {
   const sample = sampleScenario(state.scenario, time);
   let best: { id: string; gap: number; speed: number; progress: number; length: number } | null = null;
   const heading = routePosition(state.path, state.progress).heading;
-  for (const actor of [...sample.actors, ...eventActors(state, time)]) {
+  for (const actor of [...sample.actors, ...(skipInjected ? [] : eventActors(state, time))]) {
     if (actor.id === state.ego.id) continue;
     const definition = state.scenario.actors.find(candidate => candidate.id === actor.id);
     if (!definition) continue;
@@ -187,9 +189,13 @@ export function advanceDriver(state: DriverSimulation, decision: DriverDecision,
     if (accelerationFor(cap) < accelerationFor(desired) - 1e-9) guard = reason;
     constrain(cap, reason === 'leader_guard' ? 'obstacle-spacing' : 'signal-stop');
   };
-  if (observation.lead_gap_m !== null) {
-    const room = Math.max(0, observation.lead_gap_m - MIN_GAP);
-    const cap = Math.min(room / 1.8, Math.sqrt((observation.lead_speed_mps ?? 0) ** 2 + 2 * COMFORTABLE_BRAKING * room));
+  // The model still observes injected hazards; with the eval flag only the guard skips them.
+  const guardLead = state.guardsIgnoreHazards ? nearestLeader(state, state.time, true) : undefined;
+  const leadGap = guardLead === undefined ? observation.lead_gap_m : guardLead && Math.max(0, Math.min(10_000, guardLead.gap));
+  const leadSpeed = guardLead === undefined ? observation.lead_speed_mps : guardLead?.speed ?? null;
+  if (leadGap !== null) {
+    const room = Math.max(0, leadGap - MIN_GAP);
+    const cap = Math.min(room / 1.8, Math.sqrt((leadSpeed ?? 0) ** 2 + 2 * COMFORTABLE_BRAKING * room));
     applyGuard(cap, 'leader_guard');
   }
   let signalStop = state.signalStop;
@@ -205,7 +211,7 @@ export function advanceDriver(state: DriverSimulation, decision: DriverDecision,
   const unclampedSpeed = Math.max(0, Math.min(SPEED_LIMIT_MPS, state.speed + acceleration * delta));
   const bounds: [number, Guard][] = [];
   if (signalStop && observation.stop_distance_m !== null && state.stopProgress !== null) bounds.push([state.stopProgress, 'red_line_guard']);
-  const nextLeader = nearestLeader(state, state.time + delta);
+  const nextLeader = nearestLeader(state, state.time + delta, state.guardsIgnoreHazards);
   if (nextLeader) bounds.push([nextLeader.progress - (state.ego.length + nextLeader.length) / 2 - MIN_GAP, 'leader_guard']);
   // Collision and end boundaries may override comfortable braking in an emergency.
   const { progress, speed, guard: boundaryGuard } = clampAtBoundaries(state.progress,
