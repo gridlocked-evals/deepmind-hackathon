@@ -86,6 +86,11 @@ class ModelGateway:
             # thinking, leaving only three output tokens. Fix this stage's policy
             # to low so the bounded evidence table can actually be returned.
             payload["generation_config"]["thinking_level"] = "low"
+        if (service == Service.HYDROGEN and stage == "navigation"
+                and context.prompt_id.startswith("sim-driver-v2:")):
+            # The live crash demo exhausted 4093/4096 tokens on default
+            # thinking. Scope this policy to the structured simulator driver.
+            payload["generation_config"]["thinking_level"] = "low"
         if service == Service.NANO_BANANA:
             if response_model:
                 raise GatewayError(ErrorCode.INVALID_INPUT)

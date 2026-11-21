@@ -69,7 +69,7 @@ def test_decision_uses_existing_gateway_and_returns_real_trace():
     context = call["context"]
     assert context.purpose == "development" and context.source_id is None and context.capture_id is None
     assert context.episode_id == "sim-driver:test-run-0001"
-    assert context.prompt_id == "sim-driver-v1:step-0"
+    assert context.prompt_id == "sim-driver-v2:step-0"
     assert "synthetic traffic simulator" in call["input_value"]
     assert json.loads(call["input_value"].split("Observation JSON:\n")[1]) == body["observation"]
 

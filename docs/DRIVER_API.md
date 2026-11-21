@@ -138,8 +138,12 @@ model entitlement, remaining quota, or a successful future call.
 
 The endpoint uses `Service.HYDROGEN`, `stage="navigation"`, the existing structured
 response schema support, and `CallContext(purpose="development")`. Its episode ID
-is `sim-driver:<run_id>` and prompt ID is `sim-driver-v1:step-<step>`. It does not
+is `sim-driver:<run_id>` and prompt ID is `sim-driver-v2:step-<step>`. It does not
 forge source/capture IDs or consume the protected demo reserve as camera evidence.
+Version 2 uses `thinking_level: low` within the existing output allowance. This
+policy is scoped to the structured simulator prompt; visual-navigation calls
+keep their existing policy. A live scenario run with default thinking exhausted
+4093 of 4096 output tokens on thinking and returned an incomplete response.
 Keep the development server on loopback; this endpoint follows the local pipeline
 API's unauthenticated setup and is not a public multi-user service.
 

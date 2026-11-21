@@ -40,6 +40,23 @@ async def observe(gateway, **changes):
                                   context=CONTEXT, response_model=Observation, **changes)
 
 
+def test_structured_driver_thinking_policy_is_scoped_and_retains_output_cap(tmp_path):
+    sent = []
+    def handler(request):
+        sent.append(json.loads(request.content))
+        return httpx.Response(200, json=response())
+    async def run():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            gateway = ModelGateway(settings(tmp_path), client, api_key=KEY)
+            for prompt in ("sim-driver-v2:step-0", "visual-navigation-v1"):
+                await gateway.generate(Service.HYDROGEN, stage="navigation", input_value="Fixture observation",
+                    context=CallContext(episode_id="fixture", prompt_id=prompt), response_model=Observation)
+    asyncio.run(run())
+    assert sent[0]["generation_config"]["thinking_level"] == "low"
+    assert "thinking_level" not in sent[1]["generation_config"]
+    assert sent[0]["generation_config"]["max_output_tokens"] == settings(tmp_path).output_tokens_per_call
+
+
 def test_success_records_exact_payload_usage_and_survives_restart(tmp_path):
     requests = []
     def handler(request):

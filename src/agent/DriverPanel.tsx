@@ -1,15 +1,21 @@
 import { ArrowUpRight, BrainCircuit, Play, Square } from 'lucide-react';
 import { MAX_DRIVER_STEPS } from './types';
 import type { GeminiDriver } from './types';
+import { ScenarioPanel } from '../scenarios/ScenarioPanel';
+import type { ScenarioPlan } from '../scenarios/events';
+import type { ScenarioBundle } from '../types';
 
 export interface DriverPanelProps {
   driver: GeminiDriver;
-  onStart?: () => void;
+  onStart?: (mode?: 'baseline' | 'event') => void;
+  plan: ScenarioPlan;
+  onPlanChange: (plan: ScenarioPlan) => void;
+  onReplay: (scene: ScenarioBundle) => void;
 }
 
-export function DriverPanel({ driver, onStart }: DriverPanelProps) {
+export function DriverPanel({ driver, onStart, plan, onPlanChange, onReplay }: DriverPanelProps) {
   const latest = driver.decisionLog.at(-1);
-  const statusLabel = driver.status === 'thinking' ? 'Gemini is deciding'
+  const statusLabel = driver.replaying ? 'Recorded playback' : driver.status === 'thinking' ? 'Gemini is deciding'
     : driver.status === 'driving' ? 'Driving the route'
     : driver.status === 'complete' ? driver.completionReason === 'route-complete' ? 'Destination reached' : 'Demo complete'
     : driver.status === 'stopped' ? 'Drive stopped'
@@ -41,9 +47,10 @@ export function DriverPanel({ driver, onStart }: DriverPanelProps) {
     </div>}
     <div className="driver-controls">
       {driver.active ? <button type="button" className="driver-stop" onClick={driver.stop}><Square size={14} aria-hidden="true" />Stop drive</button>
-        : <button type="button" className="driver-start" disabled={!driver.canStart} onClick={onStart ?? driver.start}><Play size={14} aria-hidden="true" />{driver.hasRun ? 'Restart Gemini drive' : 'Start Gemini drive'}</button>}
+        : <button type="button" className="driver-start" disabled={!driver.canStart} onClick={() => (onStart ?? driver.start)('event')}><Play size={14} aria-hidden="true" />{driver.hasRun ? 'Restart scenario' : 'Start scenario with Gemini'}</button>}
       <span className="driver-model">{latest?.model_id ?? driver.modelAvailability.modelId ?? 'Server-side Gemini'}</span>
     </div>
+    <ScenarioPanel plan={plan} onChange={onPlanChange} driver={driver} onReplay={onReplay} onBaseline={() => (onStart ?? driver.start)('baseline')} />
     {driver.decisionLog.length > 0 && <details className="driver-history">
       <summary>Decision history <span>{driver.decisionLog.length}</span></summary>
       <ol>{driver.decisionLog.map(entry => <li key={entry.request_id}>

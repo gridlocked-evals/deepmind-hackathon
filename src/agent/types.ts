@@ -1,5 +1,6 @@
 import type { MutableRefObject } from 'react';
 import type { SimulationFrame } from '../types';
+import type { RunTrace } from '../scenarios/trace';
 
 export const MAX_DRIVER_STEPS = 12;
 export const SECONDS_PER_DECISION = 3;
@@ -60,8 +61,12 @@ export interface GeminiDriver {
   canStart: boolean;
   unavailableReason: string | null;
   completionReason: 'route-complete' | 'decision-limit' | null;
-  start: () => void;
+  start: (mode?: 'baseline' | 'event') => void;
   stop: () => void;
   reset: () => void;
   refreshAvailability: () => void;
+  inject: (id: string) => void;
+  trace: RunTrace | null;
+  traces: RunTrace[];
+  replaying: boolean;
 }

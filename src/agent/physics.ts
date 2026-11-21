@@ -2,6 +2,8 @@ import { DEMO_SCENE_ID, demoSignal, sampleScenario, streetPoint } from '../scene
 import type { ActorDefinition, ActorState, ScenarioBundle, SimulationFrame, Vec2 } from '../types';
 import { SPEED_LIMIT_MPS } from './types';
 import type { DriverDecision, DriverObservation } from './types';
+import { advanceEvents, sampleEvents } from '../scenarios/events';
+import type { EventState } from '../scenarios/events';
 
 export const MAX_PHYSICS_STEP = 0.1;
 export const MAX_ACCELERATION = 1.5;
@@ -24,6 +26,8 @@ export interface DriverSimulation {
   braking: boolean;
   stopProgress: number | null;
   signalStop: boolean;
+  events?: EventState;
+  control?: { requestedTargetMps: number; constrainedTargetMps: number; interventions: string[] };
 }
 
 export function createPath(points: Vec2[]): RoutePath {
@@ -58,6 +62,7 @@ export function projectOntoRoute(path: RoutePath, point: Vec2) {
 }
 
 export function driverEligibility(scenario: ScenarioBundle): string | null {
+  if (scenario.motionSource === 'event-replay') return 'Recorded replay: load a scene to start a new model run.';
   if (scenario.motionSource === 'location-preview' || createPath(scenario.geometry.route).length < 1) return 'Plan a street route or open Traffic demo to drive.';
   if (!scenario.actors.some(actor => actor.role === 'ego')) return 'This scene does not have a vehicle to drive.';
   return null;
@@ -77,20 +82,46 @@ export function createDriverSimulation(scenario: ScenarioBundle): DriverSimulati
     braking: false, stopProgress, signalStop: false };
 }
 
+export function prepareDriverDecision(state: DriverSimulation): DriverSimulation {
+  return state.events ? { ...state, events: advanceEvents(state.events, state.time, state.progress, state.path.length, true) } : state;
+}
+
+export function validateEventRun(state: DriverSimulation) {
+  if (state.events?.mode === 'event' && state.events.plan.events.some(event =>
+    state.progress + event.parameters.distanceAheadM + 8 >= state.path.length)) {
+    throw new Error('This route is too short for the configured hazard distance. Choose a longer route or reduce the distance.');
+  }
+}
+
+function eventActors(state: DriverSimulation, time = state.time) {
+  return state.events ? sampleEvents(state.events, time, progress => routePosition(state.path, progress)) : [];
+}
+
 function nearestLeader(state: DriverSimulation, time = state.time) {
   const sample = sampleScenario(state.scenario, time);
-  let best: { gap: number; speed: number; progress: number; length: number } | null = null;
+  let best: { id: string; gap: number; speed: number; progress: number; length: number } | null = null;
   const heading = routePosition(state.path, state.progress).heading;
-  for (const actor of sample.actors) {
-    if (actor.id === state.ego.id || Math.cos(actor.heading - heading) < 0.7) continue;
+  for (const actor of [...sample.actors, ...eventActors(state, time)]) {
+    if (actor.id === state.ego.id) continue;
     const definition = state.scenario.actors.find(candidate => candidate.id === actor.id);
-    if (!definition || definition.routeId !== state.ego.routeId) continue;
+    if (!definition) continue;
+    const injected = actor.id.startsWith('event-');
+    if (!injected && (Math.cos(actor.heading - heading) < 0.7 || definition.routeId !== state.ego.routeId)) continue;
     const projected = projectOntoRoute(state.path, [actor.x, actor.y]);
-    if (projected.lateralDistance > 1.5 || projected.progress <= state.progress) continue;
-    const gap = projected.progress - state.progress - (state.ego.length + definition.length) / 2;
-    if (!best || gap < best.gap) best = { gap, speed: actor.speed, progress: projected.progress, length: definition.length };
+    const angle = actor.heading - heading;
+    const length = injected ? Math.abs(Math.cos(angle)) * definition.length + Math.abs(Math.sin(angle)) * definition.width : definition.length;
+    const halfWidth = injected ? (Math.abs(Math.sin(angle)) * definition.length + Math.abs(Math.cos(angle)) * definition.width + state.ego.width) / 2 : 1.5;
+    if (projected.lateralDistance > halfWidth || projected.progress + length / 2 <= state.progress - state.ego.length / 2) continue;
+    const gap = projected.progress - state.progress - (state.ego.length + length) / 2;
+    if (!best || gap < best.gap) best = { id: actor.id, gap, speed: injected ? Math.max(0, actor.speed * Math.cos(angle)) : actor.speed, progress: projected.progress, length };
   }
   return best;
+}
+
+/** The permitted payload exposes only the nearest obstruction, not the event plan. */
+export function observedEventIds(state: DriverSimulation) {
+  const leader = nearestLeader(state);
+  return state.events?.applied.filter(event => leader?.id.startsWith(`event-${event.spec.id}-`)).map(event => event.spec.id) ?? [];
 }
 
 function upcomingTurn(state: DriverSimulation) {
@@ -114,25 +145,30 @@ export function driverObservation(state: DriverSimulation): DriverObservation {
 export function advanceDriver(state: DriverSimulation, decision: DriverDecision, requestedDelta: number): DriverSimulation {
   const delta = Math.min(MAX_PHYSICS_STEP, Math.max(0, requestedDelta));
   if (!delta) return state;
+  if (state.events) state = { ...state, events: advanceEvents(state.events, state.time, state.progress, state.path.length) };
   const observation = driverObservation(state);
   let desired = decision.action === 'stop' ? 0 : Math.max(0, Math.min(SPEED_LIMIT_MPS, decision.target_speed_mps));
+  const requestedTargetMps = desired, interventions: string[] = [];
+  const constrain = (maximum: number, reason: string) => {
+    if (maximum < desired - 1e-8) { desired = maximum; interventions.push(reason); }
+  };
   if (decision.action === 'brake') desired = Math.min(desired, state.speed);
   const remaining = state.path.length - state.progress;
-  desired = Math.min(desired, Math.sqrt(Math.max(0, 2 * 2 * remaining)), remaining * 1.5);
+  constrain(Math.min(Math.sqrt(Math.max(0, 2 * 2 * remaining)), remaining * 1.5), 'route-end');
   // Slow near sharp polyline turns; these are route steering, not model-generated steering commands.
   const turn = Math.abs(observation.upcoming_turn_degrees);
-  if (turn > 25) desired = Math.min(desired, Math.max(2.5, 8 * (1 - Math.min(150, turn) / 180)));
+  if (turn > 25) constrain(Math.max(2.5, 8 * (1 - Math.min(150, turn) / 180)), 'route-turn');
   if (observation.lead_gap_m !== null) {
     const room = Math.max(0, observation.lead_gap_m - MIN_GAP);
-    desired = Math.min(desired, room / 1.8,
-      Math.sqrt((observation.lead_speed_mps ?? 0) ** 2 + 2 * COMFORTABLE_BRAKING * room));
+    constrain(Math.min(room / 1.8,
+      Math.sqrt((observation.lead_speed_mps ?? 0) ** 2 + 2 * COMFORTABLE_BRAKING * room)), 'obstacle-spacing');
   }
   let signalStop = state.signalStop;
   if (observation.signal === 'green') signalStop = false;
   else if (observation.stop_distance_m !== null && (observation.signal === 'red'
     || (observation.signal === 'amber' && observation.stop_distance_m > state.speed ** 2 / (2 * COMFORTABLE_BRAKING) + 1))) signalStop = true;
-  if (signalStop && observation.stop_distance_m !== null) desired = Math.min(desired,
-    Math.sqrt(2 * 2 * observation.stop_distance_m), observation.stop_distance_m * 1.5);
+  if (signalStop && observation.stop_distance_m !== null) constrain(Math.min(
+    Math.sqrt(2 * 2 * observation.stop_distance_m), observation.stop_distance_m * 1.5), 'signal-stop');
 
   const acceleration = Math.max(-COMFORTABLE_BRAKING, Math.min(MAX_ACCELERATION, (desired - state.speed) * 1.8));
   let speed = Math.max(0, Math.min(SPEED_LIMIT_MPS, state.speed + acceleration * delta));
@@ -142,8 +178,11 @@ export function advanceDriver(state: DriverSimulation, decision: DriverDecision,
   const nextLeader = nearestLeader(state, state.time + delta);
   if (nextLeader) boundary = Math.min(boundary, nextLeader.progress - (state.ego.length + nextLeader.length) / 2 - MIN_GAP);
   // Collision and end boundaries may override comfortable braking in an emergency.
-  if (progress >= boundary) { progress = Math.max(state.progress, boundary); speed = 0; }
-  return { ...state, time: state.time + delta, progress, speed,
+  if (progress >= boundary) { progress = Math.max(state.progress, boundary); speed = 0; interventions.push('hard-stop-boundary'); }
+  const time = Math.round((state.time + delta) * 1e9) / 1e9;
+  return { ...state, time, progress, speed,
+    events: state.events ? advanceEvents(state.events, time, progress, state.path.length) : undefined,
+    control: { requestedTargetMps, constrainedTargetMps: desired, interventions },
     signalStop, braking: acceleration < -0.25 || speed < state.speed - 0.01 };
 }
 
@@ -153,7 +192,7 @@ export function driverFrame(state: DriverSimulation): SimulationFrame {
   const ego: ActorState = { id: state.ego.id, x: position.x, y: position.y, heading: position.heading,
     speed: state.speed, braking: state.braking };
   return { time: state.time, signal: background.signal,
-    actors: background.actors.map(actor => actor.id === state.ego.id ? ego : actor) };
+    actors: [...background.actors.map(actor => actor.id === state.ego.id ? ego : actor), ...eventActors(state)] };
 }
 
 export function routeComplete(state: DriverSimulation) {
