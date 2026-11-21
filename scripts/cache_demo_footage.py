@@ -90,19 +90,27 @@ def cache_video(base: str, cameras: list[dict], args, kept: dict | None = None,
     statuses: dict[str, dict] = {}
     stopped_at: dict[str, float] = {}
     attempted = []
+    recording = []
     stop_errors = {}
     try:
         for camera in cameras:
             # A timed-out start may still have succeeded on the server.
             attempted.append(camera["id"])
-            call(base, f"/api/captures/{quote(camera['id'])}/recording", {})
-        print(f"Recording {len(cameras)} video cameras for {args.record_seconds:.0f} s…", flush=True)
-        while time.monotonic() - started < args.record_seconds:
+            try:
+                call(base, f"/api/captures/{quote(camera['id'])}/recording", {})
+                recording.append(camera["id"])
+            except (RuntimeError, URLError, TimeoutError) as exc:
+                dropped[camera["id"]] = f"could not start recording: {exc}"
+        print(f"Recording {len(recording)} video cameras for {args.record_seconds:.0f} s…", flush=True)
+        while recording and time.monotonic() - started < args.record_seconds:
             time.sleep(2)
-            for camera in cameras:
-                status = call(base, f"/api/captures/{quote(camera['id'])}/buffer")
-                if status["bufferedSeconds"] > 0 and camera["id"] not in first_media:
-                    first_media[camera["id"]] = (time.monotonic() - started, status["bufferedSeconds"])
+            for cid in recording:
+                try:
+                    status = call(base, f"/api/captures/{quote(cid)}/buffer")
+                except (RuntimeError, URLError, TimeoutError):
+                    continue  # a transient poll failure does not invalidate the final stop status
+                if status["bufferedSeconds"] > 0 and cid not in first_media:
+                    first_media[cid] = (time.monotonic() - started, status["bufferedSeconds"])
     finally:
         # Stop every recorder before any slow decoding/sealing. The stop response
         # holds the final boundaries and revision; a last poll can already be stale.
@@ -113,8 +121,8 @@ def cache_video(base: str, cameras: list[dict], args, kept: dict | None = None,
             except (RuntimeError, URLError, TimeoutError, ValueError) as exc:
                 stop_errors[cid] = f"stop failed: {exc}"
                 print(f"  warn: could not stop {cid}: {exc}", file=sys.stderr)
-    for camera in cameras:
-        cid, status = camera["id"], statuses.get(camera["id"], {})
+    for cid in recording:
+        status = statuses.get(cid, {})
         if cid in stop_errors:
             dropped[cid] = stop_errors[cid]
             continue
@@ -193,7 +201,12 @@ def main() -> int:
 
     call(base, "/api/health")
     # The previous run's pins stay until the replacement index is written: the old index still references them.
-    previous = json.loads(OUT.read_text()).get("cameras", {}).values() if OUT.exists() else []
+    try:
+        previous = list(json.loads(OUT.read_text()).get("cameras", {}).values()) if OUT.exists() else []
+        if any(not isinstance(entry["saved"]["capture"]["id"], str) for entry in previous):
+            raise ValueError("Invalid previous capture identity")
+    except (ValueError, KeyError, TypeError, AttributeError):
+        previous = []
     kept: dict = {}
     pins = PinAttempts()
     try:

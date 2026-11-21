@@ -68,10 +68,14 @@ class FakeCaptureAPI:
             self.active.add(camera_id)
             if self.failure == "startup" and camera_id == "camera-b":
                 raise TimeoutError("start response lost after admission")
+            if self.failure == "startup_fatal" and camera_id == "camera-b":
+                raise ValueError("malformed startup response")
             return {}
         if path.endswith("/buffer"):
             if self.failure == "poll":
                 raise RuntimeError("poll failed")
+            if self.failure == "poll_fatal":
+                return {}  # malformed status must still abort and clean up every attempted recorder
             self.polls[camera_id] = self.polls.get(camera_id, 0) + 1
             return self.status(camera_id, buffered=8 + 2 * self.polls[camera_id])
         if path.endswith("/stop"):
@@ -104,14 +108,39 @@ def test_video_cache_stops_all_sources_and_seals_final_revisions(monkeypatch, ca
     assert all(body["secondsAgo"] == body["durationS"] == 6 for body in api.saved)
 
 
-@pytest.mark.parametrize("failure", ["startup", "poll"])
+@pytest.mark.parametrize("failure", ["startup_fatal", "poll_fatal"])
 def test_video_cache_cleans_up_recorders_after_partial_failure(monkeypatch, failure):
     api = FakeCaptureAPI(failure)
     monkeypatch.setattr(cache, "call", api)
     monkeypatch.setattr(cache, "time", FakeClock())
-    with pytest.raises((RuntimeError, TimeoutError)):
+    with pytest.raises((ValueError, KeyError)):
         cache.cache_video("fixture", [{"id": "camera-a"}, {"id": "camera-b"}], cache_args())
     assert not api.active and api.stopped == ["camera-a", "camera-b"] and not api.saved
+
+
+def test_failed_start_drops_one_camera_and_still_stops_its_uncertain_recorder(monkeypatch):
+    api = FakeCaptureAPI("startup")
+    monkeypatch.setattr(cache, "call", api)
+    monkeypatch.setattr(cache, "time", FakeClock())
+    kept, dropped = cache.cache_video("fixture", [{"id": "camera-a"}, {"id": "camera-b"}], cache_args())
+    assert set(kept) == {"camera-a"} and set(dropped) == {"camera-b"}
+    assert not api.active and api.stopped == ["camera-a", "camera-b"]
+
+
+def test_transient_poll_failure_recovers_without_losing_final_revision(monkeypatch):
+    api, failed = FakeCaptureAPI(), False
+    def call(base, path, body=None, **kwargs):
+        nonlocal failed
+        if path.endswith("/buffer") and not failed:
+            failed = True
+            raise RuntimeError("transient poll failure")
+        return api(base, path, body, **kwargs)
+    monkeypatch.setattr(cache, "call", call)
+    monkeypatch.setattr(cache, "time", FakeClock())
+    kept, dropped = cache.cache_video("fixture", [{"id": "camera-a"}], cache_args())
+    assert set(kept) == {"camera-a"} and not dropped
+    assert kept["camera-a"]["firstMediaS"] == 4
+    assert api.saved[0]["bufferRevision"] == "camera-a-final"
 
 
 def test_failed_stop_does_not_prevent_other_stops_or_seal_uncertain_source(monkeypatch):
