@@ -32,6 +32,8 @@ STAGES = {
     "reference": Service.NANO_BANANA,
     "image_gate": Service.DECISIONS,
     "temporal_gate": Service.DECISIONS,
+    "adversary": Service.CARBON,  # #24: attack generation, budgeted apart from repair
+    "attack_judge": Service.DECISIONS,  # #24: offline per-attack scoring
     "world": Service.GENIE,
 }
 Identifier = Annotated[str, Field(pattern=r"^[A-Za-z0-9_.:-]{1,128}$")]
@@ -100,11 +102,12 @@ class GatewayError(Exception):
     """Only fixed messages cross the API/log boundary, never upstream error bodies."""
 
     def __init__(self, code: ErrorCode, *, retryable: bool = False,
-                 request_id: str | None = None, retry_after: float = 0):
+                 request_id: str | None = None, retry_after: float = 0, status: int | None = None):
         self.code = code
         self.retryable = retryable
         self.request_id = request_id
         self.retry_after = retry_after
+        self.status = status
         super().__init__(MESSAGES[code])
 
     def public(self) -> dict:
@@ -143,6 +146,15 @@ class AdapterResult:
     evidence: dict
     provider_request_id: str | None
     usage: Usage | None
+
+
+@dataclass
+class GenieCallState:
+    """Per-call progress retained even when a probe raises or is cancelled."""
+
+    termination_pending: bool = False
+    termination: str | None = None
+    usage: Usage | None = None
 
 
 @dataclass(frozen=True)

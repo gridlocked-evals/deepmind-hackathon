@@ -1,12 +1,74 @@
-# Gotham Forge
+# Gotham Forge — Crash Test NYC, Remastered (Element 119)
+
+**Submission scope (approved November 21, 2026):** a judge picks a live NYC camera; **Gemini 4 Hydrogen** reads the captured evidence; **Gemini 4 Carbon** compiles the mayor's request into a validated street edit; **Nano Banana** renders a 16:9 reference of the edited street; the **Decisions API** gates that image before any Genie spend; **Genie 4** turns it into a playable world; a human or Hydrogen navigates it while Decisions supervises in time windows; and an honest evaluation compares the pipeline against simple baselines on unseen real cameras.
+
+## 0. Element 119: what governs the eight-hour build
+
+This section governs the hackathon submission. Sections 1–21 below are the earlier SUMO/Cosmos-first plan. They now describe the **calibrated traffic milestone (P1)** and **deferred research (P2)**. Where they conflict with this section on the submission, this section wins. Task breakdown: tracker issue #1 and child issues #2–#23.
+
+### Required models and their jobs
+
+| Model | Job in Element 119 | Required? |
+|---|---|---|
+| `gemini-4-hydrogen` | Extracts timestamped evidence from the capture (#5) and drives the generated world (#10) | **Yes — qualifying Gemini 4 model** |
+| `gemini-4-carbon` | Compiles every mayor request into a `StreetEdit` (#6); diagnoses failures and proposes bounded repairs (#14) | **Yes — qualifying Gemini 4 model** |
+| `gemini-nano-banana-2.1` | Styled 16:9 mayor reference image (#7) | Yes for the pipeline; does not count toward the Gemini 4 requirement |
+| `gemini-decision-1` | **Operational** gates: accept/block world creation (#8); continue/terminate/flag during navigation (#11) | Yes for the pipeline; does not count toward the Gemini 4 requirement |
+| `genie-4` | Stochastic playable world session (#9) | Yes for the pipeline; does not count toward the Gemini 4 requirement |
+
+Model IDs are what we plan to call. They become verified only when the #3 gateway smoke test records a real request.
+
+### Non-negotiable rules
+
+- Each reconstruction consumes **at most 120 seconds** of original evidence. Snapshot-only inputs never support motion claims.
+- Decisions results change what happens (image acceptance, navigation continuation or termination). They are not only shown in the UI. An `unknown` gate answer never counts as acceptance.
+- Genie is a stochastic visual world with navigation controls. It is not a deterministic traffic simulator. No same-state replay, seeds/branch IDs, physical safety or universal zero-violation claims for Genie sessions.
+- Edits for the submission use **image-space regions, anchors and semantic permissions**. Metric geometry and physical route feasibility are reserved for the calibrated milestone (#16).
+- Evaluate on real unseen camera inputs against a simple baseline, keep every attempt (including unknown outcomes), and show one measured operating limit with one mitigation. No scripted-only demo or wholly team-authored evaluation.
+
+### Shared contracts
+
+Versioned contracts (`element119.v1`) for `Capture`, `ObservationBatch`, `StreetEdit`, `ReferenceImage`, `GateDecision`, `WorldSession`, `NavigationEvent` and `EvaluationResult` are frozen in [docs/CONTRACTS.md](docs/CONTRACTS.md), with Python models in `backend/contracts.py`, TypeScript types and runtime validation in `src/contracts/element119.ts`, and a shared fixture both test suites validate. Lanes build against these shapes and mocks. Nothing in the submission waits for SUMO.
+
+### Work lanes
+
+| Lane | Owns | Issues |
+|---|---|---|
+| A — evidence/capture | Bounded recording, provenance, Hydrogen evidence | #4, #5 |
+| B — world/control | Genie sessions, termination, cost limits, navigation loop | #9, #10 |
+| C — reasoning/evaluation | Contracts, model gateway, Carbon edits, Decisions gates, eval set, breakpoints/repair | #2, #3, #6, #8, #11, #13, #14 |
+| D — images/UI | Nano Banana references, camera selection, comparison, Mayor Mode UI | #7, #12 |
+
+Planning targets (not measurements): real media-to-world slice by 1:30, actual visual control by 3:00, baseline and frozen test inputs by 4:00, stress/repair by 5:30, held-out results by 6:30, integration by 8:00 (#15).
+
+### Current implementation vs planned services
+
+| Implemented in this repository | Planned (not yet implemented) |
+|---|---|
+| NYC map, five configured 511NY HLS sources, DOT snapshot directory, bounded HLS proxy | Bounded capture recorder with media hashes (#4) |
+| Authored, illustrative Vestry traffic demo (not reconstructed traffic) | Model gateway with smoke tests and budgets (#3) |
+| Element 119 contracts, JSON Schema endpoint `GET /api/contracts/element119`, shared fixture and validators | Hydrogen evidence, Carbon edits, Nano Banana references, Decisions gates, Genie sessions, Hydrogen navigation (#5–#11) |
+| | Mayor Mode UI (#12), evaluation set and baselines (#13), breakpoints and repair (#14), submission package (#15) |
+
+The Vestry demo is hand-authored and is never presented as camera-reconstructed traffic or as evidence for the submission.
+
+### Repository and event status
+
+- The repository is already **public**; that requirement is satisfied.
+- Still to confirm: the official event wording on event-only work and reuse of pre-event code. Until confirmed, the pre-event UI (map, feeds, Vestry demo; adapted from Pharos with attribution in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)) is presented as a pre-existing baseline, not as event-built work. Being public is not assumed to be an exception.
+- Pre-event baseline commit: `eff00a81b01294b9240c629c371ae446055e1841`.
+
+---
+
+## Earlier plan: calibrated traffic milestone (P1) and research (P2)
 
 **Turn up to two minutes of NYC camera footage into an editable traffic simulation, then use Gemini 4 to find and repair failures.**
 
-This is the complete implementation plan for a four-person, eight-hour build with four H100 GPUs. The available inputs are continuous NYC camera video and periodic NYC DOT snapshots. The immediate perception pipeline uses Gemini to interpret the footage. Local detection/tracking and learned dynamics are later extensions.
+This was the complete implementation plan for a four-person, eight-hour build with four H100 GPUs. It now serves as the post-submission calibrated traffic milestone. The available inputs are continuous NYC camera video and periodic NYC DOT snapshots. The immediate perception pipeline uses Gemini to interpret the footage. Local detection/tracking and learned dynamics are later extensions.
 
 **Implementation foundation:** reuse the existing [Pharos project](https://github.com/Divyesh-Thirukonda/pharos) for its NYC geographic rendering, camera selection, HLS playback, captured-video overlays, and asynchronous analysis-job pipeline. Extend that working architecture with a Gemini scene compiler and simulation services. Retain React, TypeScript, Vite, MapLibre, and FastAPI instead of rebuilding the camera application.
 
-**Status (November 19, 2026):** the initial UI slice is implemented: a geographic NYC map, a deterministic illustrative Vestry traffic demo, City/Intersection/Follow views, and toggleable public camera feeds. Pharos architecture was adapted from commit `5bd6fd9ba4dcd206c96e5c9c15f37b96fcf42f1a`, retaining attribution. The production build, six frontend tests, and 19 backend tests pass; local browser review verified live Vestry playback and measured render activity. See [setup and controls](RUNNING.md), [architecture](docs/ARCHITECTURE.md), and the [verification record](docs/VERIFICATION.md). Camera-grounded reconstruction, Gemini/SUMO execution, model endpoint smoke tests, generated video, and evaluation are not implemented. The numerical budgets and acceptance thresholds below remain proposed targets for that broader system. Model/API references were checked on November 18, 2026; actual account access, quotas, GPU memory, and runtime compatibility remain integration checks. Historical Pharos results do not validate the Gemini migration.
+**Status of this earlier plan (November 19, 2026; see §0 for current status):** the initial UI slice is implemented: a geographic NYC map, a deterministic illustrative Vestry traffic demo, City/Intersection/Follow views, and toggleable public camera feeds. Pharos architecture was adapted from commit `5bd6fd9ba4dcd206c96e5c9c15f37b96fcf42f1a`, retaining attribution. The production build, six frontend tests, and 19 backend tests pass; local browser review verified live Vestry playback and measured render activity. See [setup and controls](RUNNING.md), [architecture](docs/ARCHITECTURE.md), and the [verification record](docs/VERIFICATION.md). Camera-grounded reconstruction, Gemini/SUMO execution, model endpoint smoke tests, generated video, and evaluation are not implemented. The numerical budgets and acceptance thresholds below remain proposed targets for that broader system. Model/API references were checked on November 18, 2026; actual account access, quotas, GPU memory, and runtime compatibility remain integration checks. Historical Pharos results do not validate the Gemini migration.
 
 ## 1. The idea and the intended result
 
@@ -63,6 +125,8 @@ Its training uses a large WOMD corpus; evaluation uses expanded maps. Short trai
 **Our implementation decisions:** retain Gemini extraction and SUMO within eight hours. In Sections 8–10, add an actor entry/exit ledger and separate physical existence from camera visibility: an occluded actor persists. Keep future simulator predictions inaccessible to the driving policy. In Section 14, check actor conservation, boundary flows, and signal transitions against observable held-out evidence. Extend distributional realism tests across independent episodes later; diffusion training stays in Section 20's research roadmap.
 
 ## 3. Scope and success conditions
+
+> **P1 milestone.** The submission scope is §0. This section defines the later calibrated traffic milestone.
 
 ### Required in eight hours
 
@@ -494,6 +558,8 @@ Genie 4 remains an optional adapter pending an actual accessible developer endpo
 
 ## 12. Gemini model and API allocation
 
+> **Superseded for the submission by §0:** Hydrogen (evidence, navigation) and Carbon (edits, repair) are the required pair; Nano Banana, Decisions and Genie are mandatory pipeline services. The table below is the P1/P2 allocation.
+
 Use every model family where it contributes a measurable capability. The eight-hour build prioritizes the core extraction/compiler/experiment loop, then adds comparisons through shared interfaces. Public documentation is not a substitute for a project-key smoke test.
 
 | Model or service | Proposed role | Priority |
@@ -646,6 +712,8 @@ For scale only: the documented introductory Carbon standard rates through Novemb
 
 ## 17. Four-person execution plan: eight hours
 
+> **Superseded by §0 work lanes A–D and issues #2–#15.** Kept for the P1 milestone.
+
 | Owner | Primary responsibility | Required handoff |
 |---|---|---|
 | Person 1 | Pharos capture migration, bounded episode recording, Gemini extraction, calibration/evidence QA | Contiguous capped media, verified observation table, and camera mapping |
@@ -668,6 +736,8 @@ Freeze observation, scene, rollout, and metric contracts in the first 30 minutes
 At 90 minutes, require working neural inference rather than downloaded weights alone. At 2.5 hours, require an output responding to our controls; otherwise keep neural rendering off the critical path. At hour four, prioritize failure replay over additional models. At hour six, all work should support evaluation, integration, or presentation.
 
 ## 18. Demo script
+
+> **Superseded for the submission:** the Element 119 demo is defined by issue #15. This script applies to the P1 milestone.
 
 1. **Evidence:** start in the reused Pharos NYC view, select the verified camera marker, and show its actual source feed. Display the analyzed clip duration and calibration/evaluation split. Show source capture time when available; otherwise label server acquisition time and unknown stream delay. Explain that Gemini processed at most two minutes.
 2. **Reconstruction:** choose “Simulate this window.” Place the exact analyzed replay next to the MapLibre simulation layer and synchronize their timelines. Highlight lanes, queue intervals, counts, and the observed obstruction. Show measured residuals, unknowns, and observation age; keep advancing live playback distinct.
@@ -720,6 +790,8 @@ A later residual model could use a small graph network over actors, lanes, signa
 The research questions are concrete: Does Gemini reduce the evidence needed to compile a useful scene? Does a hypothesis ensemble improve decisions under occlusion? Does semantic search discover more valid failures per budget than random search? Do repairs generalize across unseen conditions? Does neural appearance variation reveal failures absent from state-only evaluation?
 
 ## 21. Final delivery checklist
+
+> **P1 checklist.** The submission checklist is issue #15.
 
 - [ ] Pharos map, selected feed, and captured replay retained and smoke-tested after migration.
 - [ ] Actual camera location verified; historical heat and simulated outcomes remain separate.
