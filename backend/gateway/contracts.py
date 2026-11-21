@@ -32,6 +32,8 @@ STAGES = {
     "reference": Service.NANO_BANANA,
     "image_gate": Service.DECISIONS,
     "temporal_gate": Service.DECISIONS,
+    "adversary": Service.CARBON,  # #24: attack generation, budgeted apart from repair
+    "attack_judge": Service.DECISIONS,  # #24: offline per-attack scoring
     "world": Service.GENIE,
 }
 Identifier = Annotated[str, Field(pattern=r"^[A-Za-z0-9_.:-]{1,128}$")]
