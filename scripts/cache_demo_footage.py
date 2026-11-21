@@ -23,7 +23,7 @@ import json
 import os
 from pathlib import Path
 import sys
-from threading import Lock
+from threading import Event, Lock
 import time
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote
@@ -80,60 +80,79 @@ class PinAttempts:
             return list(self._entries.values())
 
 
+def record_video(base: str, camera: dict, args, cancelled: Event):
+    """Observe one recorder independently; always stop even an uncertain start."""
+    if cancelled.is_set():
+        return None
+    cid = camera["id"]
+    started = time.monotonic()
+    first_media = (None, 0)  # (elapsed since this start request, initial buffered seconds)
+    status, stopped_at, error = {}, 0, None
+    try:
+        try:
+            call(base, f"/api/captures/{quote(cid)}/recording", {})
+        except (RuntimeError, URLError, TimeoutError) as exc:
+            error = f"could not start recording: {exc}"
+        if error is None:
+            # Startup latency still counts toward first-media admission, but it
+            # must not consume this recorder's subsequent observation interval.
+            deadline = time.monotonic() + args.record_seconds
+            while time.monotonic() < deadline:
+                if cancelled.wait(min(2, deadline - time.monotonic())):
+                    break
+                try:
+                    current = call(base, f"/api/captures/{quote(cid)}/buffer")
+                except (RuntimeError, URLError, TimeoutError):
+                    continue
+                if current["bufferedSeconds"] > 0 and first_media[0] is None:
+                    first_media = (time.monotonic() - started, current["bufferedSeconds"])
+    except BaseException:
+        cancelled.set()
+        raise
+    finally:
+        # A timed-out start may still have succeeded on the server. The stop
+        # response is the final revision, even if the last poll became stale.
+        try:
+            status = call(base, f"/api/captures/{quote(cid)}/stop", {})
+            stopped_at = time.monotonic() - started
+        except (RuntimeError, URLError, TimeoutError, ValueError) as exc:
+            error = error or f"stop failed: {exc}"
+            print(f"  warn: could not stop {cid}: {exc}", file=sys.stderr)
+    return cid, status, first_media, stopped_at, error
+
+
 def cache_video(base: str, cameras: list[dict], args, kept: dict | None = None,
                 pins: PinAttempts | None = None) -> tuple[dict, dict]:
     if kept is None:
         kept = {}
     dropped = {}
-    started = time.monotonic()
-    first_media: dict[str, tuple[float, float]] = {}  # camera -> (elapsed s, buffered s) when media first arrived
-    statuses: dict[str, dict] = {}
-    stopped_at: dict[str, float] = {}
-    attempted = []
-    recording = []
-    stop_errors = {}
-    try:
-        for camera in cameras:
-            # A timed-out start may still have succeeded on the server.
-            attempted.append(camera["id"])
-            try:
-                call(base, f"/api/captures/{quote(camera['id'])}/recording", {})
-                recording.append(camera["id"])
-            except (RuntimeError, URLError, TimeoutError) as exc:
-                dropped[camera["id"]] = f"could not start recording: {exc}"
-        print(f"Recording {len(recording)} video cameras for {args.record_seconds:.0f} s…", flush=True)
-        while recording and time.monotonic() - started < args.record_seconds:
-            time.sleep(2)
-            for cid in recording:
-                try:
-                    status = call(base, f"/api/captures/{quote(cid)}/buffer")
-                except (RuntimeError, URLError, TimeoutError):
-                    continue  # a transient poll failure does not invalidate the final stop status
-                if status["bufferedSeconds"] > 0 and cid not in first_media:
-                    first_media[cid] = (time.monotonic() - started, status["bufferedSeconds"])
-    finally:
-        # Stop every recorder before any slow decoding/sealing. The stop response
-        # holds the final boundaries and revision; a last poll can already be stale.
-        for cid in attempted:
-            try:
-                statuses[cid] = call(base, f"/api/captures/{quote(cid)}/stop", {})
-                stopped_at[cid] = time.monotonic() - started
-            except (RuntimeError, URLError, TimeoutError, ValueError) as exc:
-                stop_errors[cid] = f"stop failed: {exc}"
-                print(f"  warn: could not stop {cid}: {exc}", file=sys.stderr)
-    for cid in recording:
-        status = statuses.get(cid, {})
-        if cid in stop_errors:
-            dropped[cid] = stop_errors[cid]
+    if not cameras:
+        return kept, dropped
+    cancelled = Event()
+    print(f"Observing {len(cameras)} video cameras for {args.record_seconds:.0f} s each…", flush=True)
+    with ThreadPoolExecutor(max_workers=min(4, len(cameras))) as pool:
+        try:
+            results = list(pool.map(lambda camera: record_video(base, camera, args, cancelled), cameras))
+        except BaseException:
+            # Signal before executor shutdown joins running workers; their waits
+            # wake immediately and their finally blocks stop attempted recorders.
+            cancelled.set()
+            raise
+    # Every worker has stopped before any slow decoding/sealing or pin request.
+    for result in results:
+        if result is None:
+            continue
+        cid, status, (start_s, start_buffered), stopped_at, error = result
+        if error:
+            dropped[cid] = error
             continue
         # Slow = media took too long to start, or arrived well below real time once it did.
-        start_s, start_buffered = first_media.get(cid, (None, 0))
         # Measured after first arrival: the first playlist fetch returns a backlog that would inflate the rate.
-        rate = (status.get("bufferedSeconds", 0) - start_buffered) / max(1e-6, stopped_at[cid] - start_s) if start_s is not None else 0
+        rate = (status.get("bufferedSeconds", 0) - start_buffered) / max(1e-6, stopped_at - start_s) if start_s is not None else 0
         # Admission allows one segment of arrival slack; retain the measured rate in metadata.
         bounds = status.get("history", {}).get("segmentBoundariesS") or [0]
         slack = max((b - a for a, b in zip(bounds, bounds[1:])), default=0)
-        admitted_rate = (status.get("bufferedSeconds", 0) - start_buffered + slack) / max(1e-6, stopped_at[cid] - start_s) if start_s is not None else 0
+        admitted_rate = (status.get("bufferedSeconds", 0) - start_buffered + slack) / max(1e-6, stopped_at - start_s) if start_s is not None else 0
         reason = (status.get("lastError") or "no media received") if start_s is None \
             else f"first media after {start_s:.0f} s" if start_s > args.max_start_seconds \
             else f"media at {rate:.2f}x real time" if admitted_rate < args.min_realtime_ratio \
