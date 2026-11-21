@@ -77,6 +77,7 @@ def test_valid_attack_uses_carbon_adversary_stage_and_data_only_prompt():
     data = json.loads(call["input_value"].split("Input JSON:\n")[1])
     assert data["state"] == request_body()["state"] and data["previous_attacks"] == []
     assert data["budget"]["max_trigger_seconds"] == MAX_TRIGGER_SECONDS == RUN_SECONDS - 12 == 48
+    assert data["budget"]["adversary_interval_seconds"] == 3
     assert set(data["menu"]["event_types"]) == {"car-crash", "stalled-vehicle"}
 
 
@@ -94,7 +95,7 @@ def test_valid_wait_leaves_slot_open_and_identical_replay_is_cached():
 def test_second_attack_reason_is_never_fed_back():
     client, gateway, _ = client_for()
     client.post(URL, json=request_body())
-    gateway.output = dict(ATTACK, trigger_seconds=18.0, reason="second")
+    gateway.output = dict(ATTACK, trigger_seconds=19.0, reason="second")
     prior = [{"event_type": "car-crash", "trigger_seconds": 8.0}]
     response = client.post(URL, json=request_body(1, prior, time=9.0))
     assert response.status_code == 200 and response.json()["attack_index"] == 1
@@ -274,6 +275,28 @@ def test_trigger_too_close_to_previous_attack_is_rejected(trigger):
     gateway.output = dict(ATTACK, trigger_seconds=trigger)
     response = client.post(URL, json=request_body(1, [{"event_type": "car-crash", "trigger_seconds": 8.0}], time=9.0))
     assert response.status_code == 502 and detail(response)["code"] == "invalid_output"
+
+
+@pytest.mark.parametrize("first,second,accepted", [
+    (3.1, 13.1, False),  # requested gap 10 s, actual barriers 6 -> 15 only 9 s
+    (3.1, 15.0, False), (3.1, 15.1, True), (3.0, 13.0, True),
+    (5.0, 15.0 + 5e-10, False),  # within the injector's 1e-9 boundary tolerance
+    (5.0, 15.1, True), (37.1, 48.0, False), (36.0, 48.0, True),
+])
+def test_requested_and_applied_attack_times_both_keep_minimum_gap(first, second, accepted):
+    gateway = FakeGateway(dict(ATTACK, trigger_seconds=first))
+    client, _, _ = client_for(gateway)
+    assert client.post(URL, json=request_body(time=0.0)).status_code == 200
+    gateway.output = dict(ATTACK, trigger_seconds=second)
+    prior = [{"event_type": "car-crash", "trigger_seconds": first}]
+    response = client.post(URL, json=request_body(1, prior, time=first + 1))
+    assert response.status_code == (200 if accepted else 502)
+    if accepted:
+        assert response.json()["decision"]["trigger_seconds"] == second
+    else:
+        assert detail(response)["code"] == "invalid_output"
+        assert client.post(URL, json=request_body(1, prior, time=first + 1)).json() == response.json()
+        assert len(gateway.calls) == 2
 
 
 def test_unavoidable_attack_is_a_typed_error_not_clamped():

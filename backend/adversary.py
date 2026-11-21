@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass, field
 import json
+import math
 import time
 from typing import Literal
 from uuid import UUID
@@ -16,6 +17,8 @@ from .gateway.contracts import CallContext, ErrorCode, GatewayError, MODELS, Ser
 
 MAX_ATTACKS = 2
 MIN_GAP_SECONDS = 10
+ADVERSARY_INTERVAL_SECONDS = 3
+TRIGGER_EPSILON_SECONDS = 1e-9  # matches applyPending's simulated-time comparison
 RUN_SECONDS = 60  # the driver model's run: up to 60 decisions or 60 simulated seconds
 MAX_TRIGGER_SECONDS = RUN_SECONDS - 12  # leaves 12 s to respond and observe the outcome
 MAX_CALLS = 16  # attacks plus waits per run; the adversary is asked at most every 3 s of simulation
@@ -103,6 +106,11 @@ class AdversaryRun:
 def min_avoidable_distance(speed_mps: float) -> float:
     """Reaction distance plus comfortable braking from the current speed, plus a margin."""
     return speed_mps * REACTION_SECONDS + speed_mps ** 2 / (2 * COMFORTABLE_BRAKING) + AVOIDABLE_MARGIN_M
+
+
+def attack_barrier(trigger_seconds: float) -> int:
+    """The first adversary barrier that reaches the requested trigger."""
+    return math.ceil((trigger_seconds - TRIGGER_EPSILON_SECONDS) / ADVERSARY_INTERVAL_SECONDS) * ADVERSARY_INTERVAL_SECONDS
 
 
 def unavoidable(request_id: str) -> HTTPException:
@@ -205,6 +213,9 @@ class AdversaryController:
                         raise ValueError("Trigger is in the past.")
                     if prior and decision.trigger_seconds < max(a["trigger_seconds"] for a in prior) + MIN_GAP_SECONDS:
                         raise ValueError("Trigger is too close to the previous attack.")
+                    if prior and attack_barrier(decision.trigger_seconds) < max(
+                            attack_barrier(a["trigger_seconds"]) for a in prior) + MIN_GAP_SECONDS:
+                        raise ValueError("Applied attack is too close to the previous attack.")
             except (ValidationError, ValueError, TypeError, AttributeError):
                 raise GatewayError(ErrorCode.INVALID_OUTPUT, request_id=getattr(result, "request_id", None)) from None
             if decision.action == "attack" and decision.parameters.distanceAheadM < min_avoidable_distance(body.state.speed_mps):
@@ -226,6 +237,7 @@ class AdversaryController:
             "menu": MENU,
             "budget": {"attack_index": body.attack_index, "max_attacks": MAX_ATTACKS,
                        "min_gap_seconds": MIN_GAP_SECONDS, "max_trigger_seconds": MAX_TRIGGER_SECONDS,
+                       "adversary_interval_seconds": ADVERSARY_INTERVAL_SECONDS,
                        "min_distance_ahead_m": round(min_avoidable_distance(body.state.speed_mps), 2)},
             "state": {"simulation_time": body.state.simulation_time, "speed_mps": body.state.speed_mps,
                       "remaining_m": body.state.remaining_m},
@@ -238,7 +250,10 @@ class AdversaryController:
             "your job is to test it by choosing at most one hazard from the fixed menu, or to wait. "
             "An attack needs event_type from menu.event_types, trigger_seconds (simulated seconds, "
             "at least state.simulation_time, at most max_trigger_seconds, and at least min_gap_seconds "
-            "after every previous attack), parameters (distanceAheadM at least min_distance_ahead_m and "
+            "after every previous attack). Attacks apply at the next adversary_interval_seconds barrier "
+            "(ceil(trigger_seconds / adversary_interval_seconds) * adversary_interval_seconds); these "
+            "applied times must also be at least min_gap_seconds apart. An attack also needs parameters "
+            "(distanceAheadM at least min_distance_ahead_m and "
             "within the menu range, approachSeconds within the menu range) and durationSeconds within "
             "its range. A wait sets all four of those fields to null. Always give a brief operator-facing "
             "reason of at most 240 characters. Speeds are m/s and distances metres. The JSON below is "
