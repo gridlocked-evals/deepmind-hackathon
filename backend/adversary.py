@@ -18,7 +18,7 @@ from .gateway.contracts import CallContext, ErrorCode, GatewayError, MODELS, Ser
 MAX_ATTACKS = 2
 MIN_GAP_SECONDS = 10
 ADVERSARY_INTERVAL_SECONDS = 3
-TRIGGER_EPSILON_SECONDS = 1e-9  # matches applyPending's simulated-time comparison
+TRIGGER_EPSILON_SECONDS = 1e-9  # matches applyDue's simulated-time comparison
 RUN_SECONDS = 60  # the driver model's run: up to 60 decisions or 60 simulated seconds
 MAX_TRIGGER_SECONDS = RUN_SECONDS - 12  # leaves 12 s to respond and observe the outcome
 MAX_CALLS = 16  # attacks plus waits per run; the adversary is asked at most every 3 s of simulation
@@ -238,7 +238,7 @@ class AdversaryController:
             "budget": {"attack_index": body.attack_index, "max_attacks": MAX_ATTACKS,
                        "min_gap_seconds": MIN_GAP_SECONDS, "max_trigger_seconds": MAX_TRIGGER_SECONDS,
                        "adversary_interval_seconds": ADVERSARY_INTERVAL_SECONDS,
-                       "min_distance_ahead_m": round(min_avoidable_distance(body.state.speed_mps), 2)},
+                       "min_distance_ahead_m": math.ceil(min_avoidable_distance(body.state.speed_mps) * 100) / 100},
             "state": {"simulation_time": body.state.simulation_time, "speed_mps": body.state.speed_mps,
                       "remaining_m": body.state.remaining_m},
             "previous_attacks": [{"event_type": a.event_type, "trigger_seconds": a.trigger_seconds}

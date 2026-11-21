@@ -311,6 +311,21 @@ def test_unavoidable_attack_is_a_typed_error_not_clamped():
     assert client.post(URL, json=request_body(speed=speed)).status_code == 200
 
 
+def test_model_may_use_the_exact_minimum_distance_advertised_in_its_prompt():
+    class EchoMinimumGateway(FakeGateway):
+        async def generate(self, service, **kwargs):
+            data = json.loads(kwargs["input_value"].split("Input JSON:\n")[1])
+            self.output["parameters"]["distanceAheadM"] = data["budget"]["min_distance_ahead_m"]
+            return await super().generate(service, **kwargs)
+
+    client, gateway, _ = client_for(EchoMinimumGateway())
+    response = client.post(URL, json=request_body(speed=8.0))
+    assert response.status_code == 200
+    distance = response.json()["decision"]["parameters"]["distanceAheadM"]
+    assert distance >= min_avoidable_distance(8.0)
+    assert distance == gateway.output["parameters"]["distanceAheadM"]
+
+
 @pytest.mark.parametrize("path,value", [
     (("extra",), "x"), (("state", "extra"), "x"), (("run_id",), "short"), (("run_id",), "../a/b/c"),
     (("attack_index",), True), (("attack_index",), "0"), (("attack_index",), -1),
