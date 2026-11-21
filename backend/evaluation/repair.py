@@ -16,7 +16,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from backend.gateway.contracts import CallContext, GatewayError, Identifier, Service, canonical, digest
 from .attacks import AttackRecord, AttackScore, AttackScript, aggregate, assert_no_leakage, load_suite, suite_hash
-from .manifest import Episode, FinalRun, HoldoutError, Sha256, opened_marker, plan_path, verify_lock
+from .manifest import Episode, FinalRun, HoldoutError, LockedManifest, Sha256, opened_marker, plan_path, verify_lock
 
 Value = Union[float, str]
 
@@ -110,17 +110,9 @@ class ComparisonPlan(BaseModel):
     slots: tuple[PlanSlot, ...] = Field(min_length=1)
 
 
-def register_plan(lock_path: str | Path, pinned_sha256: str, suite_path: str | Path, slots: list[PlanSlot]) -> str:
-    """Write the comparison roster once, before any FinalRun opens the holdout; returns its hash.
-
-    The test roster must be complete: every frozen-suite script on every test episode whose camera
-    is absent from development, for replicates 0..k-1 with one k throughout. The dev roster is free.
-    Order: add the fresh capture (if any) first, then register the plan, then open a FinalRun.
-    """
-    if opened_marker(lock_path).exists():
-        raise HoldoutError("holdout already opened: the comparison plan must be registered before any FinalRun")
-    locked = verify_lock(lock_path, pinned_sha256)
-    suite = load_suite(suite_path, locked.manifest.attack_suite_sha256)
+def _validate_plan_slots(locked: LockedManifest, suite: list[AttackScript],
+                         slots: list[PlanSlot] | tuple[PlanSlot, ...]) -> None:
+    """Validate the roster against the actual manifest, including its fresh capture."""
     split_of = {e.episode_id: e.split for e in locked.episodes()}
     for slot in slots:
         if split_of.get(slot.episode_id) != slot.split:
@@ -140,6 +132,20 @@ def register_plan(lock_path: str | Path, pinned_sha256: str, suite_path: str | P
         names = lambda group: ", ".join(sorted(map(str, group))) or "none"
         raise ValueError(f"test roster must be frozen suite x held-out episodes x replicates 0..{k - 1}; "
                          f"missing: {names(missing)}; extra: {names(extra)}")
+
+
+def register_plan(lock_path: str | Path, pinned_sha256: str, suite_path: str | Path, slots: list[PlanSlot]) -> str:
+    """Write the comparison roster once, before any FinalRun opens the holdout; returns its hash.
+
+    The test roster must be complete: every frozen-suite script on every test episode whose camera
+    is absent from development, for replicates 0..k-1 with one k throughout. The dev roster is free.
+    Order: add the fresh capture (if any) first, then register the plan, then open a FinalRun.
+    """
+    if opened_marker(lock_path).exists():
+        raise HoldoutError("holdout already opened: the comparison plan must be registered before any FinalRun")
+    locked = verify_lock(lock_path, pinned_sha256)
+    suite = load_suite(suite_path, locked.manifest.attack_suite_sha256)
+    _validate_plan_slots(locked, suite, slots)
     data = canonical(ComparisonPlan(manifest_sha256=locked.sha256, slots=tuple(slots)).model_dump(mode="json"))
     with plan_path(lock_path).open("xb") as handle:
         handle.write(data)
@@ -329,6 +335,9 @@ class RepairSession:
         if plan.manifest_sha256 != locked.sha256:
             raise ValueError("comparison plan was registered for a different manifest")
         suite = load_suite(suite_path, locked.manifest.attack_suite_sha256)
+        # A fresh-capture write that began before registration can finish after it. Recheck
+        # the roster against the FinalRun's pinned episodes before accepting any results.
+        _validate_plan_slots(locked, suite, plan.slots)
         episodes = locked.episodes()
         dev_cameras = {e.source_id for e in episodes if e.split == "dev"}
         for item in holdout_before + holdout_after:
