@@ -112,8 +112,9 @@ class TemporalJudge:
         self.in_flight: set[asyncio.Task] = set()
         self.windows: list[Window] = []  # every due window, judged or not
         self.skipped: list[tuple[int, int]] = []
-        self.interventions: list[tuple[int, int, str]] = []  # for #24's offline scorer
+        self.interventions: list[tuple[int, int, str, str]] = []  # (start, end, action, reason) for #24's scorer
         self.stopped: str | None = None
+        self.newest_answered = -1  # start of the newest window that got answers
 
     def on_frame(self, frame: RecordedFrame) -> None:
         self.newest = max(self.newest, frame.index)
@@ -124,7 +125,7 @@ class TemporalJudge:
             return
         self.next_due = frame.index + self.stride
         start = frame.index - self.p.window + 1
-        if len(self.in_flight) >= self.p.max_in_flight:
+        if sum(not t.done() for t in self.in_flight) >= self.p.max_in_flight:
             self.skipped.append((start, frame.index))
             self._miss()
             return
@@ -157,22 +158,25 @@ class TemporalJudge:
             self._miss()
         else:
             self.stride = max(self.p.stride, self.stride // 2)
-        if w.stale or self.stopped:
+        superseded = w.start < self.newest_answered  # possible when max_in_flight > 1
+        if w.answers:
+            self.newest_answered = max(self.newest_answered, w.start)
+        if w.stale or self.stopped or superseded:
             return  # logged in self.windows, but cannot act
         self._act(w)
 
     def _miss(self) -> None:
         """Low throughput: halve cadence, then stop once at the floor."""
         if self.stride >= self.p.max_stride:
-            self._stop("low_throughput", self.newest, self.newest)
+            self._stop("low_throughput", "low_throughput")
         else:
             self.stride = min(self.p.max_stride, self.stride * 2)
             self.next_due = max(self.next_due, self.newest + self.stride)
 
-    def _stop(self, reason: str, start: int, end: int) -> None:
+    def _stop(self, reason: str, logged: str) -> None:
         if not self.stopped:
             self.stopped = reason
-            self.interventions.append((start, end, "stop"))
+            self.interventions.append((self.newest, self.newest, "stop", logged))
             self.controller.stop(reason)
 
     def _act(self, w: Window) -> None:
@@ -180,13 +184,13 @@ class TemporalJudge:
         if hits:
             # Logged at the frame the keys were actually released (answer arrival), not the judged window,
             # so #24 keeps the frames before the defender was touched.
-            self.interventions.append((self.newest, self.newest, "release_keys"))
+            self.interventions.append((self.newest, self.newest, "release_keys", "violation:" + ",".join(hits)))
             self.controller.release_keys()
             for e in self.events():
                 if e["type"] in hits and e["windows"] >= self.p.stop_after and e["start_lo"] <= w.start <= e["end_hi"]:
-                    self._stop("repeated_violation:" + e["type"], self.newest, self.newest)
+                    self._stop("repeated_violation:" + e["type"], "violation:" + e["type"])
         elif w.answers and all(v == UNKNOWN for v in w.outcomes.values()):
-            self.interventions.append((w.start, w.end, "review"))
+            self.interventions.append((w.start, w.end, "review", "ambiguous"))
             self.controller.request_review({"start_frame": w.start, "end_frame": w.end, "answers": w.answers})
 
     def events(self) -> list[dict]:
@@ -205,7 +209,9 @@ class TemporalJudge:
 
     def coverage(self) -> dict:
         judged = [w for w in self.windows if w.answers]
-        covered = merge([(w.start, w.end) for w in judged])
+        # only fresh windows with at least one definite answer count; all-unknown windows prove nothing
+        covered = merge([(w.start, w.end) for w in judged
+                         if not w.stale and any(v in (CLEAR, OBSERVED) for v in w.outcomes.values())])
         uncovered, cursor = [], 0
         for s, e in covered:
             if s > cursor:
