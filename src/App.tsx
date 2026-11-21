@@ -246,7 +246,7 @@ export default function App() {
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [chooseView, playback.setPlaying, evidenceOpen, closeEvidence, driver.hasRun, driver.stop]);
+  }, [chooseView, playback.setPlaying, driver.hasRun, driver.stop, evidenceOpen, closeEvidence]);
 
   const cardLeft = Math.max(sidebarOpen && viewport.width > 760 ? 310 : 24, Math.min((viewport.cameraPoint?.x ?? viewport.width * 0.65) + 25, viewport.width - 370));
   const cardTop = Math.max(150, Math.min((viewport.cameraPoint?.y ?? viewport.height * 0.4) - 100, viewport.height - 495));

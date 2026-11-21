@@ -76,8 +76,9 @@ def score_review(store: ArtifactStore, report: dict, review: ManualReview) -> di
         if not (report['time']['startS'] <= expected.time.startS <= expected.time.endS <= report['time']['endS']):
             raise ArtifactError('Annotation lies outside the reviewed prefix interval.', status=422)
         region = expected.region.model_dump()
-        candidates = [r for r in report['facts'] if r['kind']==expected.kind
-                      and r['semanticClass']==expected.semanticClass and intersects(r['time'], expected.time.model_dump())
+        candidates = [r for r in report['facts'] if r['kind'] == expected.kind
+                      and r['semanticClass'] == expected.semanticClass
+                      and intersects(r['time'], expected.time.model_dump())
                       and iou(r['region'], region) > 0]
         accepted = [r for r in candidates if r['disposition'] == 'accepted']
         # An absence annotation contradicts every accepted matching claim. A
@@ -124,7 +125,7 @@ def score_review(store: ArtifactStore, report: dict, review: ManualReview) -> di
         elif presence == 'matched':
             if expected.kind == 'count':
                 got = best['count']
-                if iou(best['region'], expected.region.model_dump()) < .95:
+                if iou(best['region'], region) < .95:
                     outcome = 'count_region_mismatch_unscored'
                 elif got['lower'] is None:
                     outcome = 'model_abstained'
@@ -141,8 +142,8 @@ def score_review(store: ArtifactStore, report: dict, review: ManualReview) -> di
     result = {'id': new_id('review'), 'createdAt': utcnow().isoformat(),
               'schemaVersion': 'street-evidence-review.v1', 'annotation': review.model_dump(mode='json'), 'comparisons': comparisons,
               'extractionMetrics': report['metrics'], 'unmatchedAcceptedFacts': [r['id'] for r in report['facts']
-                  if r['disposition']=='accepted' and not any(r['id'] in c['factIds'] for c in comparisons)],
-              'counts': {name: sum(c['outcome']==name for c in comparisons) for name in sorted({c['outcome'] for c in comparisons})},
+                  if r['disposition'] == 'accepted' and not any(r['id'] in c['factIds'] for c in comparisons)],
+              'counts': {name: sum(c['outcome'] == name for c in comparisons) for name in sorted({c['outcome'] for c in comparisons})},
               'notice': 'Unannotated facts are unreviewed, not automatically false positives. Interval overlap is not exact count accuracy. Presence matches do not score counts without human bounds.'}
     unscored = {'human_unknown', 'count_region_mismatch_unscored', 'model_failed_or_unprocessed'}
     result['coverage'] = {'annotations': len(comparisons),

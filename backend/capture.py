@@ -330,54 +330,45 @@ class HlsRecorder:
 
 def _bounded_probe(command: list[str], timeout: float = 20.0) -> bytes:
     """Bound both decoder output and its entire process lifetime."""
+    # Reader threads, not selectors: Windows cannot select() on pipes.
     process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    output = {"stdout": bytearray(), "stderr": bytearray()}
-    stopped = threading.Event()
-    finished = {name: threading.Event() for name in output}
-    failures = []
+    limits = {"stdout": 65536, "stderr": 262144}
+    output = {name: bytearray() for name in limits}
+    overflow = threading.Event()
 
-    def read_pipe(name):
-        # Windows select() only supports sockets. Bounded pipe readers work on
-        # both Windows and POSIX without buffering unbounded decoder output.
-        try:
-            while not stopped.is_set():
-                chunk = os.read(getattr(process, name).fileno(), 8192)
-                if not chunk:
-                    break
-                if len(output[name]) + len(chunk) > (65536 if name == "stdout" else 262144):
-                    failures.append("Media decoding exceeded its output limit.")
-                    break
-                output[name].extend(chunk)
-        except OSError:
-            if not stopped.is_set():
-                failures.append("Media could not be decoded completely.")
-        finally:
-            finished[name].set()
+    def drain(name: str) -> None:
+        fd = getattr(process, name).fileno()
+        while not overflow.is_set() and (chunk := os.read(fd, 8192)):
+            output[name].extend(chunk)
+            if len(output[name]) > limits[name]:
+                overflow.set()
+                process.kill()
 
-    readers = [threading.Thread(target=read_pipe, args=(name,), daemon=True) for name in output]
+    readers = [threading.Thread(target=drain, args=(name,), daemon=True) for name in limits]
     deadline = time.monotonic() + timeout
     try:
         for reader in readers:
             reader.start()
-        while not all(done.is_set() for done in finished.values()) or process.poll() is None:
-            if failures:
-                raise TruncatedCapture(failures[0])
-            if time.monotonic() >= deadline:
-                raise TruncatedCapture("Media decoding exceeded its time limit.")
-            stopped.wait(min(.01, max(0, deadline - time.monotonic())))
-        if failures:
-            raise TruncatedCapture(failures[0])
+        try:
+            process.wait(timeout)
+        except subprocess.TimeoutExpired:
+            raise TruncatedCapture("Media decoding exceeded its time limit.") from None
+        for reader in readers:
+            reader.join(max(0, deadline - time.monotonic()))
+        if overflow.is_set():
+            raise TruncatedCapture("Media decoding exceeded its output limit.")
+        if any(reader.is_alive() for reader in readers):
+            raise TruncatedCapture("Media decoding exceeded its time limit.")
         if process.returncode or output["stderr"]:
             raise TruncatedCapture("Media could not be decoded completely.")
         return bytes(output["stdout"])
     finally:
-        stopped.set()
         if process.poll() is None:
             process.kill()
         process.wait()
         for reader in readers:
-            if reader.ident is not None:
-                reader.join()
+            if reader.is_alive():
+                reader.join(1)
         process.stdout.close()
         process.stderr.close()
 

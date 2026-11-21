@@ -226,9 +226,9 @@ class ModelGateway:
                                   self._redact(result.output), result.usage,
                                   "reported_usage_upper_bound" if result.usage else "reservation_retained")
             except (GatewayError, TimeoutError, asyncio.CancelledError, OSError, sqlite3.Error) as exc:
-                if isinstance(exc, asyncio.CancelledError) and request_id is None:
-                    # Waiting for admission is not a model attempt. Preserve
-                    # cancellation without attributing it to a new ledger row.
+                # Cancellation while waiting for this process's slot was never
+                # admitted: do not invent a provider-attempt row or request ID.
+                if isinstance(exc, asyncio.CancelledError) and not acquired and request_id is None and call.service != Service.GENIE:
                     raise
                 if isinstance(exc, GatewayError):
                     error = exc
