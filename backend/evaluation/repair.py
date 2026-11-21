@@ -90,6 +90,7 @@ class ScoredEpisode(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
     episode: Episode
+    comparison_id: Identifier  # planned replicate id, shared across variants; never the runtime session UUID
     score: AttackScore
     defender_actions: tuple[str, ...] = ()
 
@@ -101,12 +102,15 @@ def build_packet(failures: list[ScoredEpisode], test_suite: list[AttackScript]) 
         if f.episode.split != "dev" or f.score.record.script in test_suite:
             raise HoldoutError(f"{f.episode.episode_id}: repair evidence must come from development only")
         s = f.score
-        # "hazard", not "attack_type": the hazard is what the defender saw, the attack key is adversary data.
-        packet.append({"episode_id": f.episode.episode_id, "hazard": s.record.script.attack_type.value,
+        # Only what the defender could see: the hazard type once it was visible (never the scripted type of an
+        # unseen attack). No window_end or anything derived from it: window_end is send_frame + window, and
+        # together with first_visible_frame any duration based on it gives the send time back.
+        seen = s.first_visible_frame is not None
+        packet.append({"episode_id": f.episode.episode_id, "hazard": s.record.script.attack_type.value if seen else None,
                        "outcome": s.outcome, "void_reason": s.void_reason,
                        "first_visible_frame": s.first_visible_frame, "contact_frame": s.contact_frame,
                        "cleared_frame": s.cleared_frame, "lead_frames": s.lead_frames,
-                       "required_lead_frames": s.required_lead_frames, "window_end": s.window_end,
+                       "required_lead_frames": s.required_lead_frames,
                        "defender_actions": list(f.defender_actions)})
     check_packet(packet, [f.score.record for f in failures], test_suite)
     return packet
@@ -221,8 +225,9 @@ class RepairSession:
              holdout_after: list[ScoredEpisode]) -> RepairTrial:
         """Record the dev rerun and the held-out-camera holdout for the run from `open_holdout`.
 
-        Dev and holdout before/after must each cover the same multiset of (episode_id, record.session_id, frozen script)
-        slots, so no slot can be dropped or rerun on one side only.
+        Dev and holdout before/after must each cover the same (episode_id, comparison_id, script)
+        slots. Assign comparison_id before running each replicate and reuse it across variants;
+        record.session_id still identifies the actual, distinct runtime session for each rollout.
         """
         if run is None or run is not self.run:
             raise HoldoutError("seal needs the FinalRun returned by this session's open_holdout")
@@ -239,10 +244,13 @@ class RepairSession:
         for item in dev_before + dev_after:
             if item.episode not in episodes or item.episode.split != "dev":
                 raise ValueError(f"{item.episode.episode_id}: dev scores must come from dev-split manifest episodes")
-        slot = lambda side: Counter((i.episode.episode_id, i.score.record.session_id, i.score.record.script) for i in side)
+        slot = lambda side: Counter((i.episode.episode_id, i.comparison_id, i.score.record.script) for i in side)
         for name, before, after in (("dev", dev_before, dev_after), ("holdout", holdout_before, holdout_after)):
-            if slot(before) != slot(after):
-                raise ValueError(f"{name} before/after must cover the same (episode, session, script) slots")
+            before_slots, after_slots = slot(before), slot(after)
+            if before_slots != after_slots:
+                raise ValueError(f"{name} before/after must cover the same (episode, comparison, script) slots")
+            if any(count != 1 for count in before_slots.values()):
+                raise ValueError(f"{name} comparison slots must be unique; give every replicate its own comparison_id")
         self.sealed = True
         hb, ha = aggregate([i.score for i in holdout_before]), aggregate([i.score for i in holdout_after])
         db, da = aggregate([i.score for i in dev_before]), aggregate([i.score for i in dev_after])

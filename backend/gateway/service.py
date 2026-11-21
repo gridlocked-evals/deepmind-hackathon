@@ -14,7 +14,7 @@ from pydantic import BaseModel
 
 from .adapters import GenieAdapter, HTTPAdapter, reported_usage, safe_id
 from .config import GatewayConfig, backend_key
-from .contracts import (MODELS, STAGES, CallContext, CallResult, ErrorCode, GatewayError,
+from .contracts import (MODELS, STAGES, CallContext, CallResult, ErrorCode, GatewayError, GenieCallState,
                         PreparedCall, Service, canonical, digest)
 from .ledger import Ledger
 
@@ -28,6 +28,9 @@ class ModelGateway:
         self.ledger = Ledger(config)
         self.http = HTTPAdapter(client, self._key or "", config)
         self.genie = GenieAdapter(self.http, genie_connector) if genie_connector else GenieAdapter(self.http)
+        # Queue this process's calls; the ledger's limit still guards other workers.
+        # Genie stays out: the ledger's one-world rule bounds it, and a live world must not starve judges.
+        self.slots = asyncio.Semaphore(config.max_concurrency)
 
     def _input(self, value):
         """Inline, immutable inputs only: remote URLs could change between retries."""
@@ -78,6 +81,11 @@ class ModelGateway:
         self._input(input_value)
         payload = {"model": MODELS[service], "input": input_value, "store": False,
                    "generation_config": {"max_output_tokens": self.config.output_tokens_per_call}}
+        if service == Service.HYDROGEN and stage == "observation":
+            # A live six-frame extraction exhausted 4093/4096 tokens on default
+            # thinking, leaving only three output tokens. Fix this stage's policy
+            # to low so the bounded evidence table can actually be returned.
+            payload["generation_config"]["thinking_level"] = "low"
         if service == Service.NANO_BANANA:
             if response_model:
                 raise GatewayError(ErrorCode.INVALID_INPUT)
@@ -147,10 +155,13 @@ class ModelGateway:
             if world_timeout is not None:
                 timeout = world_timeout
         attempts = 1 if call.service == Service.GENIE else self.config.max_attempts
+        world_state = (world_executor or GenieCallState()) if call.service == Service.GENIE else None
         for attempt in range(attempts):
             request_id = None
             started = time.monotonic()
             response_evidence = None
+            if call.service != Service.GENIE:
+                await self.slots.acquire()
             try:
                 if not self._key:
                     raise GatewayError(ErrorCode.NOT_CONFIGURED)
@@ -170,7 +181,10 @@ class ModelGateway:
                     response_evidence = self._redact(raw)
                 async with asyncio.timeout(timeout):
                     if call.service == Service.GENIE:
-                        result = await (world_executor or self.genie).execute(call, on_id)
+                        if world_executor is not None:
+                            result = await world_executor.execute(call, on_id)
+                        else:
+                            result = await self.genie.execute(call, on_id, world_state)
                     else:
                         result = await self.http.execute(call, on_id, on_response)
                 evidence = self._redact(result.evidence)
@@ -192,15 +206,19 @@ class ModelGateway:
                     error = GatewayError(ErrorCode.CANCELLED)
                 else:
                     error = GatewayError(ErrorCode.STORAGE)
-                if world_executor is not None and world_executor.termination_pending:
+                if world_state is not None and world_state.termination_pending:
                     # Preserve the unresolved-world admission latch even if caller
                     # cancellation or a storage failure interrupts finalization.
                     error = GatewayError(ErrorCode.TERMINATION)
                 try:
                     if request_id:
                         evidence = response_evidence or {"error": error.public()}
-                        result_hash = self.ledger.artifact(canonical(evidence))
                         usage = reported_usage(response_evidence.get("usage")) if response_evidence else None
+                        if world_state is not None:
+                            usage = world_state.usage
+                            evidence = {**evidence, "termination": world_state.termination,
+                                        "usage": usage.model_dump() if usage else None}
+                        result_hash = self.ledger.artifact(canonical(evidence))
                         self.ledger.finish(request_id, outcome=error.code.value,
                             latency_ms=(time.monotonic() - started) * 1000, result_hash=result_hash,
                             usage=usage, microusd=rate.usage_charge(usage) if usage else None)
@@ -215,6 +233,9 @@ class ModelGateway:
                 if not error.retryable or attempt + 1 >= attempts:
                     raise error from None
                 await asyncio.sleep(min(self.config.retry_delay_seconds, max(error.retry_after, .25 * 2 ** attempt)))
+            finally:
+                if call.service != Service.GENIE:
+                    self.slots.release()
         raise AssertionError("unreachable")
 
     def status(self) -> dict:

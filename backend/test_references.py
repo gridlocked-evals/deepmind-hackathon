@@ -1,0 +1,91 @@
+import base64
+from io import BytesIO
+
+import pytest
+from PIL import Image
+
+from backend.references import (MAX_ATTEMPTS, ReferenceError, generate_reference, genie_payload, normalize,
+                                validate_transport)
+from backend.test_pipeline_helpers import FakeProvider, carbon_ok, png, run, setup
+
+
+def test_normalization_produces_exact_16_9_and_transport_checks():
+    data, raw, how = normalize(png((1376, 768)))
+    assert raw["width"] == 1376 and how["crop"] == [8, 1, 1360, 765]
+    assert Image.open(BytesIO(data)).size == (1280, 720)
+    assert validate_transport(data, "image/png")["bytes"] == len(data)
+    with pytest.raises(ReferenceError):
+        validate_transport(png((1376, 768)), "image/png")
+    with pytest.raises(ReferenceError):
+        validate_transport(data, "image/jpeg")
+    with pytest.raises(ReferenceError):
+        normalize(png((1024, 1024)))
+
+
+def test_two_supported_styles_link_to_the_same_source_and_edit(tmp_path):
+    provider = FakeProvider()
+    store, bundle = setup(tmp_path, provider)
+    provider.images = [png(color=(10, 200, 10)), png(color=(200, 10, 10))]
+
+    async def both(gw):
+        return [await generate_reference(gw, store, bundle, style=s) for s in ("photoreal", "cel_shaded")]
+    photo, cel = run(tmp_path, provider, both)
+    for rec in (photo, cel):
+        ref = rec.referenceImage
+        assert rec.status == "generated" and (ref.width, ref.height) == (1280, 720)
+        assert ref.captureId == bundle.captureId and ref.streetEditId == bundle.streetEdit.id
+        assert bundle.sourceFrame["frameSha256"] in ref.modelCall.inputHashes
+        assert ref.modelCall.service == "nano_banana" and ref.modelCall.costUsd is not None
+        assert rec.raw["width"] == 1376 and rec.interpretations
+        assert store.get_blob(ref.imageSha256) and store.get_blob(rec.raw["sha256"])
+        assert ref.attempt == 1
+    assert photo.referenceImage.imageSha256 != cel.referenceImage.imageSha256
+    sent = [b for m, b in provider.requests if m == "gemini-nano-banana-2.1"]
+    assert sent[0]["input"][1]["type"] == "image" and "Photorealistic" in sent[0]["input"][0]["text"]
+    assert "cel-shaded" in sent[1]["input"][0]["text"]
+    assert b"data" not in base64.b64decode(genie_payload(store, store.get("references", photo.id))["data"])[:4]
+    assert provider.count("gemini-4-genie") == 0  # this stage never creates worlds
+
+
+def test_experimental_styles_need_explicit_opt_in(tmp_path):
+    provider = FakeProvider()
+    store, bundle = setup(tmp_path, provider)
+    provider.images = [png()]
+    with pytest.raises(ReferenceError):
+        run(tmp_path, provider, lambda gw: generate_reference(gw, store, bundle, style="claymation"))
+    rec = run(tmp_path, provider, lambda gw: generate_reference(gw, store, bundle, style="claymation",
+                                                                allow_experimental=True))
+    assert rec.styleStatus == "experimental" and rec.status == "generated"
+
+
+def test_malformed_and_failed_outputs_are_recorded_not_substituted(tmp_path):
+    provider = FakeProvider()
+    store, bundle = setup(tmp_path, provider)
+    provider.images = [png((1024, 1024)), 400, png()]
+
+    async def three(gw):
+        return [await generate_reference(gw, store, bundle, style="photoreal") for _ in range(3)]
+    square, failed, ok = run(tmp_path, provider, three)
+    assert square.status == "malformed" and square.referenceImage is None and "16:9" in square.error["error"]
+    assert square.modelCall["outcome"] == "ok" and square.modelCall["costUsd"] is not None
+    assert failed.status == "failed" and failed.modelCall["outcome"] == "error" and failed.error["code"]
+    assert ok.status == "generated" and [square.attempt, failed.attempt, ok.attempt] == [1, 2, 3]
+    with pytest.raises(ReferenceError) as exhausted:
+        run(tmp_path, provider, lambda gw: generate_reference(gw, store, bundle, style="photoreal"))
+    assert exhausted.value.status == 409 and len(store.list("references")) == MAX_ATTEMPTS
+
+
+def test_unchanged_source_frame_is_malformed(tmp_path):
+    provider = FakeProvider()
+    store, bundle = setup(tmp_path, provider)
+    provider.images = [store.get_blob(bundle.sourceFrame["frameSha256"])]
+    rec = run(tmp_path, provider, lambda gw: generate_reference(gw, store, bundle, style="photoreal"))
+    assert rec.status == "malformed" and "unchanged" in rec.error["error"]
+
+
+def test_rejected_edits_cannot_be_rendered(tmp_path):
+    provider = FakeProvider()
+    store, bundle = setup(tmp_path, provider, carbon_ok(preservedAnchorIds=[]))
+    assert bundle.streetEdit.status == "rejected"
+    with pytest.raises(ReferenceError):
+        run(tmp_path, provider, lambda gw: generate_reference(gw, store, bundle, style="photoreal"))

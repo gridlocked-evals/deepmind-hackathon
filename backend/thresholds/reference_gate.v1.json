@@ -1,0 +1,13 @@
+{
+  "version": "reference_gate.v1",
+  "status": "provisional",
+  "selection": "Not yet selected on labeled development data. Run `python -m backend.gate_review calibrate` on blinded human labels, then commit the frozen file it writes. Values here are conservative starting points, not measured operating points.",
+  "developmentSet": null,
+  "questions": {
+    "viewpoint_preserved": {"passAt": 0.8, "failAt": 0.3, "minConfidence": 0.7},
+    "anchors_visible": {"passAt": 0.8, "failAt": 0.3, "minConfidence": 0.7},
+    "requested_change": {"passAt": 0.8, "failAt": 0.3, "minConfidence": 0.7},
+    "crossing_continuity": {"passAt": 0.8, "failAt": 0.3, "minConfidence": 0.7},
+    "unambiguous": {"passAt": 0.8, "failAt": 0.3, "minConfidence": 0.7}
+  }
+}

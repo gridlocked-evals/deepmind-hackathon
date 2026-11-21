@@ -11,7 +11,7 @@ from uuid import uuid4
 
 from pydantic import TypeAdapter, ValidationError
 
-from ..gateway.adapters import decode_image, event_dict, reported_usage, safe_id
+from ..gateway.adapters import decode_image, event_dict, finish_cleanup, reported_usage, safe_id
 from ..gateway.config import dollars
 from ..gateway.contracts import (AdapterResult, CallContext, ErrorCode, GatewayError,
                                  MODELS, Service, canonical, digest)
@@ -143,9 +143,11 @@ class WorldSession:
         except GatewayError as exc:
             self.request_id = exc.request_id
             self.error = exc.code.value
-            self.state = "termination_unconfirmed" if exc.code == ErrorCode.TERMINATION else "failed"
+            self.state = ("termination_unconfirmed" if exc.code == ErrorCode.TERMINATION else
+                          "stopped" if exc.code == ErrorCode.CANCELLED else "failed")
         except asyncio.CancelledError:
-            self.state = "termination_unconfirmed" if self.provider_id and not self.termination else "stopped"
+            self.state = "termination_unconfirmed" if self.termination_pending else "stopped"
+            self.error = ErrorCode.TERMINATION.value if self.termination_pending else ErrorCode.CANCELLED.value
             raise
         finally:
             self.tokens.clear()
@@ -317,9 +319,14 @@ class WorldSession:
         created_maybe = False
         reader = watcher = None
         connection = None
+        cancelled = None
         self.state = "connecting"
+        def check_stopped():
+            if self.stopping.is_set():
+                raise GatewayError(ErrorCode.CANCELLED)
         try:
             async with asyncio.timeout(self.seconds):
+                check_stopped()
                 created_maybe = True
                 self.creation_may_be_active = True
                 created = await self.gateway.http.post("/interactions", canonical(payload["create"]), lambda _: None)
@@ -329,7 +336,9 @@ class WorldSession:
                 on_id(self.provider_id)
                 self.recording.event("provider_created", interaction_id=self.provider_id)
                 self._save()
+                check_stopped()
                 token = await self.gateway.http.post(f"/interactions/{self.provider_id}/auth_tokens", b"{}", lambda _: None)
+                check_stopped()
                 scoped_key = token.get("auth_token")
                 if (not isinstance(scoped_key, str) or not scoped_key.startswith("auth_tokens/")
                         or self.gateway.http.api_key in scoped_key):
@@ -338,6 +347,7 @@ class WorldSession:
                 self.session = await connection.__aenter__()
                 self.connected_at = time.monotonic()
                 reader = asyncio.create_task(self._receive())
+                check_stopped()
                 await self._send(payload["world_setup"])
                 self.recording.event("world_setup_sent")
                 self.state = "running"
@@ -353,38 +363,43 @@ class WorldSession:
                     stop_wait.cancel()
                     await asyncio.gather(stop_wait, return_exceptions=True)
         except TimeoutError:
-            self.reason = "duration_limit"
+            self.reason = self.reason or "duration_limit"
         except BaseException as exc:
-            self.error = exc.code.value if isinstance(exc, GatewayError) else ErrorCode.TRANSPORT.value
-            self.reason = "upstream_error"
-            if not self.provider_id and isinstance(exc, GatewayError) and exc.code in (ErrorCode.AUTH, ErrorCode.QUOTA):
+            if isinstance(exc, asyncio.CancelledError):
+                cancelled = exc
+                self.error = ErrorCode.CANCELLED.value
+            else:
+                self.error = exc.code.value if isinstance(exc, GatewayError) else ErrorCode.TRANSPORT.value
+            self.reason = self.reason or ("caller_cancelled" if cancelled is not None else "upstream_error")
+            if not self.provider_id and isinstance(exc, GatewayError) and 400 <= (exc.status or 0) < 500:
                 created_maybe = False
                 self.creation_may_be_active = False
         finally:
             self.stopping.set()
             self.state = "stopping"
-            if watcher:
-                watcher.cancel()
-                await asyncio.gather(watcher, return_exceptions=True)
-            # Keep the sole receiver alive until completion can be acknowledged.
-            try:
-                cleanup = asyncio.create_task(self._cleanup())
+            async def close_resources():
+                if watcher:
+                    watcher.cancel()
+                    await asyncio.gather(watcher, return_exceptions=True)
+                # Keep the sole receiver alive until completion can be acknowledged.
                 try:
-                    await asyncio.shield(cleanup)
-                except asyncio.CancelledError:
-                    # Caller cancellation cannot detach the socket before cleanup.
-                    await cleanup
-            finally:
-                if reader:
-                    reader.cancel()
-                    await asyncio.gather(reader, return_exceptions=True)
-                if connection and self.session:
-                    try:
-                        async with asyncio.timeout(.5):
-                            await connection.__aexit__(None, None, None)
-                    except Exception:
-                        pass
-                self.session = None
+                    await self._cleanup()
+                finally:
+                    if reader:
+                        reader.cancel()
+                        await asyncio.gather(reader, return_exceptions=True)
+                    if connection and self.session:
+                        try:
+                            async with asyncio.timeout(.5):
+                                await connection.__aexit__(None, None, None)
+                        except Exception:
+                            pass
+                    self.session = None
+            cleanup_cancelled = await finish_cleanup(close_resources())
+            if cleanup_cancelled is not None:
+                cancelled = cleanup_cancelled
+        if cancelled is not None:
+            raise cancelled
         if created_maybe and not self.terminal.is_set():
             raise GatewayError(ErrorCode.TERMINATION)
         if self.error:
@@ -397,17 +412,53 @@ class WorldSession:
 
 
 class WorldManager:
-    def __init__(self, gateway, limits: WorldLimits | None = None):
+    def __init__(self, gateway, limits: WorldLimits | None = None, *, gates=None):
         self.gateway = gateway
         self.limits = limits or WorldLimits()
         self.references = ReferenceStore(gateway.config.data_dir)
+        # The #8 gate store. When set, every production session must claim its accepted gate.
+        self.gates = gates
         self.sessions = {}
 
     def create(self, request: WorldRequest):
         record, image = self.references.load(request)
-        return self._create(prompt=request.prompt, image=image, context=request.context,
+        if self.gates is not None:
+            self._check_gate(record)
+        session = self._create(prompt=request.prompt, image=image, context=request.context,
             seconds=request.seconds, max_usd=request.max_usd,
             provenance={**record.model_dump(), "accepted_reference": request.accepted_reference, "development_only": False})
+        if self.gates is not None:
+            self._claim(session, record)
+        return session
+
+    def _check_gate(self, record):
+        """The handoff must still match the live gate record before anything is created."""
+        from ..artifacts import ArtifactError
+        from ..gates import authorize_world, gate_artifact
+        try:
+            auth = authorize_world(self.gates, record.reference_id, record.gate_decision_id)
+            if (auth["imageSha256"] != "sha256:" + record.reference_sha256
+                    or digest(gate_artifact(self.gates, record.gate_decision_id)) != record.gate_artifact_sha256):
+                raise ArtifactError("Gate record changed since publication.", status=409)
+        except (ArtifactError, OSError):
+            raise GatewayError(ErrorCode.INVALID_INPUT) from None
+
+    def _claim(self, session, record):
+        """Claim the accepted gate for exactly this session; no paid request is sent before a client attaches."""
+        from ..artifacts import ArtifactError
+        from ..gates import bind_world_ids, claim_world
+        try:
+            claim_world(self.gates, record.reference_id, record.gate_decision_id)
+            binding = bind_world_ids(self.gates, gate_id=record.gate_decision_id, reference_id=record.reference_id,
+                                     world_session_id="world_" + session.id,
+                                     image_sha256="sha256:" + record.reference_sha256)
+        except ArtifactError:
+            # Lost a race for the gate (or it changed): this session must never reach Genie.
+            session.reason = "gate_refused"
+            session.stopping.set()
+            self.sessions.pop(session.id, None)
+            raise GatewayError(ErrorCode.INVALID_INPUT) from None
+        session.recording.event("gate_bound", gate_decision_id=record.gate_decision_id, binding_id=binding["id"])
 
     def development(self, *, prompt, image, seconds=15, max_usd=Decimal("2.5")):
         data = valid_reference(image)
