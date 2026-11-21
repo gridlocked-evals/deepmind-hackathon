@@ -223,6 +223,16 @@ def test_holdout_is_isolated_from_model_inputs(store):
     assert store.capture_contract(m["id"]).durationS == m["files"]["prefix"]["durationS"]
 
 
+def test_legacy_readonly_pins_can_be_updated_without_changing_evidence(store):
+    recorder, _, _ = record(20)
+    manifest = store.create_hls_episode(recorder, 10, 6)
+    directory = store.root / manifest['id']
+    (directory / 'pins.json').chmod(0o444)
+    assert store.pin(manifest['id'], 'job-retained') == ['job-retained']
+    assert store.get(manifest['id'], verify=True) == manifest
+    assert (directory / 'manifest.json').stat().st_mode & 0o222 == 0
+
+
 def test_pins_survive_cleanup_and_restart(tmp_path):
     root = tmp_path / "captures"
     probe = fake_probe
@@ -358,6 +368,43 @@ def test_rejected_create_does_not_evict_unpinned_episodes(tmp_path):
     with pytest.raises(CaptureError):
         store.create_hls_episode(rec, seconds_ago=20, duration_s=10)
     assert sorted(m["id"] for m in store.list()) == sorted([pinned, unpinned])
+
+
+@pytest.mark.parametrize("damage", ["json", "hash"])
+def test_retained_invalid_manifest_is_not_reclaimable_capture_capacity(store, damage):
+    rec, _, _ = record(40)
+    old = store.create_hls_episode(rec, seconds_ago=20, duration_s=10)["id"]
+    manifest = store.root / old / "manifest.json"
+    original = manifest.read_text()
+    manifest.chmod(0o644)
+    manifest.write_text("!" + original[1:] if damage == "json" else original.replace(CAMERA, OTHER))
+    assert store.pins(old) == []
+    with pytest.raises(CaptureError):
+        store.get(old)
+    before = store.usage_bytes()
+    store.budget_bytes = before + 100  # Either capture fits alone, but both do not.
+    with pytest.raises(CaptureError, match="budget"):
+        store.create_hls_episode(rec, seconds_ago=20, duration_s=10)
+    assert store.usage_bytes() == before
+    assert [path.name for path in store.root.iterdir()] == [old]
+    assert manifest.read_text() != original
+
+
+def test_rejected_capture_preserves_valid_episode_when_damaged_retention_fills_budget(store):
+    rec, _, _ = record(40)
+    damaged = store.create_hls_episode(rec, seconds_ago=20, duration_s=10)["id"]
+    store.clock.now += timedelta(seconds=1)
+    valid = store.create_hls_episode(rec, seconds_ago=20, duration_s=10)["id"]
+    manifest = store.root / damaged / "manifest.json"
+    original = manifest.read_text()
+    manifest.chmod(0o644)
+    manifest.write_text(original.replace(CAMERA, OTHER))
+    store.budget_bytes = store.usage_bytes() - 1
+    store.clock.now += timedelta(seconds=1)
+    with pytest.raises(CaptureError, match="budget"):
+        store.create_hls_episode(rec, seconds_ago=20, duration_s=10)
+    assert sorted(path.name for path in store.root.iterdir()) == sorted([damaged, valid])
+    assert store.get(valid, verify=True)["id"] == valid
 
 
 def test_capture_rejected_without_successful_probe(tmp_path):
@@ -506,7 +553,12 @@ def test_manifest_and_path_integrity_rejects_damage(store, damage):
         media = store.root / manifest["id"] / manifest["files"]["prefix"]["path"]
         saved = media.with_name("source.ts")
         media.rename(saved)
-        media.symlink_to(saved)
+        try:
+            media.symlink_to(saved)
+        except OSError as exc:
+            if getattr(exc, "winerror", None) == 1314:
+                pytest.skip("This Windows account cannot create symbolic links")
+            raise
     else:
         if damage == "metadata":
             manifest["cameraId"] = OTHER

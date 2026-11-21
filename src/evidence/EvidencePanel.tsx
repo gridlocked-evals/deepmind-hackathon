@@ -9,7 +9,7 @@ import { PipelinePanel } from './PipelinePanel';
 import { ObservationReview } from './ObservationReview';
 import './evidence.css';
 export const formatEvidenceTime = (value: number) => `${Math.floor(value / 60).toString().padStart(2, '0')}:${(value % 60).toFixed(3).padStart(6, '0')}`;
-export function EvidencePanel({ camera, open, onClose }: { camera: CameraSource | null; open: boolean; onClose: () => void }) {
+export function EvidencePanel({ camera, open, modal = false, onClose }: { camera: CameraSource | null; open: boolean; modal?: boolean; onClose: () => void }) {
   const controller = useMemo(() => new EvidenceController(), []), state = useSyncExternalStore(controller.subscribe, controller.getSnapshot);
   const heading = useRef<HTMLHeadingElement>(null);
   const [token, setToken] = useState(''), [showOriginal, setShowOriginal] = useState(false), [review, setReview] = useState<FrameEvidence | null>(null);
@@ -29,7 +29,7 @@ export function EvidencePanel({ camera, open, onClose }: { camera: CameraSource 
   const extraction = current ? state.extraction : null, busy = current ? state.busy : null, bounds = history?.history.segmentBoundariesS ?? [];
   const ready = current && validInterval(history, state.selection), duration = state.selection ? state.selection[1] - state.selection[0] : 0;
   const phase = history?.recording ? history.availability === 'recording' ? 'Recording' : 'Waiting for source' : bounds.length ? 'Recording stopped · history retained' : 'Not recording';
-  return <aside className="evidence-panel" id="camera-evidence-panel" aria-labelledby="camera-evidence-heading">
+  return <aside className="evidence-panel" id="camera-evidence-panel" aria-labelledby="camera-evidence-heading" role={modal ? 'dialog' : undefined} aria-modal={modal || undefined} tabIndex={-1}>
     <header className="evidence-panel-header"><div><h2 id="camera-evidence-heading" tabIndex={-1} ref={heading}>Evidence to possibility</h2><p>Capture, inspect, propose, then review.</p></div><button className="evidence-icon-button" onClick={onClose} aria-label="Close evidence panel"><X size={19} /></button></header>
     <div className="evidence-panel-body">
       {!camera ? <div className="evidence-empty"><p>Select a real camera to begin.</p><span>Choose a public roadway source from the camera list or map.</span></div> : <>
