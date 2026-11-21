@@ -15,6 +15,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
+from .contracts import json_schema
 from .feeds import HLS_SOURCES, REGISTRY_URL, public_cameras, utc_now
 from .proxy import proxy_media, resolve_token
 
@@ -121,6 +122,12 @@ async def fetch_dot(client: httpx.AsyncClient) -> list[dict]:
 @app.get("/api/health")
 async def health():
     return {"status": "ok", "service": "gotham-forge-camera-api", "timestamp": utc_now()}
+
+
+@app.get("/api/contracts/element119")
+async def contracts():
+    """JSON Schema for the frozen Element 119 contracts (docs/CONTRACTS.md)."""
+    return json_schema()
 
 
 @app.get("/api/cameras")

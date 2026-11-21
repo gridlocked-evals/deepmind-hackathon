@@ -6,7 +6,7 @@ For setup and controls, see [RUNNING.md](../RUNNING.md). The broader reconstruct
 
 ## Contracts and ownership
 
-Shared frontend contracts live in [src/types.ts](../src/types.ts).
+Shared frontend contracts for the current map/demo live in [src/types.ts](../src/types.ts). The Element 119 submission pipeline (capture → Hydrogen → Carbon → Nano Banana → Decisions → Genie → evaluation) uses the separate versioned contracts in [CONTRACTS.md](CONTRACTS.md); its schema is served at `GET /api/contracts/element119`.
 
 | Contract | Responsibility |
 | --- | --- |
