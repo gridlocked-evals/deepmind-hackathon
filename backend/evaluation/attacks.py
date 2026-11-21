@@ -135,7 +135,8 @@ def random_schedule(seed: int, budget: Budget = Budget()) -> list[AttackScript]:
     slack = budget.last_frame - (n - 1) * budget.min_gap
     if slack < 0:
         raise ValueError("budget cannot fit max_attacks")
-    times = sorted(rng.randint(0, slack) for _ in range(n))
+    # Stars and bars: n distinct sorted picks from slack+n, minus their index, is uniform over sorted n-tuples in [0, slack].
+    times = [t - i for i, t in enumerate(sorted(rng.sample(range(slack + n), n)))]
     scripts = []
     for i, t in enumerate(times):
         attack = rng.choice(list(AttackType))

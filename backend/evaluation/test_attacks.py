@@ -60,6 +60,14 @@ def test_budget_rules():
     assert not allowed([100], 100 + gap - 1) and allowed([100], 100 + gap)
 
 
+def test_random_schedule_is_uniform_over_valid_schedules():
+    from collections import Counter
+    budget = Budget(max_attacks=2, min_gap=5, last_frame=6)  # slack 1: [0,5], [0,6], [1,6]
+    counts = Counter(tuple(s.trigger_frame for s in random_schedule(seed, budget)) for seed in range(3000))
+    assert set(counts) == {(0, 5), (0, 6), (1, 6)}
+    assert all(800 < c < 1200 for c in counts.values()), counts  # iid-then-sort gives ~750/1500/750
+
+
 def test_random_schedule_is_seeded_and_within_budget():
     a, b = random_schedule(7), random_schedule(7)
     assert a == b and len(a) == 4 and a != random_schedule(8)
