@@ -6,6 +6,7 @@ import secrets
 import time
 from urllib.parse import unquote, urljoin, urlsplit
 
+import anyio
 import httpx
 from fastapi import HTTPException, Request
 from fastapi.responses import Response, StreamingResponse
@@ -16,10 +17,25 @@ MAX_PLAYLIST = 1024 * 1024
 MAX_MEDIA = 16 * 1024 * 1024
 MAX_TOKENS = 4096
 TOKEN_TTL = 900
+UPSTREAM_CLOSE_SECONDS = 1
 _tokens: OrderedDict[str, tuple[str, str, float]] = OrderedDict()
 _by_url: dict[tuple[str, str], str] = {}
 _slots = asyncio.Semaphore(8)
 _uri_attribute = re.compile(r'URI="([^"]*)"')
+
+
+class _ClosingStreamingResponse(StreamingResponse):
+    def __init__(self, content, *, finalize, **kwargs):
+        super().__init__(content, **kwargs)
+        self.finalize = finalize
+
+    async def __call__(self, scope, receive, send):
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            # Headers can fail, or disconnect can cancel streaming before the
+            # body generator is entered. Its finally alone cannot own cleanup.
+            await self.finalize()
 
 
 def validate_url(camera_id: str, url: str) -> str:
@@ -133,12 +149,29 @@ async def open_upstream(client: httpx.AsyncClient, camera_id: str, url: str, hea
 async def proxy_media(request: Request, camera_id: str, url: str) -> Response:
     validate_url(camera_id, url)
     headers = {"Accept-Encoding": "identity", **range_header(request.headers.get("range"))}
+    slots = _slots
     try:
-        await asyncio.wait_for(_slots.acquire(), timeout=1)
+        await asyncio.wait_for(slots.acquire(), timeout=1)
     except TimeoutError as exc:
         raise HTTPException(503, "Camera transport is busy. Try again.") from exc
     response: httpx.Response | None = None
     streaming = False
+    finalized = False
+
+    async def finalize():
+        nonlocal finalized
+        if finalized:
+            return
+        finalized = True
+        try:
+            if response is not None:
+                # Starlette's disconnect listener cancels an AnyIO task group.
+                # Shield resource cleanup, but never hold a slot indefinitely.
+                with anyio.move_on_after(UPSTREAM_CLOSE_SECONDS, shield=True):
+                    await response.aclose()
+        finally:
+            slots.release()
+
     try:
         response, final_url = await open_upstream(request.app.state.http, camera_id, url, headers)
         content_type = response.headers.get("content-type", "").split(";", 1)[0].lower()
@@ -177,7 +210,9 @@ async def proxy_media(request: Request, camera_id: str, url: str) -> Response:
         async def chunks():
             count = 0
             try:
-                async for chunk in upstream.aiter_bytes():
+                # Encoded media was rejected above. Read its transport stream
+                # directly so HTTPX does not close it outside our cleanup bound.
+                async for chunk in upstream.stream:
                     count += len(chunk)
                     if count > MAX_MEDIA:
                         raise RuntimeError("Camera media exceeded the byte limit.")
@@ -189,11 +224,12 @@ async def proxy_media(request: Request, camera_id: str, url: str) -> Response:
                 record_fetch(camera_id, False)
                 raise
             finally:
-                await upstream.aclose()
-                _slots.release()
+                await finalize()
 
+        result = _ClosingStreamingResponse(chunks(), finalize=finalize,
+            status_code=response.status_code, media_type=content_type, headers=out_headers)
         streaming = True
-        return StreamingResponse(chunks(), status_code=response.status_code, media_type=content_type, headers=out_headers)
+        return result
     except HTTPException:
         record_fetch(camera_id, False)
         raise
@@ -202,6 +238,4 @@ async def proxy_media(request: Request, camera_id: str, url: str) -> Response:
         raise HTTPException(502, "The camera could not be reached. Try reconnecting.") from exc
     finally:
         if not streaming:
-            if response:
-                await response.aclose()
-            _slots.release()
+            await finalize()
