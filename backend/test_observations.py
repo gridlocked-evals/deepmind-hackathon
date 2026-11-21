@@ -436,18 +436,6 @@ def test_reviewed_absence_respects_zero_and_uncertain_model_count(tmp_path,lower
     assert score_review(store,report,manual_review(report,annotations=[annotation]))['counts']=={outcome:1}
 
 
-def test_reviewed_absence_checks_positive_counts_even_after_a_zero_count(tmp_path):
-    captures, store, manifest = setup(tmp_path)
-    report = asyncio.run(perform(tmp_path, captures, store, manifest, Provider([
-        lambda meta: [fact(meta, kind='count', semanticClass='vehicle', count={'lower':n,'upper':n})
-                      for n in (0, 2)]])))
-    annotation = manual_annotation(report, present='no', count={})
-    result = score_review(store, report, manual_review(report, annotations=[annotation]))
-    assert result['counts'] == {'false_positive': 1}
-    assert set(result['comparisons'][0]['factIds']) == {row['id'] for row in report['facts']}
-    assert result['unmatchedAcceptedFacts'] == []
-
-
 def test_reviewed_absence_never_counts_failed_extraction_as_correct(tmp_path):
     captures,store,manifest=setup(tmp_path)
     report=asyncio.run(perform(tmp_path,captures,store,manifest,Provider([429])))
@@ -508,6 +496,8 @@ def test_invalid_domain_output_and_abstention_never_qualify_but_success_does(tmp
     asyncio.run(run())
 
 
+
+
 @pytest.mark.parametrize('abstention_first', [False, True])
 def test_negative_review_checks_all_accepted_candidates_before_abstentions(tmp_path, abstention_first):
     captures,store,manifest=setup(tmp_path)
@@ -531,7 +521,7 @@ def test_negative_review_checks_all_accepted_candidates_before_abstentions(tmp_p
 def test_negative_review_keeps_abstention_distinct_from_absence(tmp_path, abstained, expected):
     captures,store,manifest=setup(tmp_path)
     provider=Provider([lambda meta:[fact(meta,kind='signal',semanticClass='signal',visibility='unobservable')]
-                       if abstained else [fact(meta)]])
+                       if abstained else []])
     report=asyncio.run(perform(tmp_path,captures,store,manifest,provider))
     review=ManualReview(**{**annotation_template(report),'reviewer':'synthetic-regression-fixture','reviewedOriginalPixels':True,'annotations':[
         {'kind':'signal','semanticClass':'signal','time':{'startS':0,'endS':0},'region':BOX,'frameIds':report['windows'][0]['frameIds'],'present':'no'}]})
@@ -545,8 +535,8 @@ def test_count_review_requires_human_quantity_and_preserves_presence(tmp_path, h
     provider=Provider([lambda meta:[fact(meta,kind='count',semanticClass='vehicle',count={'lower':1,'upper':2})]])
     report=asyncio.run(perform(tmp_path,captures,store,manifest,provider))
     review=ManualReview(**{**annotation_template(report),'reviewer':'synthetic-regression-fixture','reviewedOriginalPixels':True,'annotations':[
-        {'kind':'count','semanticClass':'vehicle','time':{'startS':0,'endS':0},'region':BOX,'frameIds':report['windows'][0]['frameIds'],
-         'present':'yes','count':human_count}]})
+        {'kind':'count','semanticClass':'vehicle','time':{'startS':0,'endS':0},'region':BOX,
+         'frameIds':report['windows'][0]['frameIds'],'present':'yes','count':human_count}]})
     comparison=score_review(store,report,review)['comparisons'][0]
     assert comparison['outcome']==expected
     assert comparison['presenceOutcome']=='matched'
@@ -616,3 +606,22 @@ def test_cancel_before_admission_never_borrows_a_previous_window_trace(tmp_path,
             assert 'private cancellation detail' not in json.dumps(report)
 
     asyncio.run(run())
+
+
+@pytest.mark.parametrize('second_count,expected', [({'lower':1,'upper':2},'false_positive'),
+    ({'lower':0,'upper':2},'model_abstained')])
+@pytest.mark.parametrize('positive_first', [False, True])
+def test_absent_count_checks_every_comparable_claim(tmp_path, second_count, expected, positive_first):
+    captures,store,manifest=setup(tmp_path)
+    def rows(meta):
+        zero=fact(meta,kind='count',semanticClass='vehicle',count={'lower':0,'upper':0})
+        other=fact(meta,kind='count',semanticClass='vehicle',count=second_count)
+        return [other,zero] if positive_first else [zero,other]
+    report=asyncio.run(perform(tmp_path,captures,store,manifest,Provider([rows])))
+    annotation=manual_annotation(report,present='no',count={})
+    result=score_review(store,report,manual_review(report,annotations=[annotation]))
+    comparison=result['comparisons'][0]
+    assert comparison['outcome']==comparison['presenceOutcome']==expected
+    assert set(comparison['factIds'])=={row['id'] for row in report['facts']}
+    assert next(row for row in report['facts'] if row['id']==comparison['factId'])['count']==second_count
+    assert result['unmatchedAcceptedFacts']==[]

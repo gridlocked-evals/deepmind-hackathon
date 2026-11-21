@@ -81,33 +81,34 @@ def score_review(store: ArtifactStore, report: dict, review: ManualReview) -> di
                       and intersects(r['time'], expected.time.model_dump())
                       and iou(r['region'], region) > 0]
         accepted = [r for r in candidates if r['disposition'] == 'accepted']
-        # An absence annotation contradicts every accepted matching claim. A
-        # closer abstention must not conceal those false positives.
+        # An absence annotation must consider every matching accepted claim;
+        # a closer abstention cannot conceal false positives.
         matches = accepted if expected.present == 'no' and accepted else candidates
         best = max(matches, key=lambda r: iou(r['region'], region), default=None)
         fact_ids = [r['id'] for r in accepted] if expected.present == 'no' and accepted else ([best['id']] if best else [])
-        presence = 'human_unknown' if expected.present == 'unknown' else 'missed'
         processed = [window for window in report['windows'] if window['status'] in {'ok', 'abstained'}
             and window['startS'] <= expected.time.startS <= expected.time.endS <= window['endS']
             and set(expected.frameIds) <= set(window['frameIds'])]
+        presence = 'human_unknown' if expected.present == 'unknown' else 'missed'
         if expected.present != 'unknown' and not processed:
             presence = 'model_failed_or_unprocessed'
         elif expected.present == 'no':
-            if expected.kind == 'count' and accepted:
-                comparable = [r for r in accepted if iou(r['region'], region) >= .95]
-                contradictions = [r for r in comparable if r['count']['lower'] is not None and r['count']['lower'] > 0]
-                if contradictions:
-                    best = max(contradictions, key=lambda r: iou(r['region'], region))
-                    presence = 'false_positive'
-                elif len(comparable) != len(accepted):
-                    presence = 'count_region_mismatch_unscored'
-                elif any(r['count']['lower'] != 0 or r['count']['upper'] != 0 for r in comparable):
-                    presence = 'model_abstained'
-                else:
-                    presence = 'correct_absence'
+            if best and best['disposition'] != 'accepted':
+                presence = 'model_abstained'
+            elif best and expected.kind == 'count':
+                comparable = [row for row in accepted if iou(row['region'], region) >= .95]
+                # Check every comparable count: a zero-count row must not hide
+                # another accepted positive claim or an uncertain interval.
+                positive = [row for row in comparable if row['count']['lower'] is not None and row['count']['lower'] > 0]
+                uncertain = [row for row in comparable if row['count']['lower'] is None or row['count']['upper'] != 0]
+                matches = positive or uncertain or comparable or accepted
+                best = max(matches, key=lambda row: iou(row['region'], region))
+                presence = ('false_positive' if positive else 'model_abstained' if uncertain else
+                            'correct_absence' if comparable else 'count_region_mismatch_unscored')
+            elif best:
+                presence = 'false_positive'
             else:
-                presence = 'false_positive' if accepted else ('model_abstained'
-                    if candidates or not any(window['status'] == 'ok' for window in processed) else 'correct_absence')
+                presence = 'correct_absence'
         elif expected.present == 'yes' and best:
             if best['disposition'] != 'accepted':
                 presence = 'model_abstained'

@@ -144,4 +144,5 @@ def backend_key(profile: str = "primary") -> str | None:
     # A missing selected credential must never silently switch projects.
     if profile == "workshop":
         return os.getenv("WORKSHOP_API_KEY") or None
+    # GOOGLE_API_KEY is the existing primary-profile alias, not another project.
     return os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY") or None

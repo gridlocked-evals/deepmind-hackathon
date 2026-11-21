@@ -9,6 +9,7 @@ export function WorldPreview({ reference, gate, token, onActive }: { reference: 
   const [enabled, setEnabled] = useState(false), [status, setStatus] = useState<WorldStatus | null>(null);
   const [busy, setBusy] = useState(false), [error, setError] = useState(''), [frame, setFrame] = useState(''), [results, setResults] = useState<WorldResults | null>(null);
   const socket = useRef<WebSocket | null>(null), mounted = useRef(true), session = useRef<WorldStatus | null>(null);
+  const lifetime = useRef<AbortController | null>(null);
   const sessionToken = useRef(''), heartbeat = useRef<ReturnType<typeof setInterval> | null>(null), onActiveRef = useRef(onActive); onActiveRef.current = onActive;
   const fetchResults = async (id: string) => { try { const value = await worldApi.results(id, sessionToken.current); if (mounted.current) { setResults(value); session.current = value.session; setStatus(value.session); if (terminal(value.session.state)) onActiveRef.current(false); } } catch (cause) { if (mounted.current) setError(cause instanceof Error ? cause.message : 'Retained results are not available yet.'); } };
   const controls = useMemo(() => new HumanControls(command => { if (socket.current?.readyState === WebSocket.OPEN) socket.current.send(JSON.stringify(command)); }), []);
@@ -22,11 +23,12 @@ export function WorldPreview({ reference, gate, token, onActive }: { reference: 
   };
   useEffect(() => {
     mounted.current = true;
+    const controller = new AbortController(); lifetime.current = controller;
     const release = () => controls.release();
     const hidden = () => { if (document.hidden) release(); };
     window.addEventListener('blur', release); document.addEventListener('visibilitychange', hidden);
     return () => {
-      mounted.current = false; controls.stop();
+      mounted.current = false; controller.abort(); controls.stop();
       if (heartbeat.current) clearInterval(heartbeat.current);
       socket.current?.close();
       if (session.current && !terminal(session.current.state)) void worldApi.stop(session.current.session_id, sessionToken.current).catch(() => {});
@@ -36,9 +38,10 @@ export function WorldPreview({ reference, gate, token, onActive }: { reference: 
   const start = async () => {
     if (!enabled || !reference || !gate || !canCreateWorld(gate, reference) || busy || (status && !terminal(status.state))) return;
     setBusy(true); setError(''); setFrame(''); setResults(null); onActive(true); sessionToken.current = token;
+    const signal = lifetime.current?.signal;
     try {
-      const created = await worldApi.create(reference, gate, token);
-      if (!mounted.current) { await worldApi.stop(created.session_id, token); return; }
+      const created = await worldApi.create(reference, gate, token, signal);
+      if (!mounted.current || signal?.aborted) { await worldApi.stop(created.session_id, token); return; }
       session.current = created; setStatus(created);
       const url = new URL(apiUrl(created.websocket_path), window.location.href); url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
       const connection = new WebSocket(url); socket.current = connection;
