@@ -497,6 +497,74 @@ def test_expired_undispatched_genie_row_is_released(tmp_path):
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("reclaimed", [False, True])
+def test_expired_genie_reservation_cannot_be_dispatched_by_its_old_worker(tmp_path, reclaimed):
+    async def run():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(lambda _: pytest.fail("unexpected network request"))) as client:
+            config = settings(tmp_path)
+            old_worker = ModelGateway(config, client, api_key=KEY)
+            new_worker = ModelGateway(config, client, api_key=KEY)
+            call = old_worker._prepare(Service.GENIE, "world", {"create": {"model": "genie-4"}},
+                CallContext(episode_id="smoke", prompt_id="world-v1", purpose="smoke"), 1)
+            reserve = lambda gateway: gateway.ledger.reserve(call, "call", "credential", "genie-4", 1, 1, 60)
+            expired = reserve(old_worker)
+            with old_worker.ledger.connection() as db:
+                db.execute("UPDATE attempts SET lease_until=? WHERE request_id=?", (time.time() - 1, expired))
+            if reclaimed:
+                current = reserve(new_worker)
+                new_worker.ledger.dispatched(current)
+            with pytest.raises(GatewayError) as error:
+                old_worker.ledger.dispatched(expired)
+            assert error.value.code == ErrorCode.CANCELLED
+            row = old_worker.ledger.get(expired)
+            assert row["dispatched"] == 0 and row["charged_microusd"] == 1
+            if reclaimed:
+                assert row["outcome"] == "cancelled"
+                assert new_worker.ledger.get(current)["outcome"] == "pending"
+                assert new_worker.ledger.budget_status()["unresolved_world_requests"] == [current]
+    asyncio.run(run())
+
+
+def test_gateway_does_not_send_after_another_worker_reclaims_its_reservation(tmp_path, monkeypatch):
+    async def run():
+        requests = []
+        async with httpx.AsyncClient(transport=httpx.MockTransport(
+                lambda request: requests.append(request) or httpx.Response(400))) as client:
+            config = settings(tmp_path)
+            old_worker = ModelGateway(config, client, api_key=KEY)
+            new_worker = ModelGateway(config, client, api_key=KEY)
+            call = old_worker._prepare(Service.GENIE, "world", {"create": {"model": "genie-4"}},
+                CallContext(episode_id="smoke", prompt_id="world-v1", purpose="smoke"), 1)
+            original_artifact = old_worker.ledger.artifact
+            reservations = []
+
+            def delayed_artifact(content):
+                fingerprint = original_artifact(content)
+                if not reservations:
+                    # The first worker resumes after a stalled pre-dispatch write;
+                    # meanwhile a second process has reclaimed its expired lease.
+                    old = old_worker.ledger.attempts()[0]
+                    with old_worker.ledger.connection() as db:
+                        db.execute("UPDATE attempts SET lease_until=? WHERE request_id=?",
+                                   (time.time() - 1, old["request_id"]))
+                    current = new_worker.ledger.reserve(call, "replacement", new_worker._credential_hash,
+                                                       "genie-4", 1, 1, 60)
+                    new_worker.ledger.dispatched(current)
+                    reservations.extend([old, current])
+                return fingerprint
+
+            monkeypatch.setattr(old_worker.ledger, "artifact", delayed_artifact)
+            with pytest.raises(GatewayError) as error:
+                await old_worker._execute(call)
+            assert error.value.code == ErrorCode.CANCELLED and not requests
+            old, current = reservations
+            row = old_worker.ledger.get(old["request_id"])
+            assert row["outcome"] == "cancelled" and row["dispatched"] == 0
+            assert row["charged_microusd"] == old["charged_microusd"]
+            assert new_worker.ledger.budget_status()["unresolved_world_requests"] == [current]
+    asyncio.run(run())
+
+
 def test_no_key_status_endpoint_and_smoke_never_send_requests(tmp_path, monkeypatch):
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
     monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
