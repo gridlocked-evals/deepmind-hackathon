@@ -233,6 +233,40 @@ def test_pins_survive_cleanup_and_restart(tmp_path):
     assert (root / episodes[0] / "manifest.json").stat().st_mode & 0o222 == 0  # read-only
 
 
+def test_create_rejected_when_pinned_episodes_fill_budget(tmp_path):
+    root = tmp_path / "captures"
+    probe = lambda p: {"frames": 1800, "width": 640, "height": 352, "duration": 120.0}
+    clock = FakeClock()
+    store = CaptureStore(root=root, budget_bytes=10**9, clock=clock, probe=probe)
+    rec, _, _ = record(40)
+    pinned = store.create_hls_episode(rec, seconds_ago=20, duration_s=10)["id"]
+    store.pin(pinned, "job-accepted-1")
+    clock.now += timedelta(seconds=1)
+    store.budget_bytes = store.usage_bytes() + 1
+    with pytest.raises(CaptureError):
+        store.create_hls_episode(rec, seconds_ago=20, duration_s=10)
+    assert [m["id"] for m in store.list()] == [pinned]
+    assert store.get(pinned, verify=True)["id"] == pinned
+
+
+def test_rejected_create_does_not_evict_unpinned_episodes(tmp_path):
+    root = tmp_path / "captures"
+    probe = lambda p: {"frames": 1800, "width": 640, "height": 352, "duration": 120.0}
+    clock = FakeClock()
+    store = CaptureStore(root=root, budget_bytes=10**9, clock=clock, probe=probe)
+    rec, _, _ = record(40)
+    pinned = store.create_hls_episode(rec, seconds_ago=20, duration_s=10)["id"]
+    store.pin(pinned, "job-accepted-1")
+    clock.now += timedelta(seconds=1)
+    unpinned = store.create_hls_episode(rec, seconds_ago=20, duration_s=10)["id"]
+    clock.now += timedelta(seconds=1)
+    # pinned + new can't fit even if `unpinned` were evicted, so nothing may be evicted
+    store.budget_bytes = store.usage_bytes() - 1
+    with pytest.raises(CaptureError):
+        store.create_hls_episode(rec, seconds_ago=20, duration_s=10)
+    assert sorted(m["id"] for m in store.list()) == sorted([pinned, unpinned])
+
+
 def test_capture_contract_valid_without_probe(tmp_path):
     store = CaptureStore(root=tmp_path / "c", probe=lambda p: None)
     rec, _, _ = record(20)

@@ -491,7 +491,13 @@ class CaptureStore:
             if path.is_file():
                 path.chmod(0o444)
         os.replace(tmp, self.root / episode_id)
-        self.enforce_budget()
+        # Check fit before evicting: evicting and then rejecting this episode anyway would lose data for nothing.
+        evictable = sum(self._size(p) for p in self.root.iterdir()
+                        if _EPISODE_ID.match(p.name) and p.name != episode_id and not self.pins(p.name))
+        if self.usage_bytes() - evictable > self.budget_bytes:
+            self._remove(self.root / episode_id)
+            raise CaptureError("Capture budget is exhausted by pinned episodes.", budgetBytes=self.budget_bytes)
+        self.enforce_budget(protect=episode_id)
         return manifest
 
     # -- access -----------------------------------------------------------
@@ -574,8 +580,17 @@ class CaptureStore:
     def usage_bytes(self) -> int:
         return sum(f.stat().st_size for f in self.root.rglob("*") if f.is_file())
 
-    def enforce_budget(self) -> list[str]:
-        """Delete the oldest unpinned episodes until usage fits the budget."""
+    @staticmethod
+    def _size(path: Path) -> int:
+        return sum(f.stat().st_size for f in path.rglob("*") if f.is_file())
+
+    def _remove(self, path: Path):
+        for f in path.rglob("*"):
+            f.chmod(0o644) if f.is_file() else None
+        shutil.rmtree(path)
+
+    def enforce_budget(self, protect: str | None = None) -> list[str]:
+        """Delete the oldest unpinned episodes (never ``protect``) until usage fits the budget."""
         removed = []
         episodes = sorted((p for p in self.root.iterdir() if _EPISODE_ID.match(p.name)),
                           key=lambda p: json.loads((p / "manifest.json").read_text())["createdAt"])
@@ -583,12 +598,10 @@ class CaptureStore:
         for path in episodes:
             if usage <= self.budget_bytes:
                 break
-            if self.pins(path.name):
+            if path.name == protect or self.pins(path.name):
                 continue
-            size = sum(f.stat().st_size for f in path.rglob("*") if f.is_file())
-            for f in path.rglob("*"):
-                f.chmod(0o644) if f.is_file() else None
-            shutil.rmtree(path)
+            size = self._size(path)
+            self._remove(path)
             usage -= size
             removed.append(path.name)
         return removed
