@@ -2,6 +2,7 @@ import { test as base, expect, type BrowserContext, type Page, type Request, typ
 import type { DriverDecision, DriverObservation, DriverResponse } from '../../src/agent/types';
 import type { ModelGatewayStatus } from '../../src/models/types';
 import type { CameraSource } from '../../src/types';
+import type { AttackDecision } from '../../src/scenarios/adversary';
 
 export { expect };
 
@@ -116,8 +117,44 @@ export class Gateway {
   }
 }
 
+export interface AdversaryRequest {
+  run_id: string;
+  attack_index: number;
+  state: { simulation_time: number; speed_mps: number; remaining_m: number };
+  previous_attacks: { event_type: string; trigger_seconds: number }[];
+}
+
+export class AdversaryGateway {
+  readonly calls: AdversaryRequest[] = [];
+  private readonly routes = new Map<number, Route>();
+  async capture(route: Route) {
+    const index = this.calls.length;
+    this.calls.push(route.request().postDataJSON() as AdversaryRequest);
+    this.routes.set(index, route);
+  }
+  async waitForRequest(index: number) {
+    await expect.poll(() => this.calls.length, { message: `Waiting for adversary request ${index}` }).toBeGreaterThan(index);
+    return this.calls[index];
+  }
+  async reply(index: number, options: { decision?: AttackDecision; status?: number; raw?: unknown } = {}) {
+    const call = await this.waitForRequest(index), route = this.routes.get(index);
+    if (!route) throw new Error(`Adversary request ${index} was already replied to`);
+    this.routes.delete(index);
+    await route.fulfill({ status: options.status ?? 200, json: Object.hasOwn(options, 'raw') ? options.raw : {
+      run_id: call.run_id, attack_index: call.attack_index, model_id: 'gemini-4-carbon',
+      request_id: `00000000-0000-4000-8000-${String(index).padStart(12, '0')}`, max_attacks: 2,
+      decision: options.decision ?? { action: 'wait', event_type: null, trigger_seconds: null, parameters: null, durationSeconds: null, reason: 'Offline adversary waits.' },
+    } });
+  }
+  async dispose() {
+    await Promise.allSettled([...this.routes.values()].map(route => route.abort('aborted')));
+    this.routes.clear();
+  }
+}
+
 export class DriverHarness {
   readonly gateway = new Gateway();
+  readonly adversary = new AdversaryGateway();
   readonly unexpectedRequests: string[] = [];
   readonly routeRequests: string[] = [];
   readonly pageErrors: string[] = [];
@@ -148,6 +185,8 @@ export class DriverHarness {
         await route.fulfill({ json: { cameras: [], metadata: { mode: 'connected' } } });
       } else if (local && url.pathname === '/api/driver/decision' && request.method() === 'POST') {
         await this.gateway.capture(route);
+      } else if (local && url.pathname === '/api/adversary/attack' && request.method() === 'POST') {
+        await this.adversary.capture(route);
       } else if (get && url.origin === 'https://router.project-osrm.org' && url.pathname.startsWith('/route/v1/driving/')) {
         const destination = (['short', 'long'] as const).find(kind => url.pathname === routePath(kind));
         if (!destination || url.searchParams.get('overview') !== 'full' || url.searchParams.get('geometries') !== 'geojson') {
@@ -188,12 +227,20 @@ export class DriverHarness {
     await route.abort('blockedbyclient');
   }
 
-  async open(options: { unabortableDecisions?: boolean; delayedBasemap?: boolean } = {}) {
+  async open(options: { unabortableDecisions?: boolean; unabortableAdversary?: boolean; delayedBasemap?: boolean } = {}) {
     if (this.opened) throw new Error('Create a new test page instead of opening the fixture twice');
     this.opened = true;
     this.delayedBasemap = options.delayedBasemap ?? false;
     await this.page.clock.install({ time: new Date('2026-11-21T00:00:00Z') });
     if (options.unabortableDecisions) await this.useUnabortableDecisions();
+    if (options.unabortableAdversary) await this.page.addInitScript(() => {
+      const nativeFetch = window.fetch.bind(window);
+      window.fetch = (input, init) => {
+        const url = new URL(input instanceof Request ? input.url : String(input), location.href);
+        return url.origin === location.origin && url.pathname === '/api/adversary/attack'
+          ? nativeFetch(input, { ...init, signal: null }) : nativeFetch(input, init);
+      };
+    });
     await this.page.goto(this.baseURL);
     await expect(this.page.locator('.maplibregl-canvas')).toBeVisible();
     await expect(this.page.locator('.city-map-loading, .map-loading')).toHaveCount(0);
@@ -227,6 +274,7 @@ export class DriverHarness {
 
   async dispose() {
     await this.gateway.dispose();
+    await this.adversary.dispose();
     await Promise.allSettled(this.pendingBasemap.splice(0).map(route => route.abort('aborted')));
   }
 
@@ -336,6 +384,7 @@ export const test = base.extend<{ driver: DriverHarness }>({
           contentType: 'application/json',
           body: JSON.stringify({
             gatewayCalls: driver.gateway.calls.map(({ index, body, replied }) => ({ index, body, replied })),
+            adversaryCalls: driver.adversary.calls,
             routeRequests: driver.routeRequests,
             unexpectedRequests: driver.unexpectedRequests,
             pageErrors: driver.pageErrors,

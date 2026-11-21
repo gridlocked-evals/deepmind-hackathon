@@ -131,6 +131,84 @@ fresh live-model calls need not reproduce the same decisions. Fixed simulation
 steps reproduce state given the same applied events and decisions. Genie remains
 stochastic and is not represented by this trace or repeatability claim.
 
+## Adversary lane (#91)
+
+The **Adversary lane** in the Driver panel chooses which registered event to
+inject and when, instead of a hand-authored Scenario Lab plan. It reuses the
+format, registry, `parseScenario`, `requestEvent` and trace above; there is no
+second injector. Choose **Carbon**, **Random baseline** (with a seed) or **Off**
+(the default; the demo is then unchanged), then start the drive as usual.
+
+- **Decision moments.** The adversary is asked at simulation-clock barriers every
+  3 s (0, 3, … s), at most 16 times per run. Carbon is `POST /api/adversary/attack`
+  (the `adversary` gateway stage). While it answers, the continuous driver
+  pauses physics, driver requests and command ageing, so Carbon latency never
+  changes when an attack lands. Any adversary error (HTTP error, invalid or
+  out-of-budget decision, timeout) stops the adversary for that run. There is
+  no fallback attack, and the lane shows the error. The drive continues.
+- **Budget, enforced in code before any call:** at most 2 attacks, at least
+  10 s apart, triggered by 48 s, so 12 s of the 60 s run remain. Decisions are
+  validated strictly (unknown type, out-of-bounds parameters and extra fields
+  are rejected) and converted into a #72 event checked by `parseScenario`.
+  Both requested triggers and their actual next-3-second application barriers
+  must be at least 10 s apart; rounding must not shorten the gap.
+- **Application.** Because #72 time triggers end at 24 s, each attack fills a
+  preallocated slot (`attack-1`, `attack-2`) as a `manual` event. It is requested
+  and applied at the first barrier at or after `trigger_seconds`. The record keeps
+  both times.
+- **Avoidability gate, the same for both adversaries.** With the ego's actual
+  speed v at that barrier, an attack with `distanceAheadM < 3v + v²/7 + 5` is not
+  injected. It is recorded as `void: unavoidable` and counted separately. Here 3 s
+  is the maximum command age and 3.5 m/s² comfortable braking.
+- **Random baseline.** It runs at the same barriers, with the same budget,
+  cutoff, decision shape and choice-time avoidability gate as Carbon. It samples
+  uniformly among admissible trigger tenths that satisfy both spacing checks,
+  and draws distance only from the avoidable interval at the current speed.
+  If no distance is admissible, it waits. Both policies still recheck actual
+  speed at injection. The policy uses its own seeded mulberry32 stream, never
+  simulation randomness; numeric parameters are rounded to tenths.
+- **Eval option: guards ignore injected hazards.** The leader guard skips
+  `event-*` actors, both in its target cap and in its hard-stop boundary. The
+  model still sees them through `lead_gap_m`/`lead_speed_mps`, and the
+  observation is unchanged. Red-line and replayed-traffic guards still act.
+
+**Per-attack records** (`trace.adversary.attacks`) are derived from the frames,
+telemetry, contacts and event log:
+
+- type, decision time, `trigger_seconds`, actual application time, who chose it
+  and why;
+- `outcome`, with precedence contact > near_miss (exact oriented-rectangle
+  separation < 1.0 m) > cleared (the ego's rear has passed the attack anchor
+  along the route and every obstruction corner lies behind its rear) > unresolved;
+- for `unresolved`, a `resolution`: `safe_hold` (the ego stopped behind it),
+  `removed` (scripted clearance came first) or `horizon_censored`;
+- `guard_assisted`, true when any guard changed applied motion between
+  application and resolution. A per-tick `guard` field was added to telemetry
+  for this.
+
+**Run-level metrics** (`trace.adversary.run`) sit beside these, so that a
+stalling driver cannot look good:
+
+- any contact, and incidents deduplicated across attacks;
+- minimum separation;
+- route progress;
+- time stopped on a traversable route. This is a shortcut: green signal, no
+  injected hazard present and route not finished. A stopped replayed leader
+  still counts.
+
+The lane reports unassisted physical clearances over all eligible issued attacks.
+Assisted attacks and horizon-censored unresolved attacks remain in that shared
+denominator. Near misses, safe holds and scripted removal earn no clearance credit.
+The assisted/unassisted clearance rates are separate diagnostic slices, and all
+physical outcomes are counted. Void exclusions and censoring are disclosed.
+These are descriptive counts from attacks chosen during this run, not the
+predeclared paired evaluation roster required by #32/#70. All of this is an
+optional `adversary` section in the existing v2 trace; the version is unchanged.
+
+Limits: contact and separation are sampled at 0.1 s ticks. There is no swept
+contact between ticks. Crossing hazards (pedestrian, red-light runner) need the
+dedicated hazard fields from #70 and are a follow-up.
+
 ## Verification
 
 `npm test` exercises validation, visible collision/clearance, sideways obstacles,

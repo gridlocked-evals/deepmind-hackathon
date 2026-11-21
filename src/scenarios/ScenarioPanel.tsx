@@ -73,8 +73,8 @@ export function ScenarioPanel({ plan, onChange, driver, onReplay, onBaseline }: 
         const rows = trace?.plan.id === plan.id && driver.hasRun ? trace.eventLog.filter(row => row.eventId === item.id) : [];
         const last = rows.at(-1);
         return <div key={item.id}><strong>{eventTypes().find(option => option.type === item.type)?.label}</strong>
-          <span>{driver.replaying ? 'Recorded playback · no new injection' : driver.hasRun && trace?.mode === 'baseline' ? 'Disabled for baseline' : last ? `${last.kind.replaceAll('_', ' ')} · ${last.time.toFixed(1)}s` : item.trigger.kind === 'manual' ? 'Ready for a manual trigger' : `Scheduled · ${(item.trigger.kind === 'time' ? item.trigger.seconds : item.trigger.frame * .1).toFixed(1)}s`}</span>
-          {item.trigger.kind === 'manual' && <button type="button" disabled={!driver.active || trace?.mode === 'baseline' || rows.some(row => row.kind === 'requested' || row.kind === 'applied')} onClick={() => driver.inject(item.id)}>Inject event</button>}
+          <span>{driver.replaying ? 'Recorded playback · no new injection' : driver.hasRun && trace?.mode === 'baseline' ? 'Disabled for baseline' : driver.hasRun && trace?.adversary ? 'Disabled for adversary run' : last ? `${last.kind.replaceAll('_', ' ')} · ${last.time.toFixed(1)}s` : item.trigger.kind === 'manual' ? 'Ready for a manual trigger' : `Scheduled · ${(item.trigger.kind === 'time' ? item.trigger.seconds : item.trigger.frame * .1).toFixed(1)}s`}</span>
+          {item.trigger.kind === 'manual' && <button type="button" disabled={!driver.active || trace?.mode === 'baseline' || !!trace?.adversary || trace?.plan.id !== plan.id || rows.some(row => row.kind === 'requested' || row.kind === 'applied')} onClick={() => driver.inject(item.id)}>Inject event</button>}
         </div>;
       })}
     </div>
