@@ -10,6 +10,8 @@ npm run test:browser
 
 On Linux, install browser system dependencies with `npx playwright install --with-deps chromium`. The runner builds the app, checks test TypeScript, and starts its own preview at `http://127.0.0.1:5191`. That port must be free: an existing server is deliberately never reused. Normal development servers can keep running on other ports.
 
+For parallel checkouts, select a different free port with `PLAYWRIGHT_PORT=5193 npm run test:browser`.
+
 After building, target one case with `npx playwright test --project=desktop-chromium -g 'late responses'`. Open retained failure diagnostics with `npm run test:browser:report`; inspect a trace with `npx playwright show-trace test-results/<case>/trace.zip`.
 
 ## Coverage
@@ -20,6 +22,7 @@ After building, target one case with `npx playwright test --project=desktop-chro
 - Hidden/visible lifecycle events stopping motion without automatic resume or elapsed-time jumps.
 - HTTP errors, the 130-second timeout, invalid JSON, invalid decision fields, and mismatched run/step identities, without a fallback decision or automatic retry.
 - Replay → driver → replay and Map/Intersection/Follow perspective changes, comparing controls with the frame and ego transform actually consumed by the renderer.
+- Perspective changes during a delayed basemap style replacement, without crashing the map or the driver.
 - Twelve decisions maximum, at most three simulated seconds per decision, a frozen simulation while awaiting responses, and distinct destination/decision-limit completion states.
 - Lifecycle and timing cases explicitly run the baseline without hazards, so short-route arrival remains valid with the scenario lab enabled. A separate event-mode case starts the primary scenario control, checks that the scheduled hazard reaches the next model observation, and confirms that a pending response still freezes simulation.
 
@@ -37,4 +40,6 @@ Headless Chromium keeps background pages visible. The visibility tests explicitl
 
 ## CI and failures
 
-`.github/workflows/browser-tests.yml` runs unit and browser tests on pull requests and pushes to main, with no provider secrets. Chromium uses software WebGL so a hardware GPU is unnecessary. Failures retain screenshots, video, traces, and an HTML report; CI uploads those files for 14 days. Request history, browser errors, and unexpected-network diagnostics are attached to the failing case. Uncaught browser errors fail the test. One CI retry handles browser startup variability while keeping the first failure's trace available.
+`.github/workflows/browser-tests.yml` runs unit and browser tests on pull requests and pushes to main, with no provider secrets. Chromium uses software WebGL so a hardware GPU is unnecessary. CI uses one worker and halves the desktop rendering pixel density while preserving its CSS viewport and all physics/frame assertions. Mobile uses normal pixel density. This bounds software raster cost without changing the layout under test.
+
+Failures retain screenshots, traces, and an HTML report; the first retry also records video. CI uploads reports and diagnostics for 14 days, including when a retry succeeds. Request history, browser errors, and unexpected-network diagnostics are attached to failing cases. Uncaught browser errors fail the test. A CI retry gathers diagnostic evidence, but flaky tests still fail the job. The suite stops after three failures or ten minutes so reports can flush before the job's fifteen-minute limit.
