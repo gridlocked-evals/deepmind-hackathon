@@ -1,7 +1,7 @@
 import type { ActorDefinition, ActorState } from '../types';
-import { COMFORTABLE_BRAKING, prepareDriverDecision } from '../agent/physics';
+import { COMFORTABLE_BRAKING, MAX_ACCELERATION, prepareDriverDecision } from '../agent/physics';
 import type { DriverSimulation } from '../agent/physics';
-import { MAX_COMMAND_AGE_SECONDS } from '../agent/types';
+import { MAX_COMMAND_AGE_SECONDS, SPEED_LIMIT_MPS } from '../agent/types';
 import { EVENT_RUNTIME, parseScenario, requestEvent } from './events';
 import type { EventSpec, ScenarioPlan } from './events';
 import type { RunTrace } from './trace';
@@ -230,7 +230,10 @@ export function randomDecision(rng: () => number, previous: number[], time: numb
   const draws = [rng(), rng(), rng(), rng(), rng(), rng()];
   const round = (value: number) => Math.round(value * 10) / 10;
   const uniform = (draw: number, [low, high]: readonly [number, number]) => Math.min(high, Math.max(low, round(low + draw * (high - low))));
-  const minimumDistance = Math.ceil(Math.max(BOUNDS.distanceAheadM[0], minimumAttackDistance(speedMps)) * 10) / 10;
+  // Match Carbon's conservative planning envelope: the car can reach a higher
+  // speed before the scheduled trigger. Actual injection still rechecks avoidability.
+  const planningSpeed = Math.max(speedMps, Math.min(SPEED_LIMIT_MPS, speedMps + MAX_ACCELERATION * Math.max(0, LAST_TRIGGER_S - time)));
+  const minimumDistance = Math.ceil(Math.max(BOUNDS.distanceAheadM[0], minimumAttackDistance(planningSpeed)) * 10) / 10;
   if (draws[0] < .5 || minimumDistance > BOUNDS.distanceAheadM[1])
     return { action: 'wait', event_type: null, trigger_seconds: null, parameters: null, durationSeconds: null, reason: 'Seeded random baseline: wait.' };
   // Sample only admissible tenths, rather than turning a randomly invalid schedule into an error.

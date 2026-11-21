@@ -32,6 +32,13 @@ describe('shared adversary admission', () => {
     expect(randomDecision(() => draws[index++ % draws.length], [], 0, 50).action).toBe('wait');
   });
 
+  it('allows for acceleration before a future random attack, matching Carbon planning', () => {
+    const draws = [.9, 0, .5, 0, 0, 0]; let index = 0;
+    const chosen = randomDecision(() => draws[index++], [], 0, 0);
+    expect(chosen.trigger_seconds).toBeGreaterThan(12);
+    expect(avoidable(chosen.parameters!.distanceAheadM, 11.176)).toBe(true);
+  });
+
   it.each([
     { model_id: 'gemini-decision-1' }, { model_id: '' }, { request_id: '' },
     { request_id: ' ' }, { max_attacks: 3 }, { max_attacks: undefined },

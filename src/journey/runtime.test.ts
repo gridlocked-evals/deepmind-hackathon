@@ -32,7 +32,7 @@ function carbon(policy: (body: any) => unknown = () => wait) {
   const fetch = vi.fn(async (_url: string, init: RequestInit) => {
     const body = JSON.parse(init.body as string);
     return new Response(JSON.stringify({ run_id: body.run_id, attack_index: body.attack_index,
-      model_id: 'gemini-4-carbon', request_id: 'fixture-carbon', decision: policy(body) }));
+      model_id: 'gemini-4-carbon', request_id: 'fixture-carbon', max_attacks: 2, decision: policy(body) }));
   });
   vi.stubGlobal('fetch', fetch); return fetch;
 }
@@ -119,12 +119,25 @@ it('stops on Carbon or budget failure without rotating runs to retry', async () 
   expect(h.traces[0].terminal.reason).toBe('error');
 });
 
+it('injects a future hazard planned at rest after the car accelerates to 25 mph', async () => {
+  carbon(body => body.previous_attacks.length ? wait : ({ action: 'attack', event_type: 'car-crash', trigger_seconds: 12,
+    parameters: { distanceAheadM: 56.38, approachSeconds: 1.5 }, durationSeconds: 15, reason: 'Future-speed regression.' }));
+  const h = harness({ driver: async (run, step) => ({ run_id: run, step, model_id: 'gemini-decision-1', request_id: 'fixture-cruise', max_steps: 60,
+    decision: { action: 'accelerate', target_speed_mps: 11.176, confidence: 1, reason: 'Accelerate on open route fixture.' } }) });
+  await h.clock.advance(15_000);
+  expect(h.snapshot().attacks[0].void).toBeNull();
+  expect(h.snapshot().attacks[0].appliedAt).toBe(12);
+  expect(h.snapshot().trace?.adversary?.decisions[0].injection?.speedMps).toBeGreaterThan(11);
+  expect(h.onFrame.mock.calls.some(([frame]) => frame.actors.some((a: { id: string }) => a.id.startsWith('event-')))).toBe(true);
+  await h.stop();
+});
+
 it('ignores a Carbon response that arrives after Stop', async () => {
   let resolve!: (value: Response) => void;
   vi.stubGlobal('fetch', vi.fn(() => new Promise<Response>(yes => { resolve = yes; })));
   const h = harness(); await h.clock.advance(1000); await h.stop();
   const frames = h.onFrame.mock.calls.length;
-  resolve(new Response(JSON.stringify({ run_id: 'fixture-run-1', attack_index: 0, model_id: 'gemini-4-carbon', request_id: 'late',
+  resolve(new Response(JSON.stringify({ run_id: 'fixture-run-1', attack_index: 0, model_id: 'gemini-4-carbon', request_id: 'late', max_attacks: 2,
     decision: { action: 'attack', event_type: 'car-crash', trigger_seconds: 3, parameters: { distanceAheadM: 60, approachSeconds: 2 }, durationSeconds: 4, reason: 'Late fixture.' } })));
   await flush(); await h.clock.advance(5000);
   expect(h.onFrame).toHaveBeenCalledTimes(frames); expect(h.traces[0].adversary?.decisions).toHaveLength(0);

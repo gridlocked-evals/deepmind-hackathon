@@ -62,3 +62,24 @@ also recorded guard assistance. This is evidence of the UI/control flow, not a
 claim that the defender independently avoided either hazard. The exported JSON
 retained both window traces and the restart record. Four Carbon requests completed
 with approximately $0.01933 in recorded adversary usage; no budget changes.
+
+### Future hazard distance correction
+
+A subsequent run exposed a planning problem: Carbon scheduled hazards 12 and
+24 seconds ahead at distances of 25 m and 21 m while the car was slow. At
+injection the car was travelling about 11.16 m/s, requiring approximately 56 m
+under the avoidability rule, so both hazards were correctly skipped. Planning now
+bounds speed at the scheduled injection barrier using the controller's 1.5 m/s²
+maximum acceleration and 11.176 m/s speed limit. The prompt advertises an upward
+rounded conservative distance (56.38 m when full speed is reachable); observed
+speed stays separate. The server validates the chosen trigger's projected speed,
+the random baseline uses the same planning envelope, and injection still checks
+the actual speed. Distances are never silently clamped and the safety gate remains.
+
+The live retest spawned a crash at 9 seconds and a stalled vehicle at 21 seconds;
+both were visible, with neither marked void. The run was stopped after 25 driving
+decisions. Outcomes remained unresolved safe holds, not claims of hazard clearance.
+Regression coverage includes the reported 21/25 m cases and a stopped car
+accelerating to 25 mph before a future hazard. Validation after integrating #97's
+latest corrections: 178 frontend tests passed plus one existing expected failure,
+246 backend driver/adversary/gateway tests passed, and the production build passed.
