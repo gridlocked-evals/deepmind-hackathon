@@ -248,7 +248,7 @@ export function createSimulationLayer(scenario: ScenarioBundle, runtime: SceneRu
       scene.add(new THREE.HemisphereLight('#b9d6ee', '#27303a', 2.0));
       const key = new THREE.DirectionalLight('#e9f4ff', 3.2); key.position.set(-80, -40, 130); scene.add(key);
       const rim = new THREE.DirectionalLight('#6cadd2', 1.2); rim.position.set(90, 120, 65); scene.add(rim);
-      createGround(scene);
+      if (scenario.geometryKind !== 'street-route') createGround(scene);
       route = makeRoute(scenario.geometry.route); scene.add(route);
       const trafficBody = material('#ffffff', 0.42, 0.24);
       for (const part of vehicleParts(trafficBody, false)) {
@@ -324,11 +324,15 @@ export function createSimulationLayer(scenario: ScenarioBundle, runtime: SceneRu
         const egoState = ego ? byId.get(ego.id) : undefined;
         if (egoState && Math.abs(frame.time - lastRouteTime) > 0.08) {
           const colors = route.geometry.getAttribute('color') as THREE.BufferAttribute;
-          const along = egoState.x * Math.sin(STREET_BEARING) + egoState.y * Math.cos(STREET_BEARING);
-          const past = new THREE.Color('#1b71cf'), future = new THREE.Color('#16d2a5');
+          // Progress follows the actual polyline, including east/west streets and turns.
+          let nearestDistance = Infinity, nearestIndex = 0;
           scenario.geometry.route.forEach(([x, y], index) => {
-            const routeAlong = x * Math.sin(STREET_BEARING) + y * Math.cos(STREET_BEARING);
-            const tint = routeAlong < along ? past : future;
+            const distance = Math.hypot(x - egoState.x, y - egoState.y);
+            if (distance < nearestDistance) { nearestDistance = distance; nearestIndex = index; }
+          });
+          const past = new THREE.Color('#1b71cf'), future = new THREE.Color('#16d2a5');
+          scenario.geometry.route.forEach((_, index) => {
+            const tint = index < nearestIndex ? past : future;
             colors.setXYZ(index * 2, tint.r, tint.g, tint.b); colors.setXYZ(index * 2 + 1, tint.r, tint.g, tint.b);
           });
           colors.needsUpdate = true; lastRouteTime = frame.time;

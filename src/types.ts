@@ -9,6 +9,7 @@ export interface CameraSource {
   kind: 'hls' | 'snapshot';
   coordinates: LngLat;
   provider: string;
+  borough?: string;
   sourceUrl: string;
   playbackUrl: string;
   thumbnailUrl?: string;
@@ -57,6 +58,9 @@ export interface ScenarioBundle {
   cameraId: string;
   origin: LngLat;
   duration: number;
+  playbackMode?: 'loop' | 'once';
+  geometryKind?: 'authored' | 'street-route';
+  motionSource?: 'authored' | 'street-preview' | 'driving-route' | 'location-preview';
   geometry: {
     roads: Vec2[][];
     sidewalks: Vec2[][];

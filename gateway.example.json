@@ -28,6 +28,8 @@
     "reference": { "tokens": 1000000, "usd": "5" },
     "image_gate": { "tokens": 1000000, "usd": "5" },
     "temporal_gate": { "tokens": 1000000, "usd": "5" },
-    "world": { "tokens": 1000000, "usd": "5" }
+    "world": { "tokens": 1000000, "usd": "5" },
+    "adversary": { "tokens": 1000000, "usd": "5" },
+    "attack_judge": { "tokens": 1000000, "usd": "5" }
   }
 }

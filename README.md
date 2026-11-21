@@ -1,6 +1,6 @@
 # Gotham Forge simulation workspace
 
-Interactive NYC city map, a detailed illustrative Vestry Street traffic simulation, and toggleable public camera feeds.
+Interactive NYC city map with the full public DOT camera directory across all five boroughs, configured 511NY video feeds, selectable intersections, and driving-route playback. Click a mapped street to start a local preview, or choose two locations to replay a street-following journey with turn slowdown and destination stops. Camera footage remains independent of simulated motion while image processing is being integrated.
 
 **[Setup and controls](RUNNING.md)** · [Architecture](docs/ARCHITECTURE.md) · [Camera API](docs/CAMERA_API.md) · [Verification](docs/VERIFICATION.md)
 
