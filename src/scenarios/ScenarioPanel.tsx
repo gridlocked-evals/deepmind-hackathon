@@ -36,7 +36,7 @@ export function ScenarioPanel({ plan, onChange, driver, onReplay, onBaseline }: 
       const text = await file.text();
       if (active.current || revision !== importRevision.current) return;
       const raw = JSON.parse(text);
-      if (raw.schemaVersion === 'gridlocked-driver-trace.v1') {
+      if (['gridlocked-driver-trace.v1', 'gridlocked-driver-trace.v2'].includes(raw.schemaVersion)) {
         const scene = replayScene(raw);
         onChange(parseScenario(raw.plan));
         onReplay(scene);

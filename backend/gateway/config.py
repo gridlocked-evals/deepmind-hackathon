@@ -79,6 +79,18 @@ class GatewayConfig(BaseModel):
     stages: dict[str, StageBudget] = Field(default_factory=lambda: {s: StageBudget() for s in STAGES})
     service_budgets: dict[Service, StageBudget] | None = None
 
+    @model_validator(mode="before")
+    @classmethod
+    def migrate_driver_stage(cls, values):
+        # Existing explicit configurations predate the simulator's own Decisions
+        # stage. Inherit their navigation cap rather than silently using a larger
+        # default. Global and aggregate service caps continue to apply.
+        if isinstance(values, dict) and isinstance(values.get("stages"), dict):
+            stages = values["stages"]
+            if "simulator_driver" not in stages and "navigation" in stages:
+                return {**values, "stages": {**stages, "simulator_driver": stages["navigation"]}}
+        return values
+
     @model_validator(mode="after")
     def check_configuration(self):
         if self.demo_reserve_usd >= self.total_usd:

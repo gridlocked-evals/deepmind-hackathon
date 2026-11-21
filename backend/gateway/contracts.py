@@ -27,6 +27,7 @@ MODELS = {
 STAGES = {
     "observation": Service.HYDROGEN,
     "navigation": Service.HYDROGEN,
+    "simulator_driver": Service.DECISIONS,
     "compilation": Service.CARBON,
     "repair": Service.CARBON,
     "reference": Service.NANO_BANANA,

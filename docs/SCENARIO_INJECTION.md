@@ -26,9 +26,12 @@ speed. Its proposals, actual movement, and controller interventions are separate
 The default traffic scene still has its authored signal program and replayed
 background traffic. Those can also cause stops. Review the exact observations
 and interventions before attributing a stop or recovery solely to the crash.
-There are at most 12 model decisions, with 3 simulated seconds per decision.
-Simulation time pauses while waiting for Gemini. Wall-clock request latency and
-simulation-time response latency are different quantities in the export.
+There are at most 60 model decisions and 60 simulated seconds. Gemini Decisions
+selects a bounded speed action about once per second while motion continues.
+A command expires three seconds after observation capture if its replacement
+has not arrived. Wall-clock request latency and simulation-time response latency
+are different quantities in the export; recorded response application times
+identify when the selected action actually starts controlling the car.
 
 ## Versioned scenario format
 
@@ -83,21 +86,21 @@ does not execute arbitrary code or register executable event handlers.
 
 ## Trace, comparison and replay
 
-**Export trace** in Scenario Lab downloads `gridlocked-driver-trace.v1`, which
+**Export trace** in Scenario Lab downloads `gridlocked-driver-trace.v2`, which
 extends the merged #60 action-trace workflow with the event and replay data:
 
 - Synthetic provenance, live-model versus fixture label, run/scenario/route
   identity, scene seed and version, complete event plan and configured bounds.
 - Each exact permitted observation, its simulation time, response model/request
-  identifiers, proposed decision, and measured wall-clock request duration.
+  identifiers, proposed decision, response application time, and measured wall-clock request duration.
 - Fixed-step applied frames, ego speed/progress, requested versus constrained
   target speeds, controller interventions and sampled oriented-footprint contacts.
 - Requested/applied event times and frames, scripted collision/disabled/clearance
   records, and the first observation in which an event affected the model input.
-- A real terminal reason: route completion, decision limit, interruption, reset,
+- A real terminal reason: route completion, decision limit, time limit, interruption, reset,
   or error. An interrupted pending request has no fabricated response.
 
-New completed exports include the compatible `gridlocked-driver-trace/1` action
+New completed exports include the compatible `gridlocked-driver-trace/2` action
 trace under `driverTrace`. The existing **Download trace (JSON)** button still
 downloads that compact format separately. Its effective leader/signal guards,
 partial-hold finalization and redacted errors are preserved. Scenario Lab's
@@ -121,7 +124,9 @@ Completed/interrupted traces survive reset in the current tab (last four runs).
 Export before page reload. Reset starts with fresh event state and a new run ID;
 repeated manual triggers are idempotent. Live simulation cannot seek; recorded
 replay can. Import validates replay version, geometry, actor identities, finite
-state and frame ordering before using it. Replay is exact recorded playback;
+state and frame ordering before using it. The current importer accepts both
+historical extended v1 traces and continuous extended v2 traces, with recorded
+playback bounded to 60 seconds. Replay is exact recorded playback;
 fresh live-model calls need not reproduce the same decisions. Fixed simulation
 steps reproduce state given the same applied events and decisions. Genie remains
 stochastic and is not represented by this trace or repeatability claim.
