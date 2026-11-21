@@ -129,8 +129,28 @@ class LockedManifest(BaseModel):
 
 
 def opened_marker(path: str | Path) -> Path:
-    """Exists once a FinalRun has opened the holdout; holds the full hash it pinned."""
-    return Path(str(path) + ".opened")
+    """Exists once a FinalRun has opened the holdout; holds the hashes it pinned (see read_marker).
+
+    Keyed by the resolved lock path, so a symlink alias shares the same freeze state."""
+    return Path(str(Path(path).resolve()) + ".opened")
+
+
+def plan_path(path: str | Path) -> Path:
+    """The repair comparison plan registered for this lock (#59), keyed like opened_marker."""
+    return Path(str(Path(path).resolve()) + ".plan.json")
+
+
+def read_marker(path: str | Path) -> dict:
+    """{"full_sha256", "plan_sha256"}; an old plain-hash marker means no plan was committed."""
+    text = opened_marker(path).read_text().strip()
+    if not text.startswith("{"):
+        return {"full_sha256": text, "plan_sha256": None}
+    return json.loads(text)
+
+
+def _plan_sha256(path: str | Path) -> str | None:
+    plan = plan_path(path)
+    return digest(plan.read_bytes()) if plan.exists() else None
 
 
 def _write(path: Path, locked: LockedManifest) -> None:
@@ -176,8 +196,9 @@ def add_fresh_capture(path: str | Path, episode: Episode, expected_sha256: str) 
 class FinalRun:
     """The only holder of test-split access; exists only for a verified, pinned lock.
 
-    The first FinalRun writes `<lock>.opened` with the full hash; later runs and `verify()`
-    must match it, so additions cannot change once the holdout has been opened.
+    The first FinalRun writes `<lock>.opened` with the full hash and the comparison plan's hash
+    (null if none is registered yet); later runs and `verify()` must match both, so neither the
+    additions nor the plan can change once the holdout has been opened.
     """
 
     def __init__(self, path: str | Path, expected_sha256: str):
@@ -186,18 +207,21 @@ class FinalRun:
         self.full_sha256 = self.locked.full_sha256
         marker = opened_marker(path)
         try:
-            with marker.open("x") as handle:
-                handle.write(self.full_sha256)
+            with marker.open("xb") as handle:
+                handle.write(canonical({"full_sha256": self.full_sha256, "plan_sha256": _plan_sha256(path)}))
         except FileExistsError:
             pass
+        self.plan_sha256 = read_marker(path)["plan_sha256"]  # the plan committed at first opening
         self.verify()
 
     def verify(self) -> LockedManifest:
         """Re-read the lock; fail if core or additions differ from what was pinned at first opening."""
         locked = verify_lock(self.path, self.locked.sha256)
-        pinned = opened_marker(self.path).read_text().strip()
-        if locked.full_sha256 != pinned or self.full_sha256 != pinned:
+        marker = read_marker(self.path)
+        if locked.full_sha256 != marker["full_sha256"] or self.full_sha256 != marker["full_sha256"]:
             raise ValueError("manifest additions changed after the holdout was opened")
+        if _plan_sha256(self.path) != marker["plan_sha256"]:  # edited, or written after a null commitment
+            raise ValueError("comparison plan changed after the holdout was opened")
         return locked
 
 

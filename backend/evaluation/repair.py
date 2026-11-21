@@ -16,7 +16,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from backend.gateway.contracts import CallContext, GatewayError, Identifier, Service, canonical, digest
 from .attacks import AttackRecord, AttackScore, AttackScript, aggregate, assert_no_leakage, load_suite, suite_hash
-from .manifest import Episode, FinalRun, HoldoutError, Sha256, opened_marker, verify_lock
+from .manifest import Episode, FinalRun, HoldoutError, Sha256, opened_marker, plan_path, verify_lock
 
 Value = Union[float, str]
 
@@ -110,12 +110,12 @@ class ComparisonPlan(BaseModel):
     slots: tuple[PlanSlot, ...] = Field(min_length=1)
 
 
-def plan_path(lock_path: str | Path) -> Path:
-    return Path(str(lock_path) + ".plan.json")
-
-
 def register_plan(lock_path: str | Path, pinned_sha256: str, suite_path: str | Path, slots: list[PlanSlot]) -> str:
-    """Write the comparison roster once, before any FinalRun opens the holdout; returns its hash."""
+    """Write the comparison roster once, before any FinalRun opens the holdout; returns its hash.
+
+    The test roster must be complete: every frozen-suite script on every test episode whose camera
+    is absent from development, for replicates 0..k-1 with one k throughout. The dev roster is free.
+    """
     if opened_marker(lock_path).exists():
         raise HoldoutError("holdout already opened: the comparison plan must be registered before any FinalRun")
     locked = verify_lock(lock_path, pinned_sha256)
@@ -128,6 +128,17 @@ def register_plan(lock_path: str | Path, pinned_sha256: str, suite_path: str | P
             raise ValueError(f"{slot}: test slots must use frozen-suite scripts")
     if len(set(slots)) != len(slots):
         raise ValueError("duplicate plan slots")
+    dev_cameras = {e.source_id for e in locked.episodes() if e.split == "dev"}
+    held_out = [e.episode_id for e in locked.episodes() if e.split == "test" and e.source_id not in dev_cameras]
+    test_slots = {s for s in slots if s.split == "test"}
+    k = max((s.replicate for s in test_slots), default=0) + 1
+    required = {PlanSlot(split="test", episode_id=e, script=script, replicate=r)
+                for e in held_out for script in suite for r in range(k)}
+    missing, extra = required - test_slots, test_slots - required
+    if missing or extra:
+        names = lambda group: ", ".join(sorted(map(str, group))) or "none"
+        raise ValueError(f"test roster must be frozen suite x held-out episodes x replicates 0..{k - 1}; "
+                         f"missing: {names(missing)}; extra: {names(extra)}")
     data = canonical(ComparisonPlan(manifest_sha256=locked.sha256, slots=tuple(slots)).model_dump(mode="json"))
     with plan_path(lock_path).open("xb") as handle:
         handle.write(data)
@@ -250,10 +261,11 @@ class RepairSession:
         if self.run is None:
             if not plan_path(lock_path).exists():
                 raise HoldoutError("register the comparison plan before opening the holdout")
-            plan, self.plan_sha256 = read_plan(lock_path)
+            run = FinalRun(lock_path, pinned_sha256)  # verify(): the plan must be the one committed at first opening
+            plan, self.plan_sha256 = read_plan(lock_path, run.plan_sha256)
             if plan.manifest_sha256 != pinned_sha256:
                 raise ValueError("comparison plan was registered for a different manifest")
-            self.run = FinalRun(lock_path, pinned_sha256)
+            self.run = run
         return self.run
 
     def holdout_opened(self) -> bool:
@@ -301,7 +313,11 @@ class RepairSession:
 
         Dev and holdout before/after must each cover exactly their split's slots of the plan pinned at
         `open_holdout`. Rows pair by slot (episode, script, replicate); record.session_id still identifies
-        the actual, distinct runtime session for each rollout.
+        the actual, distinct runtime session for each rollout. Within a split, each runtime attack
+        (session, script) fills at most one row, and before and after share no session.
+
+        Known limit: swapping two real, distinct rollouts between replicates of the same episode and
+        script is not detected; that needs a slot -> session binding recorded at execution (#32).
         """
         if run is None or run is not self.run:
             raise HoldoutError("seal needs the FinalRun returned by this session's open_holdout")
@@ -330,6 +346,14 @@ class RepairSession:
             if missing or extra or dupes:
                 raise ValueError(f"{name} must cover exactly the planned slots; missing: {names(missing)}; "
                                  f"extra: {names(extra)}; duplicate: {names(dupes)}")
+        for name, before, after in (("dev", dev_before, dev_after), ("holdout", holdout_before, holdout_after)):
+            for side, rows in (("before", before), ("after", after)):
+                attacks = Counter((i.score.record.session_id, i.score.record.script) for i in rows)
+                if any(n > 1 for n in attacks.values()):
+                    raise ValueError(f"{name} {side} reuses one runtime attack for several slots")
+            shared = {i.score.record.session_id for i in before} & {i.score.record.session_id for i in after}
+            if shared:
+                raise ValueError(f"{name} before and after reuse runtime sessions: {', '.join(sorted(shared))}")
         self.sealed = True
         hb, ha = aggregate([i.score for i in holdout_before]), aggregate([i.score for i in holdout_after])
         db, da = aggregate([i.score for i in dev_before]), aggregate([i.score for i in dev_after])

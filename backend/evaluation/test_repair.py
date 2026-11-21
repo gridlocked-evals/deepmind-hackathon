@@ -6,8 +6,8 @@ import pytest
 from pydantic import ValidationError
 
 from backend.evaluation.attacks import AttackRecord, AttackScore, AttackScript, AttackType, save_suite
-from backend.evaluation.manifest import Episode, FinalRun, HoldoutError, Manifest, ResultsLedger, lock
-from backend.evaluation.repair import (ChoiceField, NumberField, PlanSlot, RepairSession, RepairSurface, RepairTrial,
+from backend.evaluation.manifest import Episode, FinalRun, HoldoutError, Manifest, ResultsLedger, lock, opened_marker
+from backend.evaluation.repair import (ChoiceField, ComparisonPlan, NumberField, PlanSlot, RepairSession, RepairSurface, RepairTrial,
                                        ScoredEpisode, TextField, build_packet, plan_path, register_plan)
 from backend.gateway.contracts import CallContext, CallResult, canonical, digest
 
@@ -121,7 +121,7 @@ def test_attempt_cap_and_every_proposal_recorded():
 
 TEST = ep("b1", "test", "cam9")
 HOLDOUT_BEFORE = [scored(TEST, TEST_SUITE[0], "avoided"), scored(TEST, TEST_SUITE[1], "failed")]
-HOLDOUT_AFTER = [scored(TEST, TEST_SUITE[0], "failed"), scored(TEST, TEST_SUITE[1], "failed")]
+HOLDOUT_AFTER = [scored(TEST, s, "failed", session_id="b1-after") for s in TEST_SUITE]  # its own rollout
 
 
 
@@ -142,7 +142,7 @@ def locked(tmp_path, plan=slots()):
 
 
 def seal(tmp_path, session, run, **override):
-    kwargs = dict(dev_before=[DEV_FAIL], dev_after=[scored(DEV, DEV_FAIL.score.record.script, "avoided")],
+    kwargs = dict(dev_before=[DEV_FAIL], dev_after=[scored(DEV, DEV_FAIL.score.record.script, "avoided", session_id="d1-after")],
                   holdout_before=HOLDOUT_BEFORE, holdout_after=HOLDOUT_AFTER)
     return session.seal(run, tmp_path / "suite.json", **(kwargs | override))
 
@@ -299,6 +299,74 @@ def test_edited_plan_file_fails_at_seal(tmp_path):
     with pytest.raises(ValueError, match="plan changed"):
         seal(tmp_path, session, run, holdout_before=HOLDOUT_BEFORE[1:], holdout_after=HOLDOUT_AFTER[1:])
     assert not session.sealed
+
+
+def test_plan_edited_after_another_final_run_is_rejected_at_open(tmp_path):
+    path, pinned = locked(tmp_path)
+    FinalRun(path, pinned)  # someone else opens the holdout and sees the truck regression
+    plan = json.loads(plan_path(path).read_text())
+    plan["slots"] = [s for s in plan["slots"] if s["script"]["attack_type"] != TRUCK.value]
+    plan_path(path).write_bytes(canonical(plan))
+    with pytest.raises(ValueError, match="plan changed"):
+        session_for(path).open_holdout(path, pinned)
+
+
+def test_plan_written_after_a_null_commitment_is_rejected(tmp_path):
+    path, pinned = locked(tmp_path, plan=None)
+    FinalRun(path, pinned)  # opened before any plan existed: the marker commits plan_sha256 = null
+    assert json.loads(opened_marker(path).read_text())["plan_sha256"] is None
+    late = ComparisonPlan(manifest_sha256=pinned, slots=tuple(slots()))  # e.g. a registration that lost the race
+    plan_path(path).write_bytes(canonical(late.model_dump(mode="json")))
+    with pytest.raises(ValueError, match="plan changed after the holdout was opened"):
+        session_for(path).open_holdout(path, pinned)
+
+
+def test_incomplete_test_roster_rejected_at_registration(tmp_path):
+    path, pinned = locked(tmp_path, plan=None)
+    suite = tmp_path / "suite.json"
+    no_truck = [s for s in slots() if s.script != TEST_SUITE[0]]
+    with pytest.raises(ValueError, match="missing: test:b1/double_parked_truck/r0"):
+        register_plan(path, pinned, suite, no_truck)
+    uneven = slots() + [scored(TEST, TEST_SUITE[0], "failed", replicate=1).slot]  # r1 for one script only
+    with pytest.raises(ValueError, match="missing: test:b1/pedestrian_steps_out/r1"):
+        register_plan(path, pinned, suite, uneven)
+    assert not plan_path(path).exists()
+
+
+def test_missing_held_out_episode_rejected_at_registration(tmp_path):
+    suite_sha = save_suite(tmp_path / "suite.json", TEST_SUITE)
+    second = ep("b2", "test", "cam8")
+    path = tmp_path / "manifest.json"
+    pinned = lock(Manifest(episodes=(DEV, TEST, second), prompts={"p": "a" * 64}, thresholds={},
+                           attack_suite_sha256=suite_sha), path)
+    with pytest.raises(ValueError, match="missing: test:b2/"):
+        register_plan(path, pinned, tmp_path / "suite.json", slots())  # covers b1 only
+
+
+def test_runtime_sessions_cannot_be_reused(tmp_path):
+    session = session_for(tmp_path / "manifest.json")
+    run = session.open_holdout(*locked(tmp_path, slots((0, 1))))
+    rep0 = [scored(TEST, s, "failed", replicate=0, session_id="before-0") for s in TEST_SUITE]
+    before = rep0 + [scored(TEST, s, "failed", replicate=1, session_id="before-1") for s in TEST_SUITE]
+    after = [scored(TEST, s, "avoided", replicate=r, session_id=f"after-{r}") for r in (0, 1) for s in TEST_SUITE]
+    dev = dict(dev_before=[scored(DEV, DEV_FAIL.score.record.script, "failed", replicate=r, session_id=f"db{r}") for r in (0, 1)],
+               dev_after=[scored(DEV, DEV_FAIL.score.record.script, "avoided", replicate=r, session_id=f"da{r}") for r in (0, 1)])
+    with pytest.raises(ValueError, match="holdout before and after reuse runtime sessions"):
+        seal(tmp_path, session, run, holdout_before=before, holdout_after=before, **dev)  # before passed as after
+    relabelled = rep0 + [i.model_copy(update={"replicate": 1}) for i in rep0]  # rep0's rollout fills rep1 too
+    with pytest.raises(ValueError, match="holdout before reuses one runtime attack"):
+        seal(tmp_path, session, run, holdout_before=relabelled, holdout_after=after, **dev)
+    assert not session.sealed
+    assert seal(tmp_path, session, run, holdout_before=before, holdout_after=after, **dev).holdout_delta["overall"] == 1
+
+
+def test_symlink_alias_shares_the_freeze(tmp_path):
+    path, pinned = locked(tmp_path, plan=None)
+    alias = tmp_path / "alias.json"
+    alias.symlink_to(path)
+    FinalRun(path, pinned)
+    with pytest.raises(HoldoutError, match="already opened"):
+        register_plan(alias, pinned, tmp_path / "suite.json", slots())
 
 
 class GatedGateway(FakeGateway):
