@@ -35,7 +35,7 @@ def test_episode_rules():
 def test_derivative_inherits_parent_split():
     manifest(ep("t1", "test"), ep("t1_crop", "test", parent_id="t1"))
     with pytest.raises(ValidationError, match="differs from parent"):
-        manifest(ep("t1", "test"), ep("t1_crop", "dev", parent_id="t1"))
+        manifest(ep("t1", "test"), ep("t1_crop", "dev", parent_id="t1", hash="f" * 64))
     with pytest.raises(ValidationError, match="unknown parent"):
         manifest(ep("x", parent_id="missing"))
 
@@ -52,7 +52,7 @@ def test_split_report_lists_shortfalls():
 
 def test_lock_detects_tampering_and_allows_labelled_fresh_capture(tmp_path):
     path = tmp_path / "manifest.lock.json"
-    pinned = lock(manifest(ep("d1"), ep("t1", "test")), path)
+    pinned = lock(manifest(ep("d1"), ep("t1", "test", hash="e" * 64)), path)
     assert verify_lock(path, pinned).sha256 == pinned
     with pytest.raises(FileExistsError):
         lock(manifest(), path)
@@ -91,6 +91,16 @@ def test_holdout_needs_final_run(tmp_path):
         FinalRun(path, "0" * 64)
     episode, data = read_source(tmp_path / "test.ts", m, FinalRun(path, pinned))
     assert episode.episode_id == "t1" and data == test_bytes
+
+
+def test_bytes_shared_across_splits_are_rejected(tmp_path):
+    with pytest.raises(ValidationError, match="both dev and test"):
+        manifest(ep("d1"), ep("t1", "test"))
+    manifest(ep("t1", "test"), ep("t2", "test"))  # sharing within a split is fine
+    path = tmp_path / "lock.json"
+    pinned = lock(manifest(ep("d1")), path)
+    with pytest.raises(ValueError, match="both dev and test"):
+        add_fresh_capture(path, ep("fresh", "test"), pinned)
 
 
 def test_ledger_keeps_failures_and_report_has_full_denominators(tmp_path):

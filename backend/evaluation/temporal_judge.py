@@ -55,7 +55,7 @@ class Params:
 class Window:
     start: int
     end: int
-    frames: list[int]
+    frames: list[RecordedFrame]  # snapshotted: the rolling buffer may evict them before judging
     outcomes: dict[str, str] = field(default_factory=dict)
     answers: dict | None = None
     error: str | None = None
@@ -130,7 +130,7 @@ class TemporalJudge:
             return
         n = self.p.samples
         picks = sorted({start + round(i * (self.p.window - 1) / (n - 1)) for i in range(n)})
-        window = Window(start, frame.index, [i for i in picks if i in self.frames])
+        window = Window(start, frame.index, [self.frames[i] for i in picks if i in self.frames])
         self.windows.append(window)
         task = asyncio.get_running_loop().create_task(self._judge(window))
         self.in_flight.add(task)
@@ -145,8 +145,8 @@ class TemporalJudge:
         parts = [{"type": "text", "text": f"{len(w.frames)} frames from a {GENIE_FPS} fps driving video, in order, "
                                           f"covering frames {w.start}-{w.end}."}]
         try:
-            for i in w.frames:
-                parts += [{"type": "text", "text": f"Frame {i}:"}, self.image(self.frames[i])]
+            for f in w.frames:
+                parts += [{"type": "text", "text": f"Frame {f.index}:"}, self.image(f)]
             result = await self.judge(stage="temporal_gate", input_value=parts, questions=QUESTIONS, context=self.context)
             w.answers = result.output
         except Exception as e:  # GatewayError, timeout, cancellation of the call, bad frame

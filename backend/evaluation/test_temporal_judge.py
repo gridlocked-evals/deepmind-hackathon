@@ -68,7 +68,7 @@ def test_cadence_windows_and_input():
         await feed(tj, 0, 59 + 3 * 24)
         await tj.drain()
         assert [(w.start, w.end) for w in tj.windows] == [(0, 59), (24, 83), (48, 107), (72, 131)]
-        assert tj.windows[0].frames == [0, 20, 39, 59]
+        assert [f.index for f in tj.windows[0].frames] == [0, 20, 39, 59]
         call = judge.calls[0]
         assert call["stage"] == "temporal_gate" and set(call["questions"]) == {
             "bus_lane_entry", "obstruction", "crossing_conflict", "ambiguous"}
@@ -185,4 +185,16 @@ def test_coverage_ranges():
         cov = tj.coverage()
         assert cov["covered"] == [(0, 9)] and cov["uncovered"] == [(10, 34)]
         assert (cov["due"], cov["judged"], cov["failed"], cov["skipped"]) == (2, 1, 1, 0)
+    asyncio.run(run())
+
+
+def test_window_survives_frames_arriving_before_judge_runs():
+    async def run():
+        judge = FakeJudge()
+        tj, _ = make(judge)
+        for i in range(70):  # no yield: the window's oldest frames leave the buffer first
+            tj.on_frame(RecordedFrame("s", i, "h", f"/f/{i}.jpg"))
+        await tj.drain()
+        assert tj.windows[0].error is None and tj.windows[0].answers
+        assert [p for p in judge.calls[0]["input"] if p["type"] == "image"] == [IMAGE] * 4
     asyncio.run(run())
