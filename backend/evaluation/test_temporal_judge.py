@@ -88,6 +88,21 @@ def test_classify_typed_outcomes():
     del missing["obstruction"]
     assert classify(missing, p)["obstruction"] == UNKNOWN
     assert set(classify(None, p).values()) == {UNKNOWN}
+    for ambiguity in (noul(.1, c=.01), {"type": "noul", "noul": .1}, noul(.1, c=float("nan"))):
+        assert set(classify(answers(bus=.9) | {"ambiguous": ambiguity}, p).values()) == {UNKNOWN}
+
+
+def test_low_confidence_ambiguity_cannot_act_or_count_as_coverage():
+    async def run():
+        for bus in (.1, .9):
+            response = answers(bus=bus) | {"ambiguous": noul(.1, c=.01)}
+            tj, controller = make(FakeJudge(lambda n: response))
+            await feed(tj, 0, 59)
+            await tj.drain()
+            assert set(tj.windows[0].outcomes.values()) == {UNKNOWN}
+            assert tj.coverage()["covered"] == [] and tj.coverage()["uncovered"] == [(0, 59)]
+            assert controller.log == [("review", 0, 59)]
+    asyncio.run(run())
 
 
 def test_failed_check_is_insufficient_and_reduces_cadence():
@@ -192,6 +207,33 @@ def test_older_result_cannot_act_after_a_newer_window_answered():
         await tj.drain()
         assert tj.windows[0].outcomes["bus_lane_entry"] == OBSERVED and not tj.windows[0].stale
         assert controller.log == [] and tj.interventions == []
+    asyncio.run(run())
+
+
+def test_superseded_violations_cannot_trigger_later_controller_stop():
+    async def run():
+        gate = asyncio.Event()
+
+        async def judge(*, stage, input_value, questions, context):
+            start = int(input_value[0]["text"].split("covering frames ")[1].split("-")[0])
+            if start < 48:
+                await gate.wait()
+            return SimpleNamespace(output=answers(bus=.1 if start == 48 else .95))
+
+        tj, controller = make(judge, max_in_flight=3, stale=10_000, stop_after=3)
+        await feed(tj, 0, 107)  # clear window 48-107 completes before the two older violations
+        assert tj.windows[2].answers and not tj.windows[0].answers
+        gate.set()
+        await tj.drain()
+        assert controller.log == []
+        await feed(tj, 108, 131)  # first current violation; old ones remain diagnostic only
+        await tj.drain()
+        assert controller.log == [("release_keys",)] and tj.stopped is None
+        assert tj.events()[0]["windows"] == 3
+        assert tj.events(actionable_only=True)[0]["windows"] == 1
+        await feed(tj, 132, 179)
+        await tj.drain()
+        assert controller.log == [("release_keys",)] * 3 + [("stop", "repeated_violation:bus_lane_entry")]
     asyncio.run(run())
 
 

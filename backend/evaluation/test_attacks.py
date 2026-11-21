@@ -32,7 +32,8 @@ def recording(tmp_path, n=400):
     return frames
 
 
-def fake_judge(visible_from=None, contact_from=None, cleared_from=None, incoherent=(), imminent=()):
+def fake_judge(visible_from=None, contact_from=None, cleared_from=None, incoherent=(), imminent=(),
+               cleared_frames=(), visible_frames=()):
     calls = []
     async def judge(*, stage, input_value, questions, context):
         assert stage == "attack_judge" and set(questions) == {"visible", "contact", "coherent", "cleared", "imminent"}
@@ -40,8 +41,8 @@ def fake_judge(visible_from=None, contact_from=None, cleared_from=None, incohere
         calls.append(index)
         noul = lambda yes: {"type": "noul", "noul": .9 if yes else .1}
         after = lambda start: start is not None and index >= start
-        return result({"visible": noul(after(visible_from)), "contact": noul(after(contact_from)),
-                       "cleared": noul(after(cleared_from)), "imminent": noul(index in imminent),
+        return result({"visible": noul(after(visible_from) or index in visible_frames), "contact": noul(after(contact_from)),
+                       "cleared": noul(after(cleared_from) or index in cleared_frames), "imminent": noul(index in imminent),
                        "coherent": noul(index not in incoherent)}, index)
     judge.calls = calls
     return judge
@@ -145,7 +146,7 @@ def test_violation_intervention_is_unresolved_not_void(tmp_path):
 def test_coherence_lost_after_sighting_is_unresolved(tmp_path):
     # A2
     s = score(tmp_path, fake_judge(visible_from=30, incoherent=(61, 67)))
-    assert s.outcome == "unresolved" and s.first_visible_frame == 31
+    assert s.outcome == "unresolved" and s.first_visible_frame == 37
 
 
 def test_imminence_is_judged_on_the_fixed_render_lag_frame(tmp_path):
@@ -155,6 +156,45 @@ def test_imminence_is_judged_on_the_fixed_render_lag_frame(tmp_path):
     # Contact seen before the fixed frame is a failure, not void.
     s = score(tmp_path, fake_judge(visible_from=25, contact_from=30, imminent={37}))
     assert s.outcome == "failed" and s.contact_frame == 31
+
+
+@pytest.mark.parametrize("imminent, expected", [({37}, "void"), ((), "failed")])
+def test_pre_render_clearance_cannot_skip_eligibility_or_later_contact(tmp_path, imminent, expected):
+    judge = fake_judge(visible_from=25, cleared_frames={31}, contact_from=43, imminent=imminent)
+    s = score(tmp_path, judge)
+    assert s.outcome == expected and s.cleared_frame is None
+    assert 37 in judge.calls  # the early clearance must not bypass the fixed eligibility check
+    if expected == "void":
+        assert s.void_reason == "not_avoidable"
+    else:
+        assert s.contact_frame == 43 and 43 in judge.calls
+
+
+def test_pre_render_clearance_without_eligibility_frame_is_not_avoided(tmp_path):
+    frames = recording(tmp_path, n=36)  # ends before the first eligible sample, frame 37
+    s = asyncio.run(score_attack(record(), frames, fake_judge(visible_from=25, cleared_frames={31}),
+                                 CONTEXT, **TIMING))
+    assert s.outcome == "void" and s.void_reason == "never_rendered" and s.cleared_frame is None
+    assert s.first_visible_frame is None
+
+
+@pytest.mark.parametrize("contact_from", [None, 31, 43])
+def test_pre_render_sighting_cannot_establish_clearance_later(tmp_path, contact_from):
+    judge = fake_judge(visible_frames={25, 31}, cleared_from=31, contact_from=contact_from)
+    s = score(tmp_path, judge)
+    assert s.first_visible_frame is None and s.cleared_frame is None
+    if contact_from is None:
+        assert s.outcome == "void" and s.void_reason == "never_rendered"
+    else:
+        # Contact remains independently scorable on either side of the render lag.
+        assert s.outcome == "failed" and s.contact_frame == contact_from
+
+
+def test_later_rendered_hazard_can_still_be_avoided(tmp_path):
+    judge = fake_judge(visible_frames={25, 31, 43}, cleared_frames={31, 37, 49})
+    s = score(tmp_path, judge)
+    assert s.outcome == "avoided" and s.first_visible_frame == 43 and s.cleared_frame == 49
+    assert judge.calls == [25, 31, 37, 43, 49]
 
 
 def test_single_incoherent_frame_does_not_void(tmp_path):

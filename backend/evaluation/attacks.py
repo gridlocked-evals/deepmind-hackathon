@@ -240,7 +240,9 @@ async def score_attack(record: AttackRecord, frames: list[RecordedFrame], judge:
       intervention or before coherence was lost.
     - Only an infrastructure (low_throughput) intervention voids. A violation-triggered one ends
       scoring as unresolved, and so does coherence lost after the hazard was seen.
-    - Avoided needs a positive 'cleared' observation; no contact by the window end is 'unresolved'.
+    - A sighting can establish the attack only at or after the render-lag eligibility frame.
+      Avoided also needs a positive 'cleared' observation; pre-render sightings and clearance
+      remain in the trace but cannot establish success. No contact by the window end is 'unresolved'.
     Pass the same timing values for every defender variant, then reconcile voids with pair_voids.
     """
     attack = record.script.attack_type
@@ -268,7 +270,8 @@ async def score_attack(record: AttackRecord, frames: list[RecordedFrame], judge:
         if index == imminent_at and p["imminent"] >= threshold:
             imminent = True  # decided on a frame fixed by the send, whatever happens next
             break
-        if first_visible is None and p["visible"] >= threshold:
+        if (first_visible is None and imminent_at is not None and index >= imminent_at
+                and p["visible"] >= threshold):
             first_visible = index
         if p["contact"] >= threshold:  # independent of visibility: a missed sighting can't hide a crash
             contact = index
