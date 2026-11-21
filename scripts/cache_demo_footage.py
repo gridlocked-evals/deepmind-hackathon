@@ -56,8 +56,16 @@ def latest_clip(status: dict, clip_s: float) -> tuple[float, float, str] | None:
     return end - start, end - start, status["history"]["bufferRevision"]
 
 
-def cache_video(base: str, cameras: list[dict], args) -> tuple[dict, dict]:
-    kept, dropped = {}, {}
+def unpin(base: str, entries) -> None:
+    for entry in entries:
+        try:
+            call(base, f"/api/captures/{quote(entry['saved']['capture']['id'])}/pins/{PIN_JOB}", method="DELETE")
+        except (RuntimeError, URLError):
+            pass
+
+
+def cache_video(base: str, cameras: list[dict], args, kept: dict) -> tuple[dict, dict]:
+    dropped = {}
     started = time.monotonic()
     for camera in cameras:
         call(base, f"/api/captures/{quote(camera['id'])}/recording", {})
@@ -147,46 +155,47 @@ def main() -> int:
     base = args.base.rstrip("/")
 
     call(base, "/api/health")
-    if OUT.exists():  # release the previous run's pins so the store can evict that footage
-        for entry in json.loads(OUT.read_text()).get("cameras", {}).values():
-            try:
-                call(base, f"/api/captures/{quote(entry['saved']['capture']['id'])}/pins/{PIN_JOB}", method="DELETE")
-            except (RuntimeError, URLError):
-                pass
+    # The previous run's pins stay until the replacement index is written: the old index still references them.
+    previous = json.loads(OUT.read_text()).get("cameras", {}).values() if OUT.exists() else []
+    kept: dict = {}
+    try:
+        video = call(base, "/api/vision/cameras")
+        video = video.get("cameras", video) if isinstance(video, dict) else video
+        dropped = cache_video(base, video, args, kept)[1]
 
-    video = call(base, "/api/vision/cameras")
-    video = video.get("cameras", video) if isinstance(video, dict) else video
-    kept, dropped = cache_video(base, video, args)
+        if not args.skip_snapshots:
+            dot = call(base, "/api/cameras", timeout=120)["cameras"]
+            dot = [c for c in dot if c.get("kind") == "snapshot"]
+            print(f"Saving {len(dot)} DOT snapshots (drop if slower than {args.snapshot_max_seconds:g} s)…", flush=True)
+            with ThreadPoolExecutor(args.snapshot_workers) as pool:
+                for index, (cid, result) in enumerate(pool.map(lambda c: cache_snapshot(base, c, args.snapshot_max_seconds), dot), 1):
+                    (kept if isinstance(result, dict) else dropped)[cid] = result
+                    if index % 50 == 0:
+                        print(f"  {index}/{len(dot)}", flush=True)
 
-    if not args.skip_snapshots:
-        dot = call(base, "/api/cameras", timeout=120)["cameras"]
-        dot = [c for c in dot if c.get("kind") == "snapshot"]
-        print(f"Saving {len(dot)} DOT snapshots (drop if slower than {args.snapshot_max_seconds:g} s)…", flush=True)
-        with ThreadPoolExecutor(args.snapshot_workers) as pool:
-            for index, (cid, result) in enumerate(pool.map(lambda c: cache_snapshot(base, c, args.snapshot_max_seconds), dot), 1):
-                (kept if isinstance(result, dict) else dropped)[cid] = result
-                if index % 50 == 0:
-                    print(f"  {index}/{len(dot)}", flush=True)
+        if args.token:
+            for cid, entry in kept.items():
+                if entry["kind"] != "hls":
+                    continue
+                capture_id = entry["saved"]["capture"]["id"]
+                print(f"Hydrogen extraction for {cid} (paid)…", flush=True)
+                try:
+                    entry["extraction"] = call(base, "/api/observations/extract", {"cameraId": cid, "captureId": capture_id},
+                                               token=args.token, timeout=600)
+                except (RuntimeError, URLError, TimeoutError) as exc:
+                    print(f"  extraction failed for {cid}: {exc}", file=sys.stderr)
+        else:
+            print("No WORLD_API_TOKEN: skipped Hydrogen extraction; the UI can still run it on a cached clip.")
 
-    if args.token:
-        for cid, entry in kept.items():
-            if entry["kind"] != "hls":
-                continue
-            capture_id = entry["saved"]["capture"]["id"]
-            print(f"Hydrogen extraction for {cid} (paid)…", flush=True)
-            try:
-                entry["extraction"] = call(base, "/api/observations/extract", {"cameraId": cid, "captureId": capture_id},
-                                           token=args.token, timeout=600)
-            except (RuntimeError, URLError, TimeoutError) as exc:
-                print(f"  extraction failed for {cid}: {exc}", file=sys.stderr)
-    else:
-        print("No WORLD_API_TOKEN: skipped Hydrogen extraction; the UI can still run it on a cached clip.")
-
-    OUT.parent.mkdir(parents=True, exist_ok=True)
-    tmp = OUT.with_suffix(".tmp")
-    tmp.write_text(json.dumps({"schemaVersion": "demo-cache.v1", "createdAt": datetime.now(timezone.utc).isoformat(),
-                               "cameras": kept, "dropped": dropped}))
-    tmp.replace(OUT)
+        OUT.parent.mkdir(parents=True, exist_ok=True)
+        tmp = OUT.with_suffix(".tmp")
+        tmp.write_text(json.dumps({"schemaVersion": "demo-cache.v1", "createdAt": datetime.now(timezone.utc).isoformat(),
+                                   "cameras": kept, "dropped": dropped}))
+        tmp.replace(OUT)
+    except BaseException:
+        unpin(base, kept.values())
+        raise
+    unpin(base, previous)
     print(f"\nKept {len(kept)} cameras, dropped {len(dropped)}. Wrote {OUT}")
     return 0 if kept else 1
 
