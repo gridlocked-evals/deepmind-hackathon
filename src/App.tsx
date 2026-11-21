@@ -83,7 +83,8 @@ export default function App() {
   const liveCount = cameras.filter(c => c.kind === 'hls').length;
   const docked = viewMode !== 'city' || feedPinned || viewport.width < 760;
   const trafficDemoActive = scenario.id === demoScenario.id && viewMode !== 'city';
-  const railIsModal = sidebarOpen && viewport.width <= 760;
+  const evidenceIsModal = evidenceOpen && viewport.width <= 760;
+  const railIsModal = sidebarOpen && viewport.width <= 760 && !evidenceOpen;
 
   const invalidateRoute = useCallback(() => {
     driver.reset();
@@ -180,9 +181,12 @@ export default function App() {
   const onViewport = useCallback((next: MapViewport) => setViewport(next), []);
 
   useEffect(() => {
-    if (!railIsModal || !railRef.current || !workspaceRef.current) return;
-    const rail = railRef.current;
-    const opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    if (!workspaceRef.current) return;
+    const rail = evidenceIsModal ? workspaceRef.current.querySelector<HTMLElement>('#camera-evidence-panel')
+      : railIsModal ? railRef.current : null;
+    if (!rail) return;
+    const opener = evidenceIsModal ? evidenceToggleRef.current
+      : document.activeElement instanceof HTMLElement ? document.activeElement : null;
     const covered = [...workspaceRef.current.children].filter((node): node is HTMLElement =>
       node instanceof HTMLElement && node !== rail && !node.classList.contains('sidebar-backdrop'));
     const inertBefore = covered.map(node => node.inert);
@@ -190,7 +194,9 @@ export default function App() {
     rail.focus({ preventScroll: true });
     const containFocus = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {
-        event.preventDefault(); event.stopPropagation(); setSidebarOpen(false); return;
+        event.preventDefault(); event.stopPropagation();
+        if (evidenceIsModal) setEvidenceOpen(false); else setSidebarOpen(false);
+        return;
       }
       if (event.key !== 'Tab') return;
       const controls = [...rail.querySelectorAll<HTMLElement>('button:not(:disabled),a[href],input:not(:disabled),select:not(:disabled),summary,[tabindex="0"]')]
@@ -209,7 +215,7 @@ export default function App() {
       covered.forEach((node, index) => { node.inert = inertBefore[index]; });
       if (opener?.isConnected) opener.focus({ preventScroll: true });
     };
-  }, [railIsModal]);
+  }, [railIsModal, evidenceIsModal]);
 
   useEffect(() => {
     if (!helpOpen) return;
@@ -293,7 +299,7 @@ export default function App() {
     </section>
 
     <div className="bottom-caption"><span>Simulated motion · camera evidence reviewed separately</span><span>Map context © OpenStreetMap</span></div>
-    <EvidencePanel camera={selectedCamera} open={evidenceOpen} onClose={closeEvidence} />
+    <EvidencePanel camera={selectedCamera} open={evidenceOpen} modal={evidenceIsModal} onClose={closeEvidence} />
     {!mapReady && !mapError && <div className="map-loading"><span className="loading-orbit" /><span>Opening New York</span></div>}
     {mapError && <div className="map-notice"><span>{mapError}</span><button onClick={() => setMapError('')} aria-label="Dismiss map notice"><X size={14} /></button></div>}
     {helpOpen && <div className="help-backdrop" onClick={() => setHelpOpen(false)}><section ref={helpRef} className="help-dialog" role="dialog" aria-modal="true" aria-labelledby="help-title" onClick={event => event.stopPropagation()}><button className="icon-button help-close" onClick={() => setHelpOpen(false)} aria-label="Close information"><X size={18} /></button><h2 id="help-title">Welcome to Gridlocked.</h2><p>Explore all five boroughs through public roadway cameras. Choose Traffic demo for the original 25-vehicle Vestry scene, select a street for a local preview, or plan a driving route between two locations.</p><div className="help-item"><Video size={20} /><div><strong>Camera footage is real</strong><p>Video comes from 511NY / NYSDOT. Source delay is unknown. NYC DOT snapshots are periodic images.</p></div></div><div className="help-item"><Route size={20} /><div><strong>The simulation is illustrative</strong><p>Routes use OpenStreetMap driving geometry. Speeds and vehicle motion are simulated, without live traffic or signal timing. The Vestry example is authored. Image analysis is not yet connected to this view.</p></div></div><div className="help-item"><Bot size={20} /><div><strong>Gemini can drive the ego vehicle</strong><p>The model chooses acceleration and braking from simulated state. Route steering and safety bounds are deterministic. Each run is limited to 12 decisions; this is separate from the camera-image navigation pipeline.</p></div></div><div className="shortcut-list"><span><kbd>Space</kbd> Play / pause</span><span><kbd>C</kbd> Cameras</span><span><kbd>1</kbd><kbd>2</kbd><kbd>3</kbd> Perspective</span></div><button className="explore-button" onClick={() => setHelpOpen(false)}>Back to the city</button></section></div>}

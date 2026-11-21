@@ -91,6 +91,8 @@ record an empty pin list; missing or corrupt pin records are recovered conservat
 as retained. Damaged manifests are never automatically evicted. Storage pressure
 can remove only explicitly unpinned valid episodes. Incomplete temporary episodes
 are discarded at startup; recording itself does not resume automatically.
+New captures count damaged retained episodes against the budget and reject before
+evicting anything when the remaining reclaimable space cannot accommodate them.
 
 ## Verification
 

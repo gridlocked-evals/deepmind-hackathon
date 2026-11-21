@@ -614,13 +614,13 @@ class CaptureStore:
         (tmp / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True))
         (tmp / "pins.json").write_text("[]")
         for path in tmp.rglob("*"):
-            if path.is_file():
+            if path.is_file() and path.name != "pins.json":
                 path.chmod(0o444)
         with self._lock:
             os.replace(tmp, self.root / episode_id)  # publish under the lock: a pin can't land before the fit check
             # Check fit before evicting: evicting and then rejecting this episode anyway would lose data for nothing.
             evictable = sum(self._size(p) for p in self.root.iterdir()
-                            if _EPISODE_ID.match(p.name) and p.name != episode_id and not self.pins(p.name))
+                            if _EPISODE_ID.match(p.name) and p.name != episode_id and self._can_evict(p.name))
             if self.usage_bytes() - evictable > self.budget_bytes:
                 self._remove(self.root / episode_id)
                 raise CaptureError("Capture budget is exhausted by pinned episodes.", budgetBytes=self.budget_bytes)
@@ -823,6 +823,10 @@ class CaptureStore:
         path = self._pins_path(episode_id)
         tmp = path.with_suffix(".tmp")
         tmp.write_text(json.dumps(pins))
+        # Pins are mutable ownership metadata. Older captures marked this file
+        # read-only alongside evidence, preventing atomic replacement on Windows.
+        if path.exists():
+            path.chmod(0o600)
         os.replace(tmp, path)
 
     def usage_bytes(self) -> int:
@@ -837,6 +841,16 @@ class CaptureStore:
             f.chmod(0o644) if f.is_file() else None
         shutil.rmtree(path)
 
+    def _can_evict(self, episode_id: str) -> bool:
+        """Use the same retained-capacity rule for admission and deletion, under _lock."""
+        try:
+            if self.pins(episode_id):
+                return False
+            self.get(episode_id)
+        except CaptureError:
+            return False  # damaged ownership/provenance requires explicit recovery
+        return True
+
     def enforce_budget(self, protect: str | None = None) -> list[str]:
         """Delete the oldest unpinned episodes (never ``protect``) until usage fits the budget."""
         with self._lock:  # the pins() check and the delete must not interleave with pin()
@@ -847,12 +861,8 @@ class CaptureStore:
             for path in episodes:
                 if usage <= self.budget_bytes:
                     break
-                if path.name == protect or self.pins(path.name):
+                if path.name == protect or not self._can_evict(path.name):
                     continue
-                try:
-                    self.get(path.name)
-                except CaptureError:
-                    continue  # corrupted ownership/provenance requires explicit recovery
                 size = self._size(path)
                 self._remove(path)
                 usage -= size
