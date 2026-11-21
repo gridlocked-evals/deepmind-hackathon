@@ -35,7 +35,11 @@ not a real-camera image. See [the live verification record](GENIE_RUNTIME_VERIFI
 
 The production API accepts an `accepted_reference` hash, never uploaded media or
 a client assertion that the gate accepted it. Trusted Python code in the #8
-image gate will call `WorldManager.references.publish(record, image, gate_artifact)`.
+image gate publishes it with `gates.publish_accepted`, exposed as the operator-token route
+`POST /api/worlds/accepted-references` with `{referenceImageId, gateDecisionId}`. The route
+accepts only IDs: the gate code itself loads and re-verifies the accepted image and gate record.
+When the manager has the gate store (as in `backend/main.py`), creation also claims the gate
+and binds it to this session, so one accepted gate admits exactly one session.
 `AcceptedReference` is a narrow integration contract, not a replacement for the
 domain schema work in #2. It binds:
 
@@ -46,10 +50,10 @@ domain schema work in #2. It binds:
 Publication requires matching hashes and a decodable image with exact 16:9 pixel
 dimensions. Creation reloads and revalidates all bytes and matches the submission
 or demo context. Missing, modified, rejected or unknown records fail before any
-paid call. No HTTP endpoint can publish a record. Publishing is a trusted backend
+paid call. No HTTP endpoint accepts client-supplied images or gate claims. Publishing is a trusted backend
 operation: the runtime does not independently judge the image or authenticate a
-malicious writer with filesystem access. #8 must supply real gate evidence; the
-integration test's trusted fixture is not live acceptance evidence.
+malicious writer with filesystem access. `backend/test_gate_world.py` covers the
+end-to-end path; its fake judge is not live acceptance evidence.
 
 ## HTTP and browser protocol
 

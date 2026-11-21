@@ -5,6 +5,7 @@ import os
 import secrets
 
 from fastapi import APIRouter, Depends, HTTPException, Request, WebSocket, WebSocketDisconnect
+from pydantic import BaseModel, ConfigDict
 
 from ..gateway.contracts import GatewayError
 from .contracts import WorldRequest
@@ -23,6 +24,26 @@ def authorize(request: Request):
     origin = request.headers.get("origin")
     if origin and origin not in ORIGINS:
         raise HTTPException(403, "Origin is not allowed.")
+
+
+class AcceptedHandoff(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    referenceImageId: str
+    gateDecisionId: str
+
+
+@router.post("/accepted-references", dependencies=[Depends(authorize)])
+async def publish_accepted_reference(body: AcceptedHandoff, request: Request):
+    """Publish an accepted #8 gate for creation. Only accepted, hash-verified, unclaimed gates pass."""
+    from ..artifacts import ArtifactError
+    from ..gates import publish_accepted
+    try:
+        return publish_accepted(request.app.state.artifacts, request.app.state.worlds.references,
+                                body.referenceImageId, body.gateDecisionId)
+    except ArtifactError as exc:
+        raise HTTPException(exc.status, exc.detail) from None
+    except GatewayError as exc:
+        raise HTTPException(409, exc.public()) from None
 
 
 @router.post("", dependencies=[Depends(authorize)])

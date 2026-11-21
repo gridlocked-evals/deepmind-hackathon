@@ -324,16 +324,21 @@ def claim_world(store: ArtifactStore, reference_id: str, gate_id: str) -> dict:
 
 def bind_world(store: ArtifactStore, world: WorldSession, image_sha256: str) -> dict:
     """Record which session the claimed gate created. Write-once."""
-    gate_id = world.gateDecisionId
+    return bind_world_ids(store, gate_id=world.gateDecisionId, reference_id=world.referenceImageId,
+                          world_session_id=world.id, image_sha256=image_sha256)
+
+
+def bind_world_ids(store: ArtifactStore, *, gate_id: str, reference_id: str, world_session_id: str,
+                   image_sha256: str) -> dict:
     suffix = gate_id.removeprefix("gate_")
     if not store.exists("bindings", "claim_" + suffix):
         raise GateError("World session was created without claiming an accepted gate.", status=409)
     claim = store.get("bindings", "claim_" + suffix)
-    if claim["referenceImageId"] != world.referenceImageId or claim["imageSha256"] != image_sha256:
+    if claim["referenceImageId"] != reference_id or claim["imageSha256"] != image_sha256:
         raise GateError("The session was created from different image bytes than the gate accepted.", status=409)
-    binding = {"id": "bind_" + gate_id.removeprefix("gate_"), "gateDecisionId": gate_id,
-               "referenceImageId": world.referenceImageId, "imageSha256": image_sha256,
-               "worldSessionId": world.id, "boundAt": utcnow().isoformat()}
+    binding = {"id": "bind_" + suffix, "gateDecisionId": gate_id,
+               "referenceImageId": reference_id, "imageSha256": image_sha256,
+               "worldSessionId": world_session_id, "boundAt": utcnow().isoformat()}
     return store.put("bindings", binding["id"], binding)
 
 
@@ -345,3 +350,33 @@ def check_world_session(store: ArtifactStore, world: WorldSession) -> dict:
     if binding["worldSessionId"] != world.id or binding["referenceImageId"] != world.referenceImageId:
         raise GateError("World session does not match its gate binding.", status=409)
     return binding
+
+
+# ---------------------------------------------------------------- Genie runtime handoff (#9)
+
+def gate_artifact(store: ArtifactStore, gate_id: str) -> bytes:
+    """The exact stored gate record bytes; their hash is what the world runtime pins."""
+    return store._path("gates", gate_id).read_bytes()
+
+
+def publish_accepted(store: ArtifactStore, references, reference_id: str, gate_id: str) -> dict:
+    """Hand an accepted, hash-verified, unclaimed gate to the Genie runtime.
+
+    Publishing spends nothing and does not claim the gate: ``WorldManager.create`` claims it
+    when the session is actually created, so a gate still admits exactly one session.
+    """
+    from .worlds.contracts import AcceptedReference  # worlds depends on the gateway, not on gates
+
+    auth = authorize_world(store, reference_id, gate_id)
+    capture_id = ReferenceImage.model_validate(store.get("references", reference_id)["referenceImage"]).captureId
+    artifact = gate_artifact(store, gate_id)
+    record = AcceptedReference(
+        # Same convention as the pipeline's model calls: the capture is the episode and the source.
+        episode_id=capture_id, source_id=capture_id, capture_id=capture_id, reference_id=reference_id,
+        reference_sha256=auth["imageSha256"].removeprefix("sha256:"),
+        mime_type=auth["referenceImage"]["mime_type"], gate_decision_id=gate_id,
+        gate_artifact_sha256=sha256(artifact).removeprefix("sha256:"), decision="accept")
+    fingerprint = references.publish(record, base64.b64decode(auth["referenceImage"]["data"]), artifact)
+    return {"acceptedReference": fingerprint, "worldPrompt": auth["worldPrompt"],
+            "imageSha256": auth["imageSha256"], "gateDecisionId": gate_id, "referenceImageId": reference_id,
+            "context": {"episode_id": capture_id, "source_id": capture_id, "capture_id": capture_id}}

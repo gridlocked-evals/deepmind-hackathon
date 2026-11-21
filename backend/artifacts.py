@@ -17,7 +17,8 @@ from datetime import datetime, timezone
 
 from pydantic import BaseModel
 
-KINDS = ("observations", "edits", "references", "gates", "bindings", "frames")
+KINDS = ("observations", "edits", "references", "gates", "bindings", "frames",
+         "extractions", "inspections", "reviews", "extraction_attempts", "observation_evidence")
 _ID = re.compile(r"^[a-z]+_[A-Za-z0-9-]{4,64}$")
 _SHA = re.compile(r"^sha256:[0-9a-f]{64}$")
 
@@ -66,7 +67,6 @@ class ArtifactStore:
             return data
         tmp = path.with_suffix(f".tmp-{secrets.token_hex(4)}")
         tmp.write_text(body)
-        tmp.chmod(0o444)
         try:
             os.link(tmp, path)  # atomic and exclusive: concurrent writers cannot both win
         except FileExistsError:
@@ -75,6 +75,7 @@ class ArtifactStore:
                                     status=409, kind=kind, id=record_id) from None
         finally:
             tmp.unlink()
+        path.chmod(0o444)
         return data
 
     def claim(self, kind: str, record_id: str, value: dict) -> dict:
