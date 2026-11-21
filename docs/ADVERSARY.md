@@ -131,6 +131,16 @@ nonempty request identifier and two-attack budget before recording it.
   and scripted removals earn no clearance credit. Assisted/unassisted slices are
   diagnostics, with void exclusions disclosed. Issued attacks are not a frozen
   predeclared roster: trusted paired evaluation under #32 remains separate.
+- Each slice (unassisted, assisted) also reports, over the same eligible
+  denominator, **no contact** (outcome is not `contact`) and **near misses**,
+  shown as `No contact 3/4 (1 near miss) · cleared 1/4 · progress 412 m ·
+  stopped-while-clear 2 s`. Clearance alone punishes correctly waiting behind a
+  lane-blocking hazard; no-contact alone rewards stalling, which progress and
+  stopped-while-clear expose.
+- An unresolved encounter is `removed` if its hazard was removed by the script
+  (this takes precedence), otherwise `safe_hold` if the ego is stopped when the
+  encounter ends (at the run end), otherwise `horizon_censored`. A stop earlier
+  in the encounter does not make a safe hold.
 - A demo handful of runs is illustrative only. Detecting a 10-point difference
   in failure rate needs on the order of 150 paired runs (McNemar's test).
 - It is synthetic, short-horizon (60 s) and speed-only: the driver controls
