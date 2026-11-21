@@ -23,6 +23,7 @@ import json
 import os
 from pathlib import Path
 import sys
+from threading import Lock
 import time
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote
@@ -60,11 +61,27 @@ def unpin(base: str, entries) -> None:
     for entry in entries:
         try:
             call(base, f"/api/captures/{quote(entry['saved']['capture']['id'])}/pins/{PIN_JOB}", method="DELETE")
-        except (RuntimeError, URLError):
+        except (RuntimeError, URLError, TimeoutError, ValueError):
             pass
 
 
-def cache_video(base: str, cameras: list[dict], args, kept: dict | None = None) -> tuple[dict, dict]:
+class PinAttempts:
+    """Remember pins inside workers, even when their result is never consumed."""
+    def __init__(self):
+        self._lock = Lock()
+        self._entries = {}
+
+    def remember(self, saved):
+        with self._lock:
+            self._entries[saved["capture"]["id"]] = {"saved": saved}
+
+    def entries(self):
+        with self._lock:
+            return list(self._entries.values())
+
+
+def cache_video(base: str, cameras: list[dict], args, kept: dict | None = None,
+                pins: PinAttempts | None = None) -> tuple[dict, dict]:
     if kept is None:
         kept = {}
     dropped = {}
@@ -122,6 +139,8 @@ def cache_video(base: str, cameras: list[dict], args, kept: dict | None = None) 
         try:
             saved = call(base, "/api/captures", {"cameraId": cid, "secondsAgo": seconds_ago, "durationS": duration,
                                                  "holdoutS": 0, "bufferRevision": revision})
+            if pins is not None:
+                pins.remember(saved)  # the server may pin successfully even if the response is lost
             call(base, f"/api/captures/{quote(saved['capture']['id'])}/pins", {"jobId": PIN_JOB})
         except (RuntimeError, URLError) as exc:
             dropped[cid] = f"save failed: {exc}"
@@ -132,7 +151,8 @@ def cache_video(base: str, cameras: list[dict], args, kept: dict | None = None) 
     return kept, dropped
 
 
-def cache_snapshot(base: str, camera: dict, max_seconds: float) -> tuple[str, dict | str]:
+def cache_snapshot(base: str, camera: dict, max_seconds: float,
+                   pins: PinAttempts | None = None) -> tuple[str, dict | str]:
     for attempt in range(4):
         t0 = time.monotonic()
         try:
@@ -147,6 +167,8 @@ def cache_snapshot(base: str, camera: dict, max_seconds: float) -> tuple[str, di
     if took > max_seconds:
         return camera["id"], f"snapshot took {took:.1f} s"
     try:
+        if pins is not None:
+            pins.remember(saved)
         call(base, f"/api/captures/{quote(saved['capture']['id'])}/pins", {"jobId": PIN_JOB})
     except (RuntimeError, URLError) as exc:
         return camera["id"], f"pin failed: {exc}"
@@ -173,17 +195,18 @@ def main() -> int:
     # The previous run's pins stay until the replacement index is written: the old index still references them.
     previous = json.loads(OUT.read_text()).get("cameras", {}).values() if OUT.exists() else []
     kept: dict = {}
+    pins = PinAttempts()
     try:
         video = call(base, "/api/vision/cameras")
         video = video.get("cameras", video) if isinstance(video, dict) else video
-        kept, dropped = cache_video(base, video, args, kept)
+        kept, dropped = cache_video(base, video, args, kept, pins)
 
         if not args.skip_snapshots:
             dot = call(base, "/api/cameras", timeout=120)["cameras"]
             dot = [c for c in dot if c.get("kind") == "snapshot"]
             print(f"Saving {len(dot)} DOT snapshots (drop if slower than {args.snapshot_max_seconds:g} s)…", flush=True)
             with ThreadPoolExecutor(args.snapshot_workers) as pool:
-                for index, (cid, result) in enumerate(pool.map(lambda c: cache_snapshot(base, c, args.snapshot_max_seconds), dot), 1):
+                for index, (cid, result) in enumerate(pool.map(lambda c: cache_snapshot(base, c, args.snapshot_max_seconds, pins), dot), 1):
                     (kept if isinstance(result, dict) else dropped)[cid] = result
                     if index % 50 == 0:
                         print(f"  {index}/{len(dot)}", flush=True)
@@ -209,9 +232,13 @@ def main() -> int:
                                    "cameras": kept, "dropped": dropped}))
         tmp.replace(OUT)
     except BaseException:
-        unpin(base, kept.values())
+        # The executor context has joined every worker before rollback. Some
+        # successful/uncertain pins may never have reached the kept dictionary.
+        unpin(base, pins.entries())
         raise
-    unpin(base, previous)
+    retained = {entry["saved"]["capture"]["id"] for entry in kept.values()}
+    unpin(base, [entry for entry in pins.entries() if entry["saved"]["capture"]["id"] not in retained])
+    unpin(base, [entry for entry in previous if entry["saved"]["capture"]["id"] not in retained])
     print(f"\nKept {len(kept)} cameras, dropped {len(dropped)}. Wrote {OUT}")
     return 0 if kept else 1
 
