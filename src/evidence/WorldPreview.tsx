@@ -10,7 +10,7 @@ export function WorldPreview({ reference, gate, token, onActive }: { reference: 
   const [busy, setBusy] = useState(false), [error, setError] = useState(''), [frame, setFrame] = useState(''), [results, setResults] = useState<WorldResults | null>(null);
   const socket = useRef<WebSocket | null>(null), mounted = useRef(true), session = useRef<WorldStatus | null>(null);
   const sessionToken = useRef(''), heartbeat = useRef<ReturnType<typeof setInterval> | null>(null), onActiveRef = useRef(onActive); onActiveRef.current = onActive;
-  const fetchResults = async (id: string) => { try { const value = await worldApi.results(id, sessionToken.current); if (mounted.current) setResults(value); } catch (cause) { if (mounted.current) setError(cause instanceof Error ? cause.message : 'Retained results are not available yet.'); } };
+  const fetchResults = async (id: string) => { try { const value = await worldApi.results(id, sessionToken.current); if (mounted.current) { setResults(value); session.current = value.session; setStatus(value.session); if (terminal(value.session.state)) onActiveRef.current(false); } } catch (cause) { if (mounted.current) setError(cause instanceof Error ? cause.message : 'Retained results are not available yet.'); } };
   const controls = useMemo(() => new HumanControls(command => { if (socket.current?.readyState === WebSocket.OPEN) socket.current.send(JSON.stringify(command)); }), []);
   const stop = async () => {
     controls.stop();

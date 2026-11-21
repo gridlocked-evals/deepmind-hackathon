@@ -101,6 +101,34 @@ def test_contradictory_permissions_are_rejected_before_any_model_call(tmp_path):
             compile_with(tmp_path / str(len(kw)), [carbon_ok()], **kw)
 
 
+@pytest.mark.parametrize("forbidden", [[], ["bike_lane"]])
+def test_preset_requires_permission_for_its_destination_before_carbon(tmp_path, forbidden):
+    provider = FakeProvider()
+    provider.carbon = [carbon_ok()]
+    store = ArtifactStore(tmp_path / "pipeline")
+
+    async def run():
+        async with client(provider) as http:
+            with pytest.raises(EditRequestError, match="result class bike_lane"):
+                await compile_edit(gateway(tmp_path, http), store, batch=batch(),
+                                   preset_name="protected_bike_lane", mayor_request="Make a bike lane.",
+                                   allowed=["parking_lane"], forbidden=forbidden)
+
+    asyncio.run(run())
+    assert provider.requests == [] and store.list("edits") == []
+
+
+@pytest.mark.parametrize("forbidden", [[], ["planter"]])
+def test_modify_cannot_create_a_destination_outside_request_permissions(tmp_path, forbidden):
+    output = carbon_ok()
+    output["operations"][1].update(op="modify", target="parking_lane", becomes="planter")
+    [bundle], provider, _ = compile_with(tmp_path, [output],
+                                       allowed=["parking_lane", "bike_lane"], forbidden=forbidden)
+    assert provider.count("gemini-4-carbon") == 1
+    assert bundle.streetEdit.status == "rejected" and bundle.streetEdit.operations == []
+    assert any("creates planter" in error for error in bundle.validationErrors)
+
+
 def test_busway_and_plaza_have_their_own_semantics(tmp_path):
     bus = carbon_ok(operations=[{**carbon_ok()["operations"][0], "becomes": "bus_lane"}],
                     laneUse={"allowed": ["bus", "emergency"], "forbidden": ["general_traffic"]},

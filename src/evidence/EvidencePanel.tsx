@@ -22,7 +22,8 @@ export function EvidencePanel({ camera, open, onClose }: { camera: CameraSource 
     return () => { clearInterval(timer); document.removeEventListener('visibilitychange', refresh); controller.cancelHistory(); };
   }, [controller, camera?.id, camera?.kind, open]);
   useEffect(() => { if (open) heading.current?.focus(); }, [open]);
-  useEffect(() => { setReview(null); setShowOriginal(false); }, [state.capture?.capture.id, camera?.id, state.extraction?.id]);
+  useEffect(() => { setShowOriginal(false); }, [state.capture?.capture.id, camera?.id]);
+  useEffect(() => { setReview(null); }, [state.capture?.capture.id, camera?.id, state.extraction?.id]);
   if (!open) return null;
   const current = state.sourceId === camera?.id, history = current ? state.history : null, saved = current ? state.capture : null, capture = saved?.capture;
   const extraction = current ? state.extraction : null, busy = current ? state.busy : null, bounds = history?.history.segmentBoundariesS ?? [];

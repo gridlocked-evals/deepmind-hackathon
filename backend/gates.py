@@ -130,8 +130,11 @@ def deterministic_checks(store: ArtifactStore, bundle: EditBundle, record: dict)
                  for x, y in op.region.points)
     add("coordinates", inside and bool(edit.operations), "all operation regions are normalized image coordinates")
     allowed = all(op.target in edit.permissions.allowed and op.target not in edit.permissions.forbidden
+                  and (op.op != "modify" or (bundle.operationResults.get(op.id) in edit.permissions.allowed
+                       and bundle.operationResults.get(op.id) not in edit.permissions.forbidden))
                   for op in edit.operations)
-    add("permissions", edit.status == "compiled" and allowed, "every operation target is permitted by the edit")
+    add("permissions", edit.status == "compiled" and allowed,
+        "every operation's source and resulting class are permitted by the edit")
     return checks
 
 

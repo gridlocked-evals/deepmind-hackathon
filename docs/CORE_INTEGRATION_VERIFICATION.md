@@ -21,3 +21,15 @@ Human annotation tooling binds reviews to exact extraction reports and frame has
 Genie is optional and defaults off. Capture, observations, edit compilation and reference/gate review remain independent of world generation. Retained world results report generated provenance and explicitly mark temporal judgments as not run when the runtime has no judge integration. Full #12 acceptance still requires the live Hydrogen driving loop and temporal judge integration/verification.
 
 All model checks in this integration use isolated fixtures or disabled providers. No new paid model requests or credit-balance claims are made.
+
+## Final integrated checks
+
+- Backend: 395 tests passed. The full sandbox run passed 394; the remaining H100 helper regression required a temporary loopback socket and passed when rerun with socket permission. No H100 job was launched.
+- Frontend: 53 tests passed; production build and generated-contract drift check passed. Vite retains its existing large-bundle advisory.
+- Real browser: desktop 1200×900 and mobile 390×844, with no horizontal overflow or console errors. The tablet toolbar overlap found during review was fixed and rechecked.
+- A fresh recorder accepted its initially empty buffer, then retained 25.025 seconds. The UI selected and saved a 15.015-second, 225-frame prefix. Stop retained the buffered interval. A failed extraction preserved the saved capture and reported one attempted and two unprocessed windows.
+- Switching to a new camera cleared the previous camera's evidence from view. Returning restored its retained capture. Snapshot capture and original-pixel review worked; failed extraction left original media open. Escape closed the panel and returned focus to its opener.
+- Genie began unchecked; locally opting in still left creation disabled without an accepted image gate. The option was returned to off.
+- The isolated browser checks recorded two rejected model attempts, zero provider dispatches and zero charged dollars. Both Gemini credentials were deliberately absent from this preview.
+
+Screenshots remain local under ignored `data/ui-integration/evidence-desktop.jpg` and `evidence-mobile.jpg`. The real application credentials and new local operator token remain in ignored `.env`.
