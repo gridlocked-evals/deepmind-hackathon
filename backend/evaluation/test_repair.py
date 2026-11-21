@@ -83,6 +83,21 @@ def test_packet_has_no_adversary_or_test_data():
         build_packet([leaky], TEST_SUITE)
 
 
+def test_unseen_hazard_and_send_timing_stay_out_of_packet():
+    script = AttackScript(attack_type=PED, steering_text=DEV_TEXT, trigger_frame=24)
+    record = AttackRecord(script=script, session_id="d1", send_frame=24, source="adaptive")
+    unseen = dict(record=record, required_lead_frames=36, sample_every=6, window_end=264)  # 264 = send + window
+    never = ScoredEpisode(episode=DEV, score=AttackScore(**unseen, outcome="void", void_reason="never_rendered"))
+    paired = ScoredEpisode(episode=DEV, score=AttackScore(**unseen, outcome="unresolved",
+                                                          paired_void_reason="never_rendered"))
+    packet = build_packet([never, paired], TEST_SUITE)  # also runs check_packet
+    for row in packet:
+        assert row["hazard"] is None and row["observed_frames"] is None and "window_end" not in row
+    assert PED.value not in json.dumps(packet) and "264" not in json.dumps(packet)
+    seen = build_packet([DEV_FAIL], TEST_SUITE)[0]
+    assert seen["hazard"] == PED.value and seen["observed_frames"] == 240 and "window_end" not in seen
+
+
 def test_test_split_source_raises():
     with pytest.raises(HoldoutError):
         build_packet([scored(ep("t1", "test", "cam9"), TEST_SUITE[0], "failed")], TEST_SUITE)
