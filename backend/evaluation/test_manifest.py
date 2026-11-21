@@ -138,7 +138,9 @@ def test_one_addition_only_before_final_run_and_pinned_by_it(tmp_path):
     with pytest.raises(ValueError, match="at most one"):
         add_fresh_capture(path, ep("fresh2", "test", hash="1" * 64), pinned)
     run = FinalRun(path, pinned)
-    assert (tmp_path / "lock.json.opened").read_text() == run.full_sha256 == verify_lock(path, pinned).full_sha256
+    marker = json.loads((tmp_path / "lock.json.opened").read_text())
+    assert marker == {"full_sha256": run.full_sha256, "plan_sha256": None}
+    assert run.full_sha256 == verify_lock(path, pinned).full_sha256
     with pytest.raises(HoldoutError, match="already opened"):
         add_fresh_capture(path, ep("fresh2", "test", hash="1" * 64), pinned)
     # Swapping the addition by hand keeps the core hash but breaks the pinned full hash.
@@ -170,3 +172,11 @@ def test_final_run_reads_fail_after_lock_changes(tmp_path):
     path.write_text(path.read_text().replace('"t1"', '"t1x"'))  # edit the lock after the run was opened
     with pytest.raises(ValueError, match="changed"):
         read_source(tmp_path / "test.ts", None, run)
+
+
+def test_old_plain_hash_marker_still_loads(tmp_path):
+    path = tmp_path / "lock.json"
+    pinned = lock(manifest(ep("d1"), ep("t1", "test", hash="e" * 64)), path)
+    (tmp_path / "lock.json.opened").write_text(verify_lock(path, pinned).full_sha256)  # pre-plan format
+    run = FinalRun(path, pinned)
+    assert run.plan_sha256 is None and run.verify().sha256 == pinned
