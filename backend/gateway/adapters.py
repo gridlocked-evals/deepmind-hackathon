@@ -175,7 +175,12 @@ class HTTPAdapter:
                         raise GatewayError(ErrorCode.INVALID_OUTPUT)
             def invalid_constant(_):
                 raise ValueError()
-            raw = json.loads(data, parse_constant=invalid_constant)
+            def finite_float(value):
+                number = float(value)
+                if not math.isfinite(number):
+                    raise ValueError()
+                return number
+            raw = json.loads(data, parse_constant=invalid_constant, parse_float=finite_float)
             if not isinstance(raw, dict):
                 raise GatewayError(ErrorCode.INVALID_OUTPUT)
             identifier = provider_id(raw.get("id"), self.api_key) or identifier

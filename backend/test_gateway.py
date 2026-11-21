@@ -352,6 +352,44 @@ def test_invalid_decisions_numbers_finalize_attempt_and_allow_next_call(tmp_path
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("field", ["confidence", "usage"])
+@pytest.mark.parametrize("exponent", ["1e400", "-1e400"])
+def test_overflowing_json_exponents_finalize_without_retaining_invalid_evidence(tmp_path, field, exponent):
+    questions = {"visible": {"type": "noul", "instructions": "Is it visible?"}}
+    requests = []
+
+    def handler(request):
+        requests.append(request)
+        response = {"answers": {"visible": {"type": "noul", "noul": .9, "confidence": .8}},
+                    "usage": {"total_input_tokens": 200, "total_output_tokens": 0, "total_tokens": 200}}
+        if len(requests) == 1:
+            if field == "confidence":
+                response["answers"]["visible"]["confidence"] = "overflow"
+            else:
+                response["usage"]["total_input_tokens"] = "overflow"
+        # Raw JSON is essential: json.dumps(inf) produces Infinity, which is
+        # already rejected by parse_constant rather than exercising parse_float.
+        content = json.dumps(response).replace('"overflow"', exponent).replace('0.8', '8e-1')
+        return httpx.Response(200, content=content, headers={"content-type": "application/json"})
+
+    async def run():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            config = settings(tmp_path, max_concurrency=1)
+            gateway = ModelGateway(config, client, api_key=KEY)
+            with pytest.raises(GatewayError) as error:
+                await gateway.judge(stage="image_gate", input_value="Street", context=CONTEXT, questions=questions)
+            assert error.value.code == ErrorCode.INVALID_OUTPUT
+            record, = gateway.ledger.attempts()
+            assert error.value.request_id == record["request_id"]
+            assert record["outcome"] == "invalid_output" and record["finished_at"] is not None
+            assert record["usage"] is None and record["charged_tokens"] == config.input_tokens_per_call
+            assert record["result_hash"] and gateway.slots._value == 1
+            result = await gateway.judge(stage="image_gate", input_value="Street", context=CONTEXT, questions=questions)
+            assert result.output["visible"]["confidence"] == .8 and len(requests) == 2
+            assert all(row["outcome"] != "pending" for row in gateway.ledger.attempts())
+    asyncio.run(run())
+
+
 def test_image_response_is_decoded_and_corruption_rejected(tmp_path):
     image = fixture_image()
     def handler(request):
