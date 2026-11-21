@@ -28,7 +28,7 @@ export interface AppliedEvent {
 }
 export interface EventRecord {
   eventId: string;
-  kind: 'requested' | 'applied' | 'scripted_collision' | 'disabled' | 'cleared' | 'not_applied_route_end';
+  kind: 'requested' | 'applied' | 'scripted_collision' | 'disabled' | 'maneuver_complete' | 'cleared' | 'not_applied_route_end';
   time: number;
   frame: number;
 }
@@ -44,6 +44,9 @@ interface EventDefinition {
   label: string;
   actorCount: number;
   contact: boolean;
+  completionKind?: 'disabled' | 'maneuver_complete';
+  /** Distance travelled along the actual route, rather than along its initial tangent. */
+  progressOffset?: (age: number, event: AppliedEvent) => number;
   sample: (age: number, event: AppliedEvent, pose: Pose) => ActorState[];
 }
 const registry = new Map<string, EventDefinition>();
@@ -75,7 +78,45 @@ registerEvent('stalled-vehicle', {
     return [actor(event, 0, pose, -4 * (1 - fraction) ** 2, 0, 0, fraction < 1 ? 8 * (1 - fraction) / duration : 0, fraction === 1)];
   },
 });
+registerEvent('cut-in-vehicle', {
+  label: 'Car cutting in', actorCount: 1, contact: false, completionKind: 'maneuver_complete',
+  progressOffset: age => 3 * age,
+  sample(age, event, pose) {
+    const approach = event.spec.parameters.approachSeconds, fraction = Math.min(1, age / approach);
+    const lateralSpeed = fraction < 1 ? 4.5 / approach : 0;
+    return [actor(event, 0, pose, 0, -4.5 * (1 - fraction), Math.atan2(lateralSpeed, 3), Math.hypot(3, lateralSpeed), false)];
+  },
+});
+registerEvent('hard-braking', {
+  label: 'Sudden hard braking', actorCount: 1, contact: false, completionKind: 'maneuver_complete',
+  progressOffset(age, event) {
+    const approach = event.spec.parameters.approachSeconds, elapsed = Math.min(age, approach);
+    return 12 * (elapsed - elapsed ** 2 / (2 * approach));
+  },
+  sample(age, event, pose) {
+    const speed = 12 * Math.max(0, 1 - age / event.spec.parameters.approachSeconds);
+    return [{ ...actor(event, 0, pose, 0, 0, 0, speed, false), braking: true }];
+  },
+});
+registerEvent('slow-traffic', {
+  label: 'Slow-moving traffic', actorCount: 1, contact: false, completionKind: 'maneuver_complete',
+  progressOffset: age => 2.5 * age,
+  sample(_age, event, pose) { return [actor(event, 0, pose, 0, 0, 0, 2.5, false)]; },
+});
+registerEvent('two-car-roadblock', {
+  label: 'Two-car roadblock', actorCount: 2, contact: false,
+  sample(_age, event, pose) {
+    return [actor(event, 0, pose, 0, -1.1, 0, 0, true), actor(event, 1, pose, 4, 1.1, 0, 0, true)];
+  },
+});
 export const eventTypes = () => [...registry].map(([type, entry]) => ({ type, label: entry.label }));
+/** Scripted distance at a given age; admission defaults to the maximum visible lifetime. */
+export function eventTravelDistance(spec: EventSpec, age = spec.parameters.approachSeconds + 20) {
+  const event: AppliedEvent = { spec, requestedAt: 0, appliedAt: 0, appliedFrame: 0, anchorProgress: 0 };
+  // Admission must not reveal a future cleanup time by changing whether an actor
+  // appears now. Reserve its maximum allowed lifetime, independent of durationSeconds.
+  return registry.get(spec.type)?.progressOffset?.(age, event) ?? 0;
+}
 
 function object(value: unknown, keys: string[]): Record<string, unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).some(key => !keys.includes(key))) throw new Error('Unsupported scenario fields.');
@@ -151,14 +192,15 @@ export function advanceEvents(state: EventState, time: number, progress: number,
       : event.trigger.kind === 'time' ? event.trigger.seconds : event.trigger.frame * EVENT_STEP;
     if (requestedAt === undefined || requestedAt > time + 1e-7 || (event.trigger.kind === 'manual' && !boundary)) continue;
     if (!applied.some(item => item.spec.id === event.id)) {
-      if (progress + event.parameters.distanceAheadM + 8 >= routeLength) { record(event.id, 'not_applied_route_end'); continue; }
+      if (progress + event.parameters.distanceAheadM + eventTravelDistance(event) + 8 >= routeLength) { record(event.id, 'not_applied_route_end'); continue; }
       applied.push({ spec: event, requestedAt, appliedAt: time, appliedFrame: Math.round(time / EVENT_STEP), anchorProgress: progress + event.parameters.distanceAheadM });
       record(event.id, 'applied');
     }
   }
   for (const event of applied) {
     const impact = event.appliedAt + event.spec.parameters.approachSeconds;
-    if (time + 1e-7 >= impact) record(event.spec.id, registry.get(event.spec.type)!.contact ? 'scripted_collision' : 'disabled');
+    const definition = registry.get(event.spec.type)!;
+    if (time + 1e-7 >= impact) record(event.spec.id, definition.contact ? 'scripted_collision' : definition.completionKind ?? 'disabled');
     if (time + 1e-7 >= impact + event.spec.durationSeconds) record(event.spec.id, 'cleared');
   }
   return { ...state, applied, log };
@@ -167,6 +209,7 @@ export function sampleEvents(state: EventState, time: number, poseAt: (progress:
   return state.applied.flatMap(event => {
     const age = time - event.appliedAt;
     if (age < 0 || age + 1e-7 >= event.spec.parameters.approachSeconds + event.spec.durationSeconds) return [];
-    return registry.get(event.spec.type)!.sample(age, event, poseAt(event.anchorProgress));
+    const definition = registry.get(event.spec.type)!;
+    return definition.sample(age, event, poseAt(event.anchorProgress + (definition.progressOffset?.(age, event) ?? 0)));
   });
 }

@@ -204,7 +204,7 @@ describe('adversary lane (#91)', () => {
     }
     expect(() => randomDecision(rng, [0, 10], 12)).toThrow(/budget/);
     const seen = new Set(Array.from({ length: 200 }, () => randomDecision(rng, [], 0)).map(item => `${item.action}:${item.event_type}`));
-    expect(seen).toEqual(new Set(['wait:null', 'attack:car-crash', 'attack:stalled-vehicle']));
+    expect(seen).toEqual(new Set(['wait:null', ...['car-crash', 'stalled-vehicle', 'cut-in-vehicle', 'hard-braking', 'slow-traffic', 'two-car-roadblock'].map(type => `attack:${type}`)]));
     const first = await drive({ mode: 'random', seed: 3, guardsIgnoreHazards: true }), second = await drive({ mode: 'random', seed: 3, guardsIgnoreHazards: true });
     expect(first.trace.adversary!.decisions).toEqual(second.trace.adversary!.decisions);
     expect(first.trace.adversary!.decisions.every(row => row.decidedAt % 3 === 0 && row.chosenBy === 'random')).toBe(true);

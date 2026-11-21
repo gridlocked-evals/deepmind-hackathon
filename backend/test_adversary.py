@@ -13,7 +13,7 @@ import pytest
 
 from backend.adversary import (
     AdversaryController, AdversaryDecision, AttackRequest, MAX_CALLS, MAX_TRIGGER_SECONDS,
-    REACTION_SECONDS, RUN_SECONDS, min_avoidable_distance, router,
+    REACTION_SECONDS, RUN_SECONDS, min_avoidable_distance, planning_speed, router,
 )
 from backend.driver import MAX_REQUEST_BYTES
 from backend.gateway import GatewayConfig, ModelGateway
@@ -21,7 +21,7 @@ from backend.gateway.contracts import ErrorCode, GatewayError, Service
 
 URL = "/api/adversary/attack"
 ATTACK = {"action": "attack", "event_type": "car-crash", "trigger_seconds": 8.0,
-          "parameters": {"distanceAheadM": 40.0, "approachSeconds": 2.0}, "durationSeconds": 8.0,
+          "parameters": {"distanceAheadM": 80.0, "approachSeconds": 2.0}, "durationSeconds": 8.0,
           "reason": "The car is cruising; a crash ahead tests braking."}
 WAIT = {"action": "wait", "event_type": None, "trigger_seconds": None, "parameters": None,
         "durationSeconds": None, "reason": "The car is still accelerating."}
@@ -78,7 +78,17 @@ def test_valid_attack_uses_carbon_adversary_stage_and_data_only_prompt():
     assert data["state"] == request_body()["state"] and data["previous_attacks"] == []
     assert data["budget"]["max_trigger_seconds"] == MAX_TRIGGER_SECONDS == RUN_SECONDS - 12 == 48
     assert data["budget"]["adversary_interval_seconds"] == 3
-    assert set(data["menu"]["event_types"]) == {"car-crash", "stalled-vehicle"}
+    assert set(data["menu"]["event_types"]) == {"car-crash", "stalled-vehicle", "cut-in-vehicle", "hard-braking", "slow-traffic", "two-car-roadblock"}
+
+
+@pytest.mark.parametrize("event_type", ["cut-in-vehicle", "hard-braking", "slow-traffic", "two-car-roadblock"])
+def test_new_hazards_are_accepted_and_preserve_model_choice(event_type):
+    choice = dict(ATTACK, event_type=event_type)
+    client, gateway, _ = client_for(FakeGateway(choice))
+    response = client.post(URL, json=request_body())
+    assert response.status_code == 200 and response.json()["decision"] == choice
+    prompt = json.loads(gateway.calls[0][1]["input_value"].split("Input JSON:\n")[1])
+    assert event_type in prompt["menu"]["event_types"]
 
 
 def test_valid_wait_leaves_slot_open_and_identical_replay_is_cached():
@@ -315,12 +325,12 @@ def test_unavoidable_attack_is_a_typed_error_not_clamped():
     speed = 10.0
     limit = min_avoidable_distance(speed)
     assert REACTION_SECONDS == 3 and limit == pytest.approx(10 * REACTION_SECONDS + 100 / 7 + 5)
-    client, _, _ = client_for(FakeGateway(dict(ATTACK, parameters={"distanceAheadM": limit - 0.1, "approachSeconds": 2.0})))
-    response = client.post(URL, json=request_body(speed=speed))
+    client, _, _ = client_for(FakeGateway(dict(ATTACK, trigger_seconds=6.0, parameters={"distanceAheadM": limit - 0.1, "approachSeconds": 2.0})))
+    response = client.post(URL, json=request_body(speed=speed,time=6.0))
     assert response.status_code == 502 and detail(response)["code"] == "unavoidable_attack"
     assert "decision" not in response.json()
-    client, _, _ = client_for(FakeGateway(dict(ATTACK, parameters={"distanceAheadM": limit + 0.1, "approachSeconds": 2.0})))
-    assert client.post(URL, json=request_body(speed=speed)).status_code == 200
+    client, _, _ = client_for(FakeGateway(dict(ATTACK, trigger_seconds=6.0, parameters={"distanceAheadM": limit + 0.1, "approachSeconds": 2.0})))
+    assert client.post(URL, json=request_body(speed=speed,time=6.0)).status_code == 200
 
 
 def test_model_may_use_the_exact_minimum_distance_advertised_in_its_prompt():
@@ -336,6 +346,31 @@ def test_model_may_use_the_exact_minimum_distance_advertised_in_its_prompt():
     distance = response.json()["decision"]["parameters"]["distanceAheadM"]
     assert distance >= min_avoidable_distance(8.0)
     assert distance == gateway.output["parameters"]["distanceAheadM"]
+
+
+def test_future_hazard_plans_for_acceleration_without_relabeling_observed_speed():
+    body = AttackRequest.model_validate(request_body(time=0.0, speed=0.0))
+    data = json.loads(AdversaryController.prompt(body).split("Input JSON:\n")[1])
+    assert data["state"]["speed_mps"] == 0.0
+    assert data["budget"]["planning_speed_mps"] == 11.176
+    assert data["budget"]["min_distance_ahead_m"] == 56.38
+    assert data["budget"]["min_distance_ahead_m"] >= min_avoidable_distance(11.176)
+    assert planning_speed(body.state, 0) == 0
+    # Trigger 3.1 is injected at 6 s, including the acceleration to that barrier.
+    assert planning_speed(body.state, 3.1) == 9
+
+
+@pytest.mark.parametrize("distance,accepted", [(25.0, False), (21.0, False), (56.38, True)])
+def test_future_attack_is_validated_for_its_trigger_speed(distance, accepted):
+    choice = dict(ATTACK, trigger_seconds=12.0, parameters={"distanceAheadM": distance, "approachSeconds": 1.5})
+    client, gateway, _ = client_for(FakeGateway(choice))
+    response = client.post(URL, json=request_body(time=0.0, speed=0.0))
+    if accepted:
+        assert response.status_code == 200 and response.json()["decision"] == choice
+    else:
+        assert response.status_code == 502 and detail(response)["code"] == "unavoidable_attack"
+        assert client.post(URL, json=request_body(time=0.0, speed=0.0)).json() == response.json()
+    assert len(gateway.calls) == 1
 
 
 @pytest.mark.parametrize("path,value", [

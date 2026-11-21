@@ -4,6 +4,8 @@ Explore New York through its public roadway cameras, pick a street, and give Gem
 
 **Traffic demo** restores the original Vestry Street scene: 24 surrounding vehicles and the ego SUV, authored signals, and a 60-second replay. **Start scenario with Gemini** uses the backend's existing Gemini credential for up to 60 Decisions model decisions and 60 simulated seconds. The car keeps moving while the next decision is requested, with a one-second refresh interval and a three-second command freshness limit. Camera footage runs independently; model driving uses structured simulated state. Background traffic remains authored replay, and camera-image perception is not connected to this view.
 
+**NYC journey** runs successive street trips with Carbon choosing hazards. It continues automatically and restarts from a random NYC point after 25 simulated seconds without meaningful progress. See [continuous journeys](docs/CONTINUOUS_JOURNEY.md) for controls, retained results, and timing limits.
+
 **[Setup and controls](RUNNING.md)** · [Driver API](docs/DRIVER_API.md) · [Live driver verification](docs/DRIVER_VERIFICATION.md) · [Architecture](docs/ARCHITECTURE.md) · [Camera API](docs/CAMERA_API.md) · [Verification](docs/VERIFICATION.md)
 
 [Implementation plan](GOTHAM_FORGE_PLAN.md) · [Element 119 contracts](docs/CONTRACTS.md) · [Source attribution](THIRD_PARTY_NOTICES.md)

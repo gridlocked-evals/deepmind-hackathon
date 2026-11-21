@@ -49,7 +49,7 @@ export function ScenarioPanel({ plan, onChange, driver, onReplay, onBaseline }: 
   };
   return <section className="scenario-panel" aria-labelledby="scenario-heading">
     <div className="scenario-heading"><h3 id="scenario-heading">Make something happen</h3><span>SCENARIO LAB</span></div>
-    <p>Watch a crash unfold, then inspect how the driver reacts.</p>
+    <p>Choose a traffic hazard, then inspect how the driver reacts.</p>
     <fieldset disabled={driver.active}>
       <label>Event<select aria-label="Scenario preset" value={event.type} onChange={e => change(preset(e.target.value))}>
         {eventTypes().map(option => <option key={option.type} value={option.type}>{option.label}</option>)}
@@ -78,7 +78,7 @@ export function ScenarioPanel({ plan, onChange, driver, onReplay, onBaseline }: 
         </div>;
       })}
     </div>
-    <small>Manual triggers apply before the next decision. The crash is scripted; Gemini controls the following car.</small>
+    <small>Manual triggers apply before the next decision. Hazard motion is scripted; Gemini controls the following car.</small>
     <button type="button" className="scenario-baseline" disabled={!driver.canStart} onClick={() => { importRevision.current++; onBaseline(); }}>Run baseline without hazards</button>
     {trace && summary && !driver.replaying && <details className="scenario-results" open={trace.terminal.reason !== 'running'}>
       <summary>{trace.mode === 'baseline' ? 'Baseline' : 'Event run'} · {trace.terminal.reason.replaceAll('-', ' ')}</summary>

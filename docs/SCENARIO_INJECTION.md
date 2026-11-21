@@ -10,7 +10,7 @@ proposals, actual movement, and controller interventions are separate.
 ## Try the demonstration
 
 1. Open **Traffic demo**, then **Gemini driver**.
-2. Choose **Car crash ahead** (default) or **Stalled vehicle**. Configure distance
+2. Choose one of the six events below. Configure distance
    ahead, clearance duration, and a simulation-time or manual trigger.
 3. Choose **Start scenario with Gemini**. The default event applies at 3 seconds,
    animates for 2 seconds, and clears 8 seconds after impact (at 13 seconds).
@@ -23,6 +23,19 @@ proposals, actual movement, and controller interventions are separate.
 6. Use **Replay recorded run**, or import its JSON later, to replay the exact
    recorded frames without making model calls. The simulation timeline seeks
    this recording; seeking does not re-inject an event.
+
+| Event | Visible behaviour |
+| --- | --- |
+| Car crash ahead | Two cars collide, stop and become disabled. |
+| Stalled vehicle | A car slows to a stop and becomes disabled. |
+| Car cutting in | A car merges from the side, then continues at 3 m/s. |
+| Sudden hard braking | A leading car brakes from 12 m/s to zero. |
+| Slow-moving traffic | A leading car keeps moving at 2.5 m/s. |
+| Two-car roadblock | Two stationary cars obstruct the route without colliding. |
+
+Carbon and the random adversary can select all six types. Each still uses the
+same attack limits, safety checks, observation and outcome calculation. Carbon's
+choice is not a guaranteed rotation through every type.
 
 The default traffic scene still has its authored signal program and replayed
 background traffic. Those can also cause stops. Review the exact observations
@@ -57,12 +70,15 @@ identify when the selected action actually starts controlling the car.
 Triggers are `manual`, `time` (0–24 seconds), or `frame` (integer 0–240 at
 0.1-second physics steps). Files may contain one to four events with unique IDs.
 Distances are 20–100 m ahead of ego **when the event applies**, approach animation
-is 1–4 seconds, and stationary duration is 1–20 seconds. Removal is an explicit
+is 1–4 seconds, and duration after the approach phase is 1–20 seconds. Moving
+hazards continue during that interval. Removal is an explicit
 scripted clearance operation, not a claim that a vehicle physically disappeared.
 Actor IDs are derived as `event-<event-id>-<index>` and preallocated for rendering.
 Unsupported schema/runtime/type/cleanup, extra fields, non-finite values and
 out-of-bounds parameters are rejected. There is no Genie or SUMO injector here.
-Routes too short for the configured ahead distance are rejected before inference.
+Routes too short for the configured ahead distance and moving hazard's maximum
+travel distance are rejected before inference. The travel allowance is independent
+of the chosen clearance duration, so admission cannot leak future cleanup timing.
 If a later trigger runs out of road, the trace records `not_applied_route_end`
 once; it does not silently reposition the event behind ego or count it as avoided.
 
@@ -79,10 +95,12 @@ the normal same-route/same-heading lead-vehicle filter.
 implementation with `registerEvent(type, {label, actorCount, contact, sample})`.
 The sampler receives elapsed event time, the validated applied event and its
 route pose. Return up to the declared one or two actor states with derived IDs.
-It must not mutate the scene or make network/model calls. `contact` specifies
-whether the scripted terminal event is a background collision or a disabled
-vehicle. `stalled-vehicle` is the second implementation and uses the same driver
-loop. New parameter shapes require a scenario-schema version change; JSON import
+It must not mutate the scene or make network/model calls. `contact` marks a
+scripted background collision. Non-collision events default to a `disabled` log
+record; moving or braking manoeuvres use `completionKind: 'maneuver_complete'`.
+An optional `progressOffset(age, event)` moves the sampled pose along the actual
+route, including turns, rather than along its initial tangent. All six built-in
+events use the same driver loop. New parameter shapes require a scenario-schema version change; JSON import
 does not execute arbitrary code or register executable event handlers.
 
 ## Trace, comparison and replay

@@ -3,7 +3,7 @@ import { demoScenario } from '../scene/DemoScenarioProvider';
 import { ADVERSARY_PLAN, adversaryScore, applyDue, attackRecords, separation } from './adversary';
 import type { AdversaryDecisionRecord, AttackRecord } from './adversary';
 import { createTrace, footprintContact, recordFrame } from './trace';
-import { createDriverSimulation } from '../agent/physics';
+import { advanceDriver, createDriverSimulation } from '../agent/physics';
 import { createEvents, withEventActors } from './events';
 import type { ScenarioBundle } from '../types';
 
@@ -41,6 +41,34 @@ describe('adversary physical outcomes and clearance denominators', () => {
     expect(attackRecords(trace)[0]).toMatchObject({ outcome: 'unresolved', resolution: 'safe_hold' });
     state = { ...state, time: 1, progress: 60, speed: 5 };
     recordFrame(trace, state);
+    expect(attackRecords(trace)[0]).toMatchObject({ outcome: 'cleared', resolution: null });
+  });
+
+  it.each(['slow-traffic', 'cut-in-vehicle'] as const)('does not clear %s still ahead around a bend after ego passes its initial anchor', type => {
+    const scene: ScenarioBundle = { ...demoScenario, id: 'moving-folded-route', motionSource: 'driving-route', geometryKind: 'street-route',
+      geometry: { roads: [], sidewalks: [], crosswalks: [], lanes: [], route: [[0, 0], [50, 0], [50, 10], [-100, 10]] },
+      actors: [demoScenario.actors.find(actor => actor.role === 'ego')!],
+      frames: [{ time: 0, signal: 'green', actors: [{ id: 'ego', x: 0, y: 0, heading: 0, speed: 0, braking: false }] }] };
+    let state = { ...createDriverSimulation(withEventActors(scene, ADVERSARY_PLAN)), events: createEvents(ADVERSARY_PLAN, 'event') };
+    const trace = createTrace(state, 'moving-folded-route-fixture', 'test-fixture');
+    const decision: AdversaryDecisionRecord = { attackIndex: 0, decidedAt: 0, chosenBy: 'random', modelId: 'seeded-random', requestId: 'fixture', injection: null,
+      decision: { action: 'attack', event_type: type, trigger_seconds: 0,
+        parameters: { distanceAheadM: 35, approachSeconds: 2 }, durationSeconds: 20, reason: 'Fixture' } };
+    trace.adversary = { mode: 'random', seed: 1, decisions: [decision], attacks: [], run: null, error: null };
+    state = applyDue(state, [decision]) as typeof state;
+    trace.plan = structuredClone(state.events.plan);
+    recordFrame(trace, state);
+    for (let i = 0; i < 200; i++) {
+      state = advanceDriver(state, { action: 'cruise', target_speed_mps: 2.4, confidence: 1, reason: 'Follow fixture traffic' }, .1) as typeof state;
+      recordFrame(trace, state);
+    }
+    expect(state.progress).toBeGreaterThan(40);
+    expect(state.progress).toBeLessThan(50);
+    // At 20 s both cars remain ahead along the route, despite appearing behind the ego's heading.
+    expect(trace.frames.at(-1)!.actors.find(actor => actor.id === 'event-attack-1-0')!.x).toBeCloseTo(type === 'slow-traffic' ? 25 : 15);
+    expect(attackRecords(trace)[0]).toMatchObject({ outcome: 'unresolved', resolution: 'horizon_censored' });
+    // A recorded pose beyond that current progress still earns physical clearance.
+    recordFrame(trace, { ...state, time: 20.1, progress: 105, speed: 5 });
     expect(attackRecords(trace)[0]).toMatchObject({ outcome: 'cleared', resolution: null });
   });
 

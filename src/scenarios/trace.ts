@@ -8,7 +8,13 @@ import type { AdversaryTrace } from './adversary';
 import { EVENT_STEP, parseScenario } from './events';
 import type { EventRecord, ScenarioPlan } from './events';
 
-export type Terminal = 'running' | 'route-complete' | 'decision-limit' | 'time-limit' | 'interrupted' | 'reset' | 'error';
+export type Terminal = 'running' | 'route-complete' | 'decision-limit' | 'time-limit' | 'scripted-complete' | 'interrupted' | 'reset' | 'error';
+export interface ScriptedOpeningTrace {
+  controller: 'scripted-opening-v1';
+  passingSpeedMps: number;
+  complete: boolean;
+  events: { id: string; type: 'car-crash' | 'stalled-vehicle'; appliedAt: number | null; passedAt: number | null; rejoinedAt: number | null }[];
+}
 export interface TraceStep {
   step: number;
   observation: DriverObservation;
@@ -32,8 +38,10 @@ export interface Telemetry {
 export interface RunTrace {
   schemaVersion: 'gridlocked-driver-trace.v2';
   provenance: 'synthetic-structured-state';
-  modelSource: 'live-model' | 'test-fixture';
-  modelPolicy: { promptVersion: 'sim-driver-decisions-v3'; service: 'decisions'; modelId: 'gemini-decision-1' };
+  modelSource: 'live-model' | 'test-fixture' | 'scripted-demo';
+  modelPolicy: { promptVersion: 'sim-driver-decisions-v3'; service: 'decisions'; modelId: 'gemini-decision-1' }
+    | { promptVersion: 'scripted-opening-v1'; service: 'scripted'; modelId: null };
+  scriptedOpening?: ScriptedOpeningTrace;
   runId: string;
   createdAt: string;
   mode: 'baseline' | 'event';
@@ -68,7 +76,8 @@ export function footprintContact(a: ActorState, da: ActorDefinition, b: ActorSta
 export function createTrace(state: DriverSimulation, runId: string, modelSource: RunTrace['modelSource'] = 'live-model'): RunTrace {
   if (!state.events) throw new Error('Missing scenario event state.');
   const trace: RunTrace = { schemaVersion: 'gridlocked-driver-trace.v2', provenance: 'synthetic-structured-state', modelSource,
-    modelPolicy: { promptVersion: 'sim-driver-decisions-v3', service: 'decisions', modelId: 'gemini-decision-1' },
+    modelPolicy: modelSource === 'scripted-demo' ? { promptVersion: 'scripted-opening-v1', service: 'scripted', modelId: null }
+      : { promptVersion: 'sim-driver-decisions-v3', service: 'decisions', modelId: 'gemini-decision-1' },
     runId, createdAt: new Date().toISOString(), mode: state.events.mode, plan: structuredClone(state.events.plan),
     scene: structuredClone({ ...state.scenario, frames: [] }),
     limits: { maxDecisions: MAX_DRIVER_STEPS, decisionIntervalSeconds: DECISION_INTERVAL_SECONDS, maxCommandAgeSeconds: MAX_COMMAND_AGE_SECONDS,
