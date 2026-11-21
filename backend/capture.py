@@ -19,14 +19,20 @@ from uuid import uuid4
 import httpx
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import Response
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from .feeds import HLS_SOURCES, utc_now
 from .contracts import CaptureContext
 from .proxy import MAX_MEDIA, MAX_PLAYLIST, open_upstream, validate_url
 
 MAX_EPISODE_SECONDS = 120.0
+MAX_DECODER_ALLOCATION = 64 * 1024 * 1024
+MAX_IMAGE_PIXELS = 16 * 1024 * 1024
+MAX_IMAGE_DIMENSION = 8192
+MAX_MANIFEST_BYTES = 4 * 1024 * 1024
 _ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{1,95}\Z")
+_SHA = re.compile(r"[a-f0-9]{64}\Z")
+_MEDIA_PATH = re.compile(r"(prefix|suffix)/[0-9]{4,6}\.(ts|image)\Z")
 
 
 def digest(data: bytes) -> str:
@@ -51,6 +57,58 @@ def fail(code: int, detail: str) -> HTTPException:
     return HTTPException(code, detail)
 
 
+def read_json(path: Path, maximum: int = MAX_MANIFEST_BYTES) -> dict:
+    try:
+        with path.open("rb") as stream:
+            raw = stream.read(maximum + 1)
+        if len(raw) > maximum:
+            raise ValueError()
+        value = json.loads(raw)
+        if not isinstance(value, dict):
+            raise ValueError()
+        return value
+    except (OSError, ValueError, TypeError):
+        raise fail(409, "Stored capture metadata is missing, corrupted, or exceeds its size limit.") from None
+
+
+def valid_dimensions(width: int, height: int) -> bool:
+    return 0 < width <= MAX_IMAGE_DIMENSION and 0 < height <= MAX_IMAGE_DIMENSION and width * height <= MAX_IMAGE_PIXELS
+
+
+async def run_decoder(command: list[str], *, output_limit: int, timeout: float) -> tuple[bytes, bytes, int]:
+    """Bound both pipes and the full process lifetime, including after pipe closure."""
+    try:
+        process = await asyncio.create_subprocess_exec(*command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+    except OSError:
+        raise fail(503, "Required media decoding tools could not be started.") from None
+
+    async def read_bounded(stream, limit):
+        data = bytearray()
+        while chunk := await stream.read(64 * 1024):
+            if len(data) + len(chunk) > limit:
+                raise fail(413, "Media decoder output exceeds its preparation budget.")
+            data.extend(chunk)
+        return bytes(data)
+
+    tasks = [asyncio.create_task(read_bounded(process.stdout, output_limit)),
+             asyncio.create_task(read_bounded(process.stderr, 256 * 1024)),
+             asyncio.create_task(process.wait())]
+    try:
+        output, errors, code = await asyncio.wait_for(asyncio.gather(*tasks), timeout)
+        return output, errors, code
+    except BaseException:
+        if process.returncode is None:
+            try:
+                process.kill()
+            except ProcessLookupError:
+                pass
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        await process.wait()
+        raise
+
+
 async def audit_video(data: bytes, expected_duration: float) -> dict:
     """Decode/count every frame. Reject unavailable tooling and truncated captures."""
     if not shutil.which("ffprobe"):
@@ -58,30 +116,24 @@ async def audit_video(data: bytes, expected_duration: float) -> dict:
     with tempfile.TemporaryDirectory(prefix="element119-audit-") as directory:
         path = Path(directory) / "segment.ts"
         path.write_bytes(data)
-        process = await asyncio.create_subprocess_exec(
-            "ffprobe", "-v", "error", "-select_streams", "v:0", "-count_frames",
+        output, errors, code = await run_decoder([
+            "ffprobe", "-v", "error", "-max_alloc", str(MAX_DECODER_ALLOCATION), "-protocol_whitelist", "file,pipe",
+            "-select_streams", "v:0", "-count_frames",
             "-show_entries", "stream=nb_read_frames,duration,width,height:format=duration",
-            "-of", "json", str(path), stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        try:
-            output, errors = await asyncio.wait_for(process.communicate(), timeout=20)
-        except (TimeoutError, asyncio.CancelledError):
-            process.kill()
-            await process.communicate()
-            raise
+            "-of", "json", str(path)], output_limit=64 * 1024, timeout=20)
         try:
             value = json.loads(output)
             stream = value["streams"][0]
             measured = float(stream.get("duration") or value["format"]["duration"])
             count = int(stream["nb_read_frames"])
-            if (process.returncode or errors.strip() or count <= 0 or not math.isfinite(measured)
+            width, height = int(stream["width"]), int(stream["height"])
+            if (code or errors.strip() or not 0 < count <= 100_000 or not valid_dimensions(width, height) or not math.isfinite(measured)
                     or abs(measured - expected_duration) > max(0.25, expected_duration * 0.05)):
                 raise ValueError()
         except (ValueError, KeyError, IndexError, TypeError):
             raise fail(502, "Video duration/frame audit failed; incomplete media was not retained.") from None
         return {"durationSeconds": measured, "frameCount": count,
-                "width": int(stream["width"]), "height": int(stream["height"])}
+                "width": width, "height": height}
 
 
 async def audit_snapshot(data: bytes) -> None:
@@ -90,20 +142,14 @@ async def audit_snapshot(data: bytes) -> None:
     with tempfile.TemporaryDirectory(prefix="element119-image-") as directory:
         path = Path(directory) / "snapshot.image"
         path.write_bytes(data)
-        process = await asyncio.create_subprocess_exec(
-            "ffprobe", "-v", "error", "-select_streams", "v:0", "-count_frames",
+        output, errors, code = await run_decoder([
+            "ffprobe", "-v", "error", "-max_alloc", str(MAX_DECODER_ALLOCATION), "-protocol_whitelist", "file,pipe",
+            "-select_streams", "v:0", "-count_frames",
             "-show_entries", "stream=nb_read_frames,width,height", "-of", "json", str(path),
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-        )
-        try:
-            output, errors = await asyncio.wait_for(process.communicate(), timeout=10)
-        except (TimeoutError, asyncio.CancelledError):
-            process.kill()
-            await process.communicate()
-            raise
+        ], output_limit=64 * 1024, timeout=10)
         try:
             stream = json.loads(output)["streams"][0]
-            if process.returncode or errors.strip() or int(stream["nb_read_frames"]) != 1 or min(int(stream["width"]), int(stream["height"])) <= 0:
+            if code or errors.strip() or int(stream["nb_read_frames"]) != 1 or not valid_dimensions(int(stream["width"]), int(stream["height"])):
                 raise ValueError()
         except (ValueError, KeyError, IndexError, TypeError):
             raise fail(502, "Snapshot decoding audit failed; incomplete image was not retained.") from None
@@ -183,7 +229,31 @@ class CaptureService:
         self.tasks: dict[str, asyncio.Task] = {}
         self.lock = asyncio.Lock()
         pins_path = self.root / "pins.json"
-        self.pins: dict[str, list[str]] = json.loads(pins_path.read_text()) if pins_path.exists() else {}
+        self.pins: dict[str, list[str]] = {}
+        rebuild = not pins_path.exists()
+        if not rebuild:
+            try:
+                pins = read_json(pins_path)
+                if any(not _ID.fullmatch(key) or not isinstance(jobs, list)
+                       or any(not isinstance(job, str) or not _ID.fullmatch(job) for job in jobs)
+                       for key, jobs in pins.items()):
+                    raise ValueError()
+                self.pins = pins
+            except (HTTPException, ValueError, TypeError):
+                # Preserve the damaged ledger for audit; never interpret damage as
+                # authorization to evict previously sealed evidence.
+                pins_path.replace(self.root / f"pins.corrupt-{uuid4().hex}.json")
+                rebuild = True
+        if rebuild:
+            self.pins = {path.name: ["capture-retention"] for path in (self.root / "episodes").iterdir()
+                         if path.is_dir() and _ID.fullmatch(path.name)}
+        # Preparation jobs are local and do not survive process restart. Persisted
+        # episode/observation ownership remains untouched.
+        cleaned = {capture: [job for job in jobs if not job.startswith("prepare_")]
+                   for capture, jobs in self.pins.items()}
+        if rebuild or cleaned != self.pins:
+            self.pins = cleaned
+            atomic_json(pins_path, self.pins)
 
     def _path(self, category: str, identifier: str) -> Path:
         if not _ID.fullmatch(identifier):
@@ -192,7 +262,35 @@ class CaptureService:
 
     def _load_ring(self, source_id: str) -> dict:
         path = self._path("rings", source_id) / "index.json"
-        return json.loads(path.read_text()) if path.exists() else {
+        if path.exists():
+            value = read_json(path)
+            if (value.get("sourceId") != source_id or not isinstance(value.get("recordingId"), str)
+                    or not _ID.fullmatch(value["recordingId"]) or not isinstance(value.get("segments"), list)
+                    or value.get("state") not in {"unverified", "connected", "unavailable"}):
+                raise fail(409, "Stored recording metadata failed its identity audit.")
+            try:
+                previous = None
+                for item in value["segments"]:
+                    if (type(item["sequence"]) is not int or item["sequence"] < 0
+                            or not isinstance(item["sha256"], str) or not _SHA.fullmatch(item["sha256"])
+                            or type(item["byteLength"]) is not int or not 0 < item["byteLength"] <= MAX_MEDIA
+                            or type(item["frameCount"]) is not int or item["frameCount"] <= 0):
+                        raise ValueError()
+                    for key in ("startSeconds", "endSeconds", "durationSeconds", "auditedDurationSeconds"):
+                        if type(item[key]) not in (int, float) or not math.isfinite(item[key]):
+                            raise ValueError()
+                    if item["endSeconds"] <= item["startSeconds"] or item["auditedDurationSeconds"] <= 0:
+                        raise ValueError()
+                    if previous and (item["sequence"] != previous["sequence"] + 1
+                                     or not math.isclose(item["startSeconds"], previous["endSeconds"], abs_tol=1e-8, rel_tol=0)):
+                        raise ValueError()
+                    if datetime.fromisoformat(item["receivedAt"]).tzinfo is None:
+                        raise ValueError()
+                    previous = item
+            except (KeyError, TypeError, ValueError):
+                raise fail(409, "Stored recording segment metadata failed its continuity audit.") from None
+            return value
+        return {
             "sourceId": source_id, "recordingId": f"rec_{uuid4().hex}", "segments": [],
             "state": "unverified", "checkedAt": None, "error": None,
         }
@@ -256,6 +354,10 @@ class CaptureService:
             url = playlist["variants"][0]
         else:
             raise fail(502, "HLS variant nesting exceeded the capture limit.")
+        async with self.lock:
+            prior = self._load_ring(source_id)["segments"]
+            if prior and playlist["segments"][-1]["sequence"] < prior[-1]["sequence"]:
+                raise fail(409, "Source sequence moved backwards. Restart recording to begin a new history.")
         for item in playlist["segments"]:
             async with self.lock:
                 ring = self._load_ring(source_id)
@@ -265,6 +367,7 @@ class CaptureService:
                 if prior and item["sequence"] != prior["sequence"] + 1:
                     raise fail(409, "Source history has a gap. Stop and restart recording before a new episode.")
             media, _ = await self._fetch(source_id, item["url"], MAX_MEDIA)
+            received_at = utc_now()
             audit = await self.auditor(media, item["durationSeconds"])
             async with self.lock:
                 ring = self._load_ring(source_id)
@@ -273,7 +376,7 @@ class CaptureService:
                     continue
                 start = prior["endSeconds"] if prior else 0.0
                 entry = {key: value for key, value in item.items() if key != "url"}
-                entry.update({"sha256": digest(media), "byteLength": len(media), "receivedAt": utc_now(),
+                entry.update({"sha256": digest(media), "byteLength": len(media), "receivedAt": received_at,
                               "startSeconds": start, "endSeconds": start + item["durationSeconds"],
                               "frameCount": audit["frameCount"], "auditedDurationSeconds": audit["durationSeconds"]})
                 directory = self._path("rings", source_id)
@@ -316,7 +419,15 @@ class CaptureService:
             raise fail(404, "Unknown continuous camera source.")
         if source_id not in self.tasks or self.tasks[source_id].done():
             async with self.lock:
-                ring = self._load_ring(source_id)
+                try:
+                    ring = self._load_ring(source_id)
+                except HTTPException as error:
+                    if error.status_code != 409:
+                        raise
+                    # Only the disposable live ring is reset. Sealed episodes and
+                    # their original source bytes remain independent and pinned.
+                    shutil.rmtree(self._path("rings", source_id), ignore_errors=True)
+                    ring = self._load_ring(source_id)
                 # A new recording may begin after a missed sequence; sealed episodes
                 # have independent bytes and survive clearing the bounded ring.
                 if ring["state"] == "unavailable":
@@ -331,7 +442,10 @@ class CaptureService:
                         raise
                     except (HTTPException, TimeoutError, OSError):
                         async with self.lock:
-                            ring = self._load_ring(source_id)
+                            try:
+                                ring = self._load_ring(source_id)
+                            except HTTPException:
+                                return
                             ring.update(state="unavailable", checkedAt=utc_now(), error="Recording paused after an upstream or audit failure.")
                             self._save_ring(ring)
                         return
@@ -357,21 +471,76 @@ class CaptureService:
         path = self._path("episodes", capture_id) / "manifest.json"
         if not path.is_file():
             raise fail(404, "Capture was not found.")
-        manifest = json.loads(path.read_text())
-        stored_hash = manifest.pop("manifestSha256")
-        if digest(canonical(manifest)) != stored_hash:
+        manifest = read_json(path)
+        stored_hash = manifest.pop("manifestSha256", None)
+        try:
+            valid_hash = isinstance(stored_hash, str) and _SHA.fullmatch(stored_hash) and digest(canonical(manifest)) == stored_hash
+        except (ValueError, TypeError):
+            valid_hash = False
+        if not valid_hash:
             raise fail(409, "Capture manifest integrity check failed.")
         manifest["manifestSha256"] = stored_hash
+        self._validate_manifest(manifest, capture_id)
         return manifest
+
+    @staticmethod
+    def _context(manifest: dict) -> CaptureContext:
+        fields = {name: manifest[name] for name in CaptureContext.model_fields}
+        for name in ("receivedAt", "sourceCapturedAt"):
+            if fields[name] is not None:
+                parsed = datetime.fromisoformat(fields[name].replace("Z", "+00:00"))
+                if parsed.tzinfo is None:
+                    raise ValueError("Capture timestamps must carry their UTC offset")
+                fields[name] = parsed.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+        return CaptureContext.model_validate(fields)
+
+    @classmethod
+    def _validate_manifest(cls, manifest: dict, capture_id: str) -> None:
+        try:
+            context = cls._context(manifest)
+            if context.captureId != capture_id or manifest["schemaVersion"] != "1.0":
+                raise ValueError()
+            items = manifest["media"]
+            if not isinstance(items, list) or not items:
+                raise ValueError()
+            paths, end, saw_suffix = set(), 0.0, False
+            for item in items:
+                path = item["path"]
+                match = _MEDIA_PATH.fullmatch(path) if isinstance(path, str) else None
+                if (not match or match[1] != item["partition"] or path in paths
+                        or not isinstance(item["sha256"], str) or not _SHA.fullmatch(item["sha256"])
+                        or type(item["byteLength"]) is not int or not 0 < item["byteLength"] <= MAX_MEDIA
+                        or type(item["frameCount"]) is not int or item["frameCount"] <= 0):
+                    raise ValueError()
+                paths.add(path)
+                start, stop = item["startSeconds"], item["endSeconds"]
+                if any(type(value) not in (int, float) or not math.isfinite(value) for value in (start, stop)):
+                    raise ValueError()
+                if not math.isclose(start, end, abs_tol=1e-8, rel_tol=0) or stop < start:
+                    raise ValueError()
+                if context.modality == "snapshot":
+                    if len(items) != 1 or start != 0 or stop != 0 or item["frameCount"] != 1 or item["partition"] != "prefix":
+                        raise ValueError()
+                elif stop <= start:
+                    raise ValueError()
+                if item["partition"] == "suffix":
+                    saw_suffix = True
+                    if start < context.allowedInterval.endSeconds - 1e-8:
+                        raise ValueError()
+                elif saw_suffix or stop > context.allowedInterval.endSeconds + 1e-8:
+                    raise ValueError()
+                end = stop
+            prefix_end = max(item["endSeconds"] for item in items if item["partition"] == "prefix")
+            if (context.allowedInterval.startSeconds != 0 or not math.isclose(end, context.durationSeconds, abs_tol=1e-8, rel_tol=0)
+                    or not math.isclose(prefix_end, context.allowedInterval.endSeconds, abs_tol=1e-8, rel_tol=0)):
+                raise ValueError()
+        except (ValueError, ValidationError, TypeError, KeyError, AttributeError):
+            raise fail(409, "Capture manifest fields, media paths, or source boundaries failed their integrity audit.") from None
 
     def capture_context(self, capture_id: str) -> CaptureContext:
         """Only the allowed source interval crosses into model jobs; no suffix facts."""
         manifest = self.manifest(capture_id)
-        fields = {name: manifest[name] for name in CaptureContext.model_fields}
-        for name in ("receivedAt", "sourceCapturedAt"):
-            if fields[name] is not None:
-                fields[name] = datetime.fromisoformat(fields[name].replace("Z", "+00:00")).astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
-        return CaptureContext.model_validate(fields)
+        return self._context(manifest)
 
     def pin(self, capture_id: str, job_id: str) -> None:
         self.manifest(capture_id)
@@ -392,6 +561,11 @@ class CaptureService:
             original_hash.update(data)
         manifest["originalMediaSha256"] = original_hash.hexdigest()
         manifest["manifestSha256"] = digest(canonical(manifest))
+        self._validate_manifest(manifest, manifest["captureId"])
+        if len(blobs) != len(manifest["media"]) or any(
+                path != item["path"] or len(data) != item["byteLength"] or digest(data) != item["sha256"]
+                for (path, data), item in zip(blobs, manifest["media"])):
+            raise fail(409, "Source file order, lengths, or hashes disagree with the capture manifest.")
         self._reserve(sum(len(data) for _, data in blobs) + len(canonical(manifest)) + 4096)
         directory = self._path("episodes", manifest["captureId"])
         directory.mkdir()
@@ -481,12 +655,12 @@ class CaptureService:
                 mime = response.headers["content-type"].split(";")[0]
         except (httpx.HTTPError, ValueError):
             raise fail(502, "Snapshot capture could not fetch complete media.") from None
+        received = utc_now()
         image_data = bytes(data)
         if not ((mime == "image/jpeg" and image_data.startswith(b"\xff\xd8") and image_data.endswith(b"\xff\xd9")) or
                 (mime == "image/png" and image_data.startswith(b"\x89PNG\r\n\x1a\n") and image_data.endswith(b"IEND\xaeB`\x82"))):
             raise fail(502, "Snapshot image framing audit failed.")
         await audit_snapshot(image_data)
-        received = utc_now()
         async with self.lock:
             previous_path = self._path("rings", source_id) / "snapshot.json"
             previous = json.loads(previous_path.read_text()) if previous_path.exists() else None
@@ -515,10 +689,34 @@ class CaptureService:
         item = manifest["media"][media_index]
         if item["partition"] != "prefix":
             raise fail(403, "Held-out suffix media is not available through inference routes.")
-        data = (self._path("episodes", capture_id) / item["path"]).read_bytes()
+        path = self._path("episodes", capture_id) / item["path"]
+        try:
+            if path.is_symlink() or path.parent.is_symlink():
+                raise OSError()
+            with path.open("rb") as stream:
+                data = stream.read(MAX_MEDIA + 1)
+        except OSError:
+            raise fail(409, "Capture media is missing or no longer an immutable local artifact.") from None
         if digest(data) != item["sha256"] or len(data) != item["byteLength"]:
             raise fail(409, "Capture media integrity check failed.")
         return data, item.get("mimeType", "video/mp2t")
+
+    def prefix_playlist(self, capture_id: str) -> str:
+        """Review the sealed original prefix through server-owned media routes."""
+        manifest = self.manifest(capture_id)
+        if manifest["modality"] != "video":
+            raise fail(422, "Snapshot captures have no video playlist.")
+        prefix = [(index, item) for index, item in enumerate(manifest["media"]) if item["partition"] == "prefix"]
+        durations = []
+        for index, item in prefix:
+            self.read_prefix(capture_id, index)  # Validate exact bytes before advertising this segment.
+            durations.append(item["endSeconds"] - item["startSeconds"])
+        lines = ["#EXTM3U", "#EXT-X-VERSION:3", f"#EXT-X-TARGETDURATION:{math.ceil(max(durations))}",
+                 "#EXT-X-MEDIA-SEQUENCE:0", "#EXT-X-PLAYLIST-TYPE:VOD"]
+        for (index, _), duration in zip(prefix, durations):
+            value = f"{duration:.9f}".rstrip("0").rstrip(".")
+            lines.extend([f"#EXTINF:{value},", f"/api/captures/episodes/{capture_id}/media/{index}"])
+        return "\n".join([*lines, "#EXT-X-ENDLIST", ""])
 
 
 class EpisodeRequest(BaseModel):
@@ -579,3 +777,11 @@ async def get_episode(capture_id: str, request: Request):
 async def get_media(capture_id: str, media_index: int, request: Request):
     data, mime = service(request).read_prefix(capture_id, media_index)
     return Response(data, media_type=mime, headers={"Cache-Control": "private, immutable", "X-Content-Type-Options": "nosniff"})
+
+
+@router.get("/episodes/{capture_id}/index.m3u8")
+async def get_prefix_playlist(capture_id: str, request: Request):
+    body = service(request).prefix_playlist(capture_id)
+    return Response(body, media_type="application/vnd.apple.mpegurl", headers={
+        "Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff",
+    })

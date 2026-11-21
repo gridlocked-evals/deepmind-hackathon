@@ -1,5 +1,43 @@
 # Verification record
 
+## Shared gateway and evidence workspace — November 21, 2026
+
+Integrated the team's merged gateway/session runtime (`origin/main` at `6ec141c`)
+with the capture/observation branch. One gateway now serves observations and worlds.
+A temporary-ledger migration check imported all 13 existing attempts and preserved
+$15.25 in conservative reservations and 207,977 reserved tokens, with the approved
+$21 total ceiling, $5 demo reserve, and Genie disabled. The source ledger and `.env`
+were unchanged; these local reservations are not an account balance or invoice.
+
+Validation passed: **211 backend tests**, **48 frontend tests**, generated-contract
+drift checks, and the production build. The existing large application-chunk warning
+remains. Tests isolate developer credentials, storage and ledgers. New regressions
+cover lost/corrupt retention pins, corrupt manifests and attempt records, prefix-only
+VOD playback, sequence rollback, decoder time/allocation limits, deferred domain
+acceptance, migration accounting, optional Genie, and camera/attempt UI races.
+
+An isolated browser preview with model calls disabled verified:
+
+- Real 511NY Vestry recording, actual buffered boundary selection, explicit stop,
+  and sealing a 15.015-second clip containing 225 frames and 521,512 bytes. The
+  retained VOD loaded with duration 15.015 and advanced through playback independently
+  of the live feed and authored replay. Re-sealing the same interval retained the
+  same original bytes in a separate capture artifact.
+- A separate NYC DOT snapshot capture retained one original image (25,384 bytes),
+  displayed its actual camera identity, and exposed snapshot-specific controls.
+- Missing-key extraction produced an actionable error, preserved the capture, and
+  exposed its failed attempt without automatically retrying. The isolated gateway
+  records confirm **zero provider dispatches and zero charged usage** during review.
+- Desktop layout and the 390 × 844 mobile drawer; no horizontal overflow at that
+  width, and no browser console errors during the reviewed workflow. Original media,
+  manifests and screenshots remain under ignored `data/ui-validation/`.
+
+The Evidence drawer is a partial issue #12 implementation. The accepted-reference,
+edit/image/gate/world UI sequence and independent human annotations/evaluation remain
+pending with their assigned work lanes. No additional paid model calls were made,
+and this verification does not establish held-out extraction accuracy or completion
+of the full Mayor Mode pipeline.
+
 ## Live services and Hydrogen extraction — November 21, 2026
 
 The primary Gemini project completed capability checks for all five configured services. Genie returned a video frame and acknowledged termination before the user requested that it become optional; it is now disabled with `GENIE_ENABLED=false`, including in default smoke batches. No further Genie calls were made. The Workshop project was not probed or used as an automatic fallback.

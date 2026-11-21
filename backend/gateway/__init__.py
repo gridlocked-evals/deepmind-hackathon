@@ -1,4 +1,7 @@
-"""Server-only model gateway; provider calls require explicit admission budgets."""
-from .core import GatewayConfig, GatewayError, GatewayResult, ModelGateway, MODELS, extract_model_text
+"""Server-only model access, accounting, and capability verification."""
 
-__all__ = ["GatewayConfig", "GatewayError", "GatewayResult", "ModelGateway", "MODELS", "extract_model_text"]
+from .config import GatewayConfig
+from .contracts import CallContext, GatewayError, Service
+from .service import ModelGateway
+
+__all__ = ["CallContext", "GatewayConfig", "GatewayError", "ModelGateway", "Service"]

@@ -229,3 +229,37 @@ def test_jpeg_splitter_honors_metadata_lengths_and_rejects_truncation():
     assert _jpeg_images(jpeg + jpeg) == [jpeg, jpeg]
     with pytest.raises(HTTPException):
         _jpeg_images(jpeg[:-1])
+
+
+def test_oversized_decoded_dimensions_reject_before_image_extraction(tmp_path, monkeypatch):
+    import backend.evidence_media as media_module
+    async def oversized_probe(*args, **kwargs):
+        return json.dumps({'streams': [{'width': 65536, 'height': 65536}],
+                           'frames': [{'width': 65536, 'height': 65536}]}).encode()
+    monkeypatch.setattr(media_module, '_run', oversized_probe)
+    async def run():
+        captures, manifest = await snapshot_capture(tmp_path)
+        with pytest.raises(HTTPException) as failure:
+            await prepare_evidence(captures, manifest['captureId'])
+        assert failure.value.status_code == 502
+        assert captures.pins[manifest['captureId']] == ['capture-retention']
+        await captures.client.aclose()
+    asyncio.run(run())
+
+
+def test_decoder_commands_limit_protocols_and_single_allocations(tmp_path, monkeypatch):
+    import backend.evidence_media as media_module
+    original = media_module._run
+    commands = []
+    async def record(command, **kwargs):
+        commands.append(command)
+        return await original(command, **kwargs)
+    monkeypatch.setattr(media_module, '_run', record)
+    async def run():
+        captures, manifest = await snapshot_capture(tmp_path)
+        await prepare_evidence(captures, manifest['captureId'], crop=ImageRegion(x=0,y=0,width=.5,height=.5))
+        assert len(commands) == 2
+        assert all(command[command.index('-protocol_whitelist') + 1] == 'file,pipe' for command in commands)
+        assert all(int(command[command.index('-max_alloc') + 1]) == 64 * 1024 * 1024 for command in commands)
+        await captures.client.aclose()
+    asyncio.run(run())

@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ArrowUpRight, Camera, Check, ChevronDown, ChevronLeft, ChevronRight, CircleHelp, Crosshair, Focus, Globe2, Layers3, MapPin, Maximize2, Menu, Minus, Navigation, Pause, Pin, Play, Radio, RotateCcw, Route, Search, Video, X } from 'lucide-react';
+import { ArrowUpRight, Camera, Check, ChevronDown, ChevronLeft, ChevronRight, CircleHelp, Crosshair, Focus, Globe2, Layers3, MapPin, Maximize2, Menu, Minus, Navigation, Pause, Pin, Play, Radio, RotateCcw, Route, ScanEye, Search, Video, X } from 'lucide-react';
 import CityMap from './map/CityMap';
 import { demoScenario } from './scene/DemoScenarioProvider';
 import { useCameraSources } from './media/cameras';
 import { LiveFeed } from './media/LiveFeed';
 import { usePlayback } from './hooks/usePlayback';
+import { EvidencePanel } from './evidence/EvidencePanel';
 import type { CameraSource, MapViewport, RenderOptions, ViewMode } from './types';
 
 const MODES: { id: ViewMode; label: string; icon: typeof Globe2 }[] = [
@@ -31,6 +32,9 @@ export default function App() {
   const [routesVisible, setRoutesVisible] = useState(true);
   const [layersOpen, setLayersOpen] = useState(false);
   const [helpOpen, setHelpOpen] = useState(false);
+  const [evidenceOpen, setEvidenceOpen] = useState(false);
+  const evidenceToggleRef = useRef<HTMLButtonElement>(null);
+  const closeEvidence = useCallback(() => { setEvidenceOpen(false); evidenceToggleRef.current?.focus(); }, []);
   const helpRef = useRef<HTMLElement>(null);
   const [mapReady, setMapReady] = useState(false);
   const [mapError, setMapError] = useState('');
@@ -86,8 +90,8 @@ export default function App() {
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') { setHelpOpen(false); setLayersOpen(false); return; }
-      if (event.target instanceof HTMLElement && /INPUT|TEXTAREA|SELECT|BUTTON/.test(event.target.tagName)) return;
+      if (event.key === 'Escape') { setHelpOpen(false); setLayersOpen(false); if (evidenceOpen) closeEvidence(); return; }
+      if (event.target instanceof HTMLElement && (/INPUT|TEXTAREA|SELECT|BUTTON/.test(event.target.tagName) || event.target.closest('.evidence-panel'))) return;
       if (event.code === 'Space') { event.preventDefault(); playback.setPlaying(p => !p); }
       if (event.key.toLowerCase() === 'c') setFeedsVisible(v => !v);
       if (event.key === '1') chooseView('city');
@@ -97,7 +101,7 @@ export default function App() {
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [chooseView, playback.setPlaying]);
+  }, [chooseView, playback.setPlaying, evidenceOpen, closeEvidence]);
 
   const cardLeft = Math.max(sidebarOpen && viewport.width > 760 ? 310 : 24, Math.min((viewport.cameraPoint?.x ?? viewport.width * 0.65) + 25, viewport.width - 370));
   const cardTop = Math.max(150, Math.min((viewport.cameraPoint?.y ?? viewport.height * 0.4) - 100, viewport.height - 495));
@@ -113,7 +117,7 @@ export default function App() {
       <span className="topbar-divider" />
       <span className="workspace-name">Simulation workspace</span>
       <nav className="view-switch" aria-label="Map perspective">{MODES.map(({ id, label, icon: Icon }) => <button key={id} className={viewMode === id ? 'active' : ''} onClick={() => chooseView(id)} aria-pressed={viewMode === id}><Icon size={15} /><span>{label}</span></button>)}</nav>
-      <div className="topbar-actions"><button className={`camera-toggle ${feedsVisible ? 'is-active' : ''}`} onClick={() => setFeedsVisible(v => !v)} aria-pressed={feedsVisible} aria-label="Cameras"><Video size={16} /><span>Cameras</span><span className="toggle-track"><i /></span></button><button className="icon-button help-button" aria-label="About this workspace" onClick={() => setHelpOpen(v => !v)}><CircleHelp size={18} /></button></div>
+      <div className="topbar-actions"><button ref={evidenceToggleRef} className="evidence-toggle" onClick={() => setEvidenceOpen(value => !value)} aria-expanded={evidenceOpen} aria-controls="camera-evidence-panel" aria-label="Camera evidence" title="Capture and inspect camera evidence"><ScanEye size={17} /><span>Evidence</span></button><button className={`camera-toggle ${feedsVisible ? 'is-active' : ''}`} onClick={() => setFeedsVisible(v => !v)} aria-pressed={feedsVisible} aria-label="Cameras"><Video size={16} /><span>Cameras</span><span className="toggle-track"><i /></span></button><button className="icon-button help-button" aria-label="About this workspace" onClick={() => setHelpOpen(v => !v)}><CircleHelp size={18} /></button></div>
     </header>
 
     {sidebarOpen && <><button className="sidebar-backdrop" aria-label="Close camera list" onClick={() => setSidebarOpen(false)} /><aside className="source-rail">
@@ -138,6 +142,7 @@ export default function App() {
     <section className="playback-bar" aria-label="Demo playback controls"><div className="playback-identity"><span className="demo-tag">DEMO</span><div><strong>Vestry traffic loop</strong><span>Illustrative traffic · seed {demoScenario.seed}</span></div></div><div className="transport-controls"><button className="icon-button reset-button" onClick={() => playback.seek(0)} aria-label="Reset simulation"><RotateCcw size={16} /></button><button className="play-button" onClick={() => playback.setPlaying(v => !v)} aria-label={playback.playing ? 'Pause simulation' : 'Play simulation'}>{playback.playing ? <Pause size={17} fill="currentColor" /> : <Play size={17} fill="currentColor" />}</button><button className="playback-speed" onClick={() => playback.setSpeed(playback.speed === 0.5 ? 1 : playback.speed === 1 ? 2 : 0.5)} aria-label={`Playback speed ${playback.speed} times, click to change`}>{playback.speed.toFixed(1)}×</button></div><div className="timeline"><input type="range" min="0" max={demoScenario.duration} step="0.1" value={playback.time} onChange={event => playback.seek(Number(event.target.value))} aria-label="Simulation timeline" style={{ '--progress': `${playback.time / demoScenario.duration * 100}%` } as React.CSSProperties} /><div className="timeline-labels"><span>{formatTime(playback.time)}</span><span>{formatTime(demoScenario.duration)}</span></div></div><button className="timeline-view-button" onClick={() => chooseView(viewMode === 'city' ? 'intersection' : 'city')} title={viewMode === 'city' ? 'Go to demo' : 'City overview'} aria-label={viewMode === 'city' ? 'Go to demo' : 'City overview'}>{viewMode === 'city' ? <Focus size={18} /> : <Globe2 size={18} />}</button></section>
 
     <div className="bottom-caption"><span>Vestry demo · illustrative traffic</span><span>Map context © OpenStreetMap</span></div>
+    <EvidencePanel camera={selectedCamera} open={evidenceOpen} onClose={closeEvidence} />
     {!mapReady && !mapError && <div className="map-loading"><span className="loading-orbit" /><span>Opening New York</span></div>}
     {mapError && <div className="map-notice"><span>{mapError}</span><button onClick={() => setMapError('')} aria-label="Dismiss map notice"><X size={14} /></button></div>}
     {helpOpen && <div className="help-backdrop" onClick={() => setHelpOpen(false)}><section ref={helpRef} className="help-dialog" role="dialog" aria-modal="true" aria-labelledby="help-title" onClick={event => event.stopPropagation()}><button className="icon-button help-close" onClick={() => setHelpOpen(false)} aria-label="Close information"><X size={18} /></button><span className="eyebrow">ABOUT THIS WORKSPACE</span><h2 id="help-title">The city. A possible world.</h2><p>Explore New York through public roadside cameras and an authored Vestry Street traffic simulation.</p><div className="help-item"><Video size={20} /><div><strong>Camera footage is real</strong><p>Video comes from 511NY / NYSDOT. Source delay is unknown. NYC DOT snapshots are periodic images.</p></div></div><div className="help-item"><Route size={20} /><div><strong>The simulation is illustrative</strong><p>Road details, signal timings, and traffic are hand-authored. This demo has not been reconstructed from the selected video.</p></div></div><div className="shortcut-list"><span><kbd>Space</kbd> Play / pause</span><span><kbd>C</kbd> Cameras</span><span><kbd>1</kbd><kbd>2</kbd><kbd>3</kbd> Perspective</span></div><button className="explore-button" onClick={() => setHelpOpen(false)}>Back to the city</button></section></div>}

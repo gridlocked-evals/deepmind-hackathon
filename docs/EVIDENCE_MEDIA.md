@@ -44,7 +44,7 @@ Sampling metadata records decoded/eligible/selected/omitted counts, every select
 
 - The shared capture context still caps original source duration at 120 seconds. Decoded prefix duration is independently checked against that limit.
 - Permitted source bytes are capped at 512 MiB, ffprobe output at 32 MiB, and decoded frames at 100,000. Exceeding an audit budget fails the request.
-- Model image payloads default to 10 MiB including base64 expansion and evidence metadata, leaving room below the gateway's 12 MiB JSON limit for instructions. Callers remain responsible for the final complete request size.
+- Model image payloads default to 10 MiB including base64 expansion and evidence metadata, leaving room below the gateway's configurable JSON request limit (20 MiB by default) for instructions. Callers remain responsible for the final complete request size.
 - JPEG output is streamed through a bounded pipe. Decoder output that exceeds the remaining budget stops the subprocess and returns an error; it cannot fill an unbounded output directory.
 - Every selected output image must be present. Image framing, exact output count, and payload bytes are checked before returning success.
 - Preparation has a 90-second deadline; individual decoders have 30-second deadlines and are killed on cancellation. Missing media tools return 503, byte-budget excess 413, invalid bounds or ambiguous timing 422, decode/audit failure 502, and timeout 504.

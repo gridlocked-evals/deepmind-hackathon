@@ -24,16 +24,16 @@ The repository is already public. Pharos attribution and its source revision rem
 
 The backend includes versioned Python/TypeScript artifact contracts, a server-only model gateway, bounded capture/storage, and timestamped Hydrogen observation extraction with window/crop reinspection. [Contracts](docs/CONTRACTS.md), [gateway](docs/MODEL_GATEWAY.md), [capture](docs/CAPTURE_API.md), and [observations](docs/OBSERVATIONS_API.md) document their exact interfaces and limitations.
 
-Automated fixtures and mocked provider tests validate implementation behavior. Separate live checks have verified the primary project's five service capabilities and Hydrogen extraction from one real video and one snapshot; [verification records](docs/VERIFICATION.md) retain the measured outcomes and failures. Project maximum quotas, annotation-based quality, the full end-to-end pipeline, Mayor Mode UI, and held-out evaluation remain acceptance work. The existing UI still displays its authored demonstration, and Genie is now disabled by default.
+Automated fixtures and mocked provider tests validate implementation behavior. Separate live checks have verified the primary project's five service capabilities and Hydrogen extraction from one real video and one snapshot; [verification records](docs/VERIFICATION.md) retain the measured outcomes and failures. Project maximum quotas, annotation-based quality, the full end-to-end pipeline, Mayor Mode UI, and held-out evaluation remain acceptance work. The Evidence drawer now supports real source capture/review and explicit extraction independently of the authored demonstration. The team's merged Genie runtime is available behind explicit opt-in; Genie remains disabled by default.
 
 ## Four work lanes
 
 | Lane | Ownership | Immediate interface |
 | --- | --- | --- |
-| A — evidence/capture (`Paradox560`) | Source registry, immutable capture, Hydrogen observations | Capture IDs/hashes and `ObservationBatch` |
-| B — world/control (`amrevr`) | Genie lifecycle, input actions, Hydrogen navigation; later H100 work in #23 | `WorldSession`, `NavigationEvent` |
-| C — reasoning/evaluation (`tasosger`) | Contracts, gateway, Carbon edits/repair, Decisions gates, evaluation | `StreetEdit`, `GateDecision`, `EvaluationResult` |
-| D — images/UI (`Jalil-g`) | Nano Banana image attempts, comparisons, camera/time selector, Mayor Mode | `ReferenceImage` and validated artifact read models |
+| A — evidence/UI (`Paradox560`) | Source registry, capture, Hydrogen observations, camera/evidence workspace | Capture IDs/hashes, `ObservationBatch`, artifact read models |
+| B — gateway/world/control (`tasosger`) | Shared gateway, Genie lifecycle, Hydrogen navigation | `WorldSession`, `NavigationEvent` |
+| C — edit/image/gates (`Jalil-g`) | Carbon mayor compiler, Nano Banana references, Decisions acceptance | `StreetEdit`, `ReferenceImage`, `GateDecision` |
+| D — evaluation/adversary (`amrevr`) | Temporal judge, locked evaluation, repair/adversarial trials; H100 #23 later | `EvaluationResult` and retained trial evidence |
 
 Each lane can work against versioned fixtures immediately. Shared schemas define ownership, identifiers, time domains, provenance, explicit unknowns, and route proposals. No lane waits for SUMO.
 

@@ -16,11 +16,11 @@ def test_core_api_reports_missing_keys_and_real_history_bounds(tmp_path, monkeyp
         status = client.get("/api/models/status")
         assert status.status_code == 200
         value = status.json()
-        assert value["keyProfile"] == "primary"
+        assert value["key_profile"] == "primary"
         assert len(value["services"]) == 5
-        assert all(item["status"] == "unavailable" for item in value["services"])
+        assert all(item["state"] == "unavailable" for item in value["services"])
         assert all(not item["configured"] for item in value["services"])
-        assert value["quotaMeasured"] is False
+        assert all("unmeasured" in item["project_quota"] for item in value["services"])
         history = client.get("/api/captures/sources/511ny-32998/history").json()
         assert history["earliestSeconds"] is None
         assert history["latestSeconds"] is None
@@ -37,7 +37,7 @@ def test_core_api_reports_missing_keys_and_real_history_bounds(tmp_path, monkeyp
         attempt = client.get(f"/api/observations/attempts/{attempt_id}").json()
         assert attempt["status"] == "rejected"
         assert attempt["error"]["code"] == "evidence_unavailable"
-        assert client.get("/api/models/status").json()["budget"]["attempts"] == 0
+        assert client.get("/api/models/status").json()["budgets"]["charged_usd"] == 0
         assert client.post("/api/observations", json={"captureId": "capture-missing", "apiKey": "client-secret"}).status_code == 422
 
 
@@ -51,13 +51,13 @@ def test_workshop_status_does_not_expose_key(tmp_path, monkeypatch):
     monkeypatch.setenv("MODEL_LEDGER_PATH", str(tmp_path / "gateway.sqlite3"))
     with TestClient(app) as client:
         response = client.get("/api/models/status")
-        assert response.json()["keyProfile"] == "workshop"
+        assert response.json()["key_profile"] == "workshop"
         services = response.json()["services"]
-        assert all(item["status"] == "configured" for item in services if item["service"] != "genie")
+        assert all(item["state"] == "unverified" for item in services if item["service"] != "genie")
         genie = next(item for item in services if item["service"] == "genie")
         assert genie["enabled"] is False
         assert genie["optional"] is True
-        assert genie["error"] == "disabled"
+        assert genie["reason"] == "disabled"
         assert "primary-test-secret" not in response.text
         assert "workshop-test-secret" not in response.text
         preflight = client.options("/api/captures/episodes", headers={

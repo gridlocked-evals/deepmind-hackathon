@@ -8,8 +8,8 @@ from fastapi.testclient import TestClient
 import pytest
 
 from backend.contracts import CaptureContext, EvidenceRef, ImageRegion
-from backend.gateway import GatewayError, GatewayResult
-from backend.observations import ExtractionOutput, ObservationError, ObservationRequest, ObservationService, provider_schema, router
+from backend.gateway.contracts import CallResult, ErrorCode, GatewayError, Service, Usage
+from backend.observations import ExtractionOutput, ObservationError, ObservationRequest, ObservationService, router
 
 CAPTURE = {"captureId": "cap_fixture", "sourceId": "511ny-32998", "originalMediaSha256": "a" * 64,
            "modality": "video", "durationSeconds": 10, "allowedInterval": {"startSeconds": 0, "endSeconds": 5},
@@ -78,14 +78,26 @@ async def prepare(captures, capture_id, *, window=None, crop=None, **kwargs):
 class Gateway:
     def __init__(self, observations=None, error=None):
         self.observations, self.error, self.calls = observations or [observation()], error, []
+        self.accepted = []
 
-    async def run(self, service, payload, **kwargs):
-        self.calls.append((service, payload, kwargs))
+    async def generate(self, service, *, input_value, context, response_model, **kwargs):
+        assert service == Service.HYDROGEN
+        assert response_model is ExtractionOutput
+        assert context.original_media_sha256 == (CAPTURE["originalMediaSha256"],)
+        assert context.episode_id == context.capture_id
+        assert kwargs["qualify"] is False
+        self.calls.append((service, {"input": input_value}, kwargs))
         if self.error:
             raise self.error
-        output = {"status": "completed", "steps": [{"type": "model_output", "content": [{"type": "text",
-                  "text": json.dumps({"observations": self.observations, "unknowns": ["Signal timing is unknown."]})}]}]}
-        return GatewayResult(output, TRACE.copy(), {})
+        return CallResult("request_fixture", None, "gemini-4-hydrogen", "b" * 64, "c" * 64,
+                          {"observations": self.observations, "unknowns": ["Signal timing is unknown."]},
+                          Usage(input_tokens=100, output_tokens=500, total_tokens=600), "reported_usage_upper_bound")
+
+    def trace(self, result, context, **kwargs):
+        return TRACE.copy()
+
+    def accept_artifact(self, result, **binding):
+        self.accepted.append(binding)
 
 
 def service(tmp_path, *, snapshot=False, observations=None, error=None):
@@ -100,11 +112,11 @@ def test_observations_use_server_evidence_real_trace_and_persist_across_restart(
         assert result.capture.originalMediaSha256 == CAPTURE["originalMediaSha256"]
         assert result.trace.modelId == "gemini-4-hydrogen"
         assert result.observations[0].value == "crossing_markings: visible"
+        assert worker.gateway.accepted[0]["artifact_id"] == result.id
         assert worker.captures.pins
         payload = worker.gateway.calls[0][1]
-        assert payload["response_format"]["schema"]
         assert sum(item["type"] == "image" for item in payload["input"]) == 5
-        assert "event" not in payload["response_format"]["schema"]["$defs"]["ExtractedObservation"]["properties"]["category"]["enum"]
+        assert "Do not emit temporal events" in payload["input"][0]["text"]
         restarted = ObservationService(worker.captures, worker.gateway, tmp_path, evidence_preparer=prepare)
         assert restarted.get(result.id) == result
         attempt = restarted.attempt(restarted.evidence(result.id)["attemptId"])
@@ -186,13 +198,13 @@ def test_event_crossing_owned_interval_boundary_is_rejected(tmp_path):
 
 def test_failures_are_sanitized_and_retain_model_trace_id(tmp_path):
     async def run():
-        failure = GatewayError("quota", trace_id="trace_failed")
+        failure = GatewayError(ErrorCode.QUOTA, request_id="request_failed")
         worker = service(tmp_path, error=failure)
         with pytest.raises(ObservationError) as caught:
             await worker.create(ObservationRequest(captureId="cap_fixture"))
         value = worker.attempt(caught.value.attempt_id)
-        assert value["error"] == {"code": "model_quota"}
-        assert value["gatewayTraceId"] == "trace_failed"
+        assert value["error"] == {"code": "model_quota_exceeded"}
+        assert value["gatewayRequestId"] == "request_failed"
     asyncio.run(run())
 
 
@@ -230,23 +242,6 @@ def test_structured_schema_cannot_encode_flow_or_trajectory_values():
     assert 'value' not in schema
     assert 'description' not in schema
     assert schema['state']['enum'] == ['visible','partially_occluded','occluded','unknown','red','amber','green','unlit']
-
-
-def test_provider_grammar_projection_removes_bounds_but_local_validation_retains_them():
-    from pydantic import ValidationError
-    original = ExtractionOutput.model_json_schema()
-    projected = provider_schema(original)
-    serialized = json.dumps(projected)
-    for keyword in ('minimum', 'maximum', 'exclusiveMinimum', 'exclusiveMaximum', 'minItems', 'maxItems', 'minLength', 'maxLength', 'title'):
-        assert f'"{keyword}"' not in serialized
-    assert projected['$defs']['ExtractedObservation']['properties']['state']['enum'] == original['$defs']['ExtractedObservation']['properties']['state']['enum']
-    assert projected['properties']['observations']['items']['$ref']
-    assert projected['required'] == ['observations', 'unknowns']
-    assert original['properties']['observations']['maxItems'] == 16
-    for observations in ([observation()] * 17, [observation(countLower=-1, countUpper=1, category='count')],
-                         [observation(evidence=[{'frame': 0, 'region': {'x': 0, 'y': 0, 'width': 0, 'height': 1}}])]):
-        with pytest.raises(ValidationError):
-            ExtractionOutput.model_validate({'observations': observations, 'unknowns': []})
 
 
 def test_preprocessing_concurrency_is_bounded_and_cancel_releases_slot(tmp_path):
@@ -324,4 +319,90 @@ def test_restart_recovers_finished_artifact_but_releases_interrupted_event_owner
         restarted.gateway.observations = [observation()]
         second = await restarted.create(ObservationRequest(captureId='cap_fixture', includeEvents=True, ownedInterval={'startSeconds': 2, 'endSeconds': 4}))
         assert second.id != artifact.id
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("bad", [
+    observation(category="count", feature="vehicle", state="unknown", countLower=0, countUpper=0, unknownReason="Hidden"),
+    observation(category="count", feature="vehicle", state="occluded", countLower=2, countUpper=4, unknownReason="Hidden"),
+    observation(category="signal", feature="vehicle"),
+    observation(category="lane", feature="pedestrian"),
+    observation(category="crossing", feature="building"),
+])
+def test_unobservable_counts_and_mismatched_features_are_rejected(bad):
+    from pydantic import ValidationError
+    with pytest.raises(ValidationError):
+        ExtractionOutput.model_validate({"observations": [bad], "unknowns": []})
+
+
+@pytest.mark.parametrize("damaged", ["{", "[]", '{"artifact":{}}'])
+def test_damaged_artifact_returns_integrity_error(tmp_path, damaged):
+    async def run():
+        worker = service(tmp_path)
+        artifact = await worker.create(ObservationRequest(captureId="cap_fixture"))
+        (tmp_path / "artifacts" / f"{artifact.id}.json").write_text(damaged)
+        with pytest.raises(ObservationError, match="integrity") as caught:
+            worker.get(artifact.id)
+        assert caught.value.status == 409
+    asyncio.run(run())
+
+
+def test_corrupt_attempt_cannot_silently_release_event_ownership_on_restart(tmp_path):
+    async def run():
+        worker = service(tmp_path)
+        (tmp_path / "attempts" / "attempt_damaged.json").write_text("{")
+        restarted = ObservationService(worker.captures, worker.gateway, tmp_path, evidence_preparer=prepare)
+        with pytest.raises(ObservationError, match="integrity"):
+            await restarted.create(ObservationRequest(captureId="cap_fixture"))
+        assert not worker.gateway.calls
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("frame", [0, 99])
+def test_observation_runs_through_shared_gateway_and_durable_trace(tmp_path, frame):
+    """Exercise the merged adapter boundary, rather than only a service-shaped stub."""
+    from datetime import date
+    import httpx
+    from backend.gateway import GatewayConfig, ModelGateway
+
+    calls = []
+
+    def provider(request):
+        calls.append(request)
+        body = json.loads(request.content)
+        assert body["model"] == "gemini-4-hydrogen"
+        assert body["store"] is False
+        assert "maxItems" not in json.dumps(body["response_format"]["schema"])
+        return httpx.Response(200, json={
+            "status": "completed", "model": "gemini-4-hydrogen",
+            "steps": [{"type": "model_output", "content": [{"type": "text", "text": json.dumps({
+                "observations": [observation(evidence=[{"frame": frame, "region": None}])],
+                "unknowns": ["Metric geometry is unknown."]})}]}],
+            "usage": {"total_input_tokens": 100, "total_output_tokens": 200, "total_tokens": 300},
+        })
+
+    async def run():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(provider)) as client:
+            gateway = ModelGateway(GatewayConfig(data_dir=tmp_path / "gateway", max_attempts=1,
+                rates_valid_through=date(2030, 1, 1)), client, api_key="isolated-test-key")
+            worker = ObservationService(Captures(), gateway, tmp_path / "observations", evidence_preparer=prepare)
+            if frame == 99:
+                with pytest.raises(ObservationError, match="unknown_evidence_frame"):
+                    await worker.create(ObservationRequest(captureId="cap_fixture"))
+                with gateway.ledger.connection() as database:
+                    row = database.execute("SELECT outcome,qualifying FROM attempts").fetchone()
+                assert row["outcome"] == "success" and row["qualifying"] == 0
+                assert not list((tmp_path / "observations" / "artifacts").glob("*.json"))
+                return
+            artifact = await worker.create(ObservationRequest(captureId="cap_fixture"))
+            assert artifact.trace.modelId == "gemini-4-hydrogen"
+            assert artifact.trace.inputSha256 == hashlib.sha256(calls[0].content).hexdigest()
+            assert artifact.trace.inputTokens == 100
+            assert artifact.trace.outputTokens == 200
+            assert artifact.trace.providerRequestId is None
+            assert artifact.trace.startedAt <= artifact.trace.completedAt
+            assert worker.get(artifact.id) == artifact
+            assert gateway.ledger.get(artifact.trace.requestId)["qualifying"] == 1
+            assert gateway.status()["budgets"]["charged_usd"] > 0
+            assert len(calls) == 1
     asyncio.run(run())

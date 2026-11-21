@@ -48,6 +48,15 @@ Each accepted event requires at least two distinct supplied timestamps and its e
 
 The event ledger is scoped to the current single-process API service. On restart, unfinished attempts become `interrupted` and release ownership when no accepted artifact exists. If the artifact was persisted before the final attempt write, the service verifies its envelope and restores accepted status, preserving its event ownership and trace. Do not run multiple API worker processes against the same observation store until ownership admission is moved to a transactional shared store.
 
+Schema-valid JSON alone does not qualify as accepted evidence. Observation calls
+use `qualify=False`; after frame/ownership/domain validation and durable artifact
+storage, the gateway binds the artifact ID/hash and marks that request qualifying.
+The gateway `episode_id` is the durable capture ID, so downstream Carbon calls can
+join the same episode; the observation attempt ID separately identifies each retry.
+Unobservable counts cannot include positive count bounds, and lane/crossing/signal
+categories must match their visible feature. Corrupt attempts block new admission
+until reviewed, rather than silently releasing possibly owned temporal intervals.
+
 ## Persistence and limits
 
 Artifacts and attempt records are atomically written below the service's configured observation storage root (normally ignored `data/observations`). Accepted artifact envelopes checksum the artifact, evidence metadata, and attempt link together. Every attempt pins its source capture so later cleanup cannot silently replace or delete its evidence. The default attempt cap is 1000; admission then stops while retaining earlier records. Errors expose stable codes and attempt IDs, not raw provider messages, input image bytes, or credentials. No automatic capture retry or hidden model continuation occurs in this service.

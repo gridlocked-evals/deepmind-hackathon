@@ -12,7 +12,7 @@
     "test:api": ".venv/bin/python -m pytest backend -q",
     "contracts:generate": ".venv/bin/python scripts/export_contracts.py",
     "contracts:check": ".venv/bin/python scripts/export_contracts.py --check",
-    "smoke:models": ".venv/bin/python -m backend.smoke_models"
+    "smoke:models": ".venv/bin/python -m backend.gateway.smoke"
   },
   "dependencies": {
     "ajv": "^8.20.0",

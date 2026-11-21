@@ -19,9 +19,11 @@ from fastapi.staticfiles import StaticFiles
 from .capture import CaptureService, router as capture_router
 from .config import load_environment
 from .feeds import HLS_SOURCES, REGISTRY_URL, public_cameras, utc_now
-from .gateway import ModelGateway
 from .observations import ObservationService, router as observation_router
 from .proxy import proxy_media, resolve_token
+from .gateway import GatewayConfig, ModelGateway
+from .worlds.api import router as world_router
+from .worlds.runtime import WorldManager
 
 DOT_URL = "https://webcams.nyctmc.org/api/cameras"
 DOT_PAGE = "https://webcams.nyctmc.org/map"
@@ -48,26 +50,35 @@ async def lifespan(app: FastAPI):
             storage, client, max_bytes=int(os.environ.get("CAPTURE_MAX_BYTES", "536870912")),
             snapshot_loader=snapshots,
         )
-        app.state.gateway = ModelGateway.from_env()
-        observation_storage = Path(os.environ.get("OBSERVATION_STORAGE_DIR", "data/observations"))
-        if not observation_storage.is_absolute():
-            observation_storage = ROOT / observation_storage
-        app.state.observations = ObservationService(app.state.capture, app.state.gateway, observation_storage)
-        try:
-            yield
-        finally:
-            await app.state.capture.close()
-            await app.state.gateway.close()
+        config = GatewayConfig.from_environment()
+        async with httpx.AsyncClient(follow_redirects=False,
+            limits=httpx.Limits(max_connections=config.max_concurrency + 1)) as model_http:
+            app.state.models = ModelGateway(config, model_http)
+            observation_storage = Path(os.environ.get("OBSERVATION_STORAGE_DIR", "data/observations"))
+            if not observation_storage.is_absolute():
+                observation_storage = ROOT / observation_storage
+            app.state.observations = ObservationService(app.state.capture, app.state.models, observation_storage)
+            app.state.worlds = WorldManager(app.state.models)
+            recovery = asyncio.create_task(app.state.worlds.watch_abandoned())
+            try:
+                yield
+            finally:
+                recovery.cancel()
+                await asyncio.gather(recovery, return_exceptions=True)
+                await app.state.worlds.close()
+                await app.state.capture.close()
+
 
 
 app = FastAPI(title="Crash Test NYC / Element 119", version="0.2.0", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware, allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
-    allow_methods=["GET", "POST"], allow_headers=["Range", "Content-Type"],
+    allow_methods=["GET", "POST"], allow_headers=["Range", "Authorization", "Content-Type"],
     expose_headers=["Content-Range", "Accept-Ranges", "Content-Length", "X-Observation-Attempt-Id"],
 )
 app.include_router(capture_router)
 app.include_router(observation_router)
+app.include_router(world_router)
 
 
 class CameraCache:
@@ -151,11 +162,6 @@ async def health():
     return {"status": "ok", "service": "gotham-forge-camera-api", "timestamp": utc_now()}
 
 
-@app.get("/api/models/status")
-async def model_status(request: Request):
-    return request.app.state.gateway.status()
-
-
 @app.get("/api/cameras")
 async def cameras(request: Request):
     items, metadata = await camera_cache.get(lambda: fetch_dot(request.app.state.http))
@@ -164,6 +170,12 @@ async def cameras(request: Request):
         "sourceKind": "snapshot", "captureClock": "unknown",
         "notice": "NYC DOT supplies periodic images. Retrieval time is not source capture time.",
     }}
+
+
+@app.get("/api/models/status")
+async def model_status(request: Request):
+    """Read-only. Inspecting capability status never invokes a paid model."""
+    return request.app.state.models.status()
 
 
 @app.get("/api/vision/cameras")

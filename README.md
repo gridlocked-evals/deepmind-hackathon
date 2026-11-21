@@ -1,6 +1,6 @@
 # Crash Test NYC / Element 119
 
-NYC camera evidence → Hydrogen observation → Carbon mayor edit → Nano Banana reference → Decisions acceptance → Genie exploration. The backend now includes shared contracts, a model gateway, bounded capture, and timestamped Hydrogen extraction against the [core issues](https://github.com/Paradox560/deepmind-hackathon/issues/1). The existing interface contains a city map, an illustrative Vestry traffic demo, and public camera feeds; the full model-driven UI is still pending.
+NYC camera evidence → Hydrogen observation → Carbon mayor edit → Nano Banana reference → Decisions acceptance → Genie exploration. The backend now includes shared contracts, a model gateway, bounded capture, and timestamped Hydrogen extraction against the [core issues](https://github.com/Paradox560/deepmind-hackathon/issues/1). The interface contains a city map, an illustrative Vestry traffic demo, public camera feeds, and an Evidence drawer for immutable capture and explicit Hydrogen extraction. The complete edit/reference/world UI remains pending.
 
 Genie world generation is optional and disabled by default to preserve credits. Camera capture and reasoning do not require a world session.
 

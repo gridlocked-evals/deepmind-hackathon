@@ -1,6 +1,6 @@
 # Bounded camera evidence
 
-`backend/capture.py` implements issue #4's capture foundation. A capture is immutable input for later model jobs. Retrying inference reads the same retained bytes; it never calls a camera again. Live-provider acceptance and the UI history selector remain integration work.
+`backend/capture.py` implements issue #4's capture foundation. A capture is immutable input for later model jobs. Retrying inference reads the same retained bytes; it never calls a camera again. The Evidence drawer uses these routes for real recording boundaries, retained playback, and snapshot capture; see the verification record for browser checks.
 
 ## Record a registered video source
 
@@ -43,6 +43,20 @@ Snapshots have zero temporal duration, an allowed interval of `[0,0]`, unknown e
 `originalMediaSha256` hashes the exact original file bytes concatenated in source order. Per-file hashes and lengths preserve the boundaries. `manifestSha256` separately hashes the canonical JSON manifest excluding `manifestSha256` itself, binding those bytes to their source and timing metadata. Manifests and media are checked again when read.
 
 Prefix and suffix segments are copied into **different files and directories** when an episode is sealed. `GET /api/captures/episodes/{capture_id}/media/{media_index}` and `CaptureService.read_prefix()` serve only prefix media; suffix requests return 403. The full manifest is for capture/evaluation review and must not be passed to inference. `CaptureService.capture_context(capture_id)` returns the validated shared `CaptureContext` with UTC `Z` timestamps and the permitted prefix interval; it excludes suffix frame metadata, file paths, and counts. Later model stages must use this context and prefix-only reads, and must not accept arbitrary episode-directory paths.
+
+### Retained video playback
+
+`GET /api/captures/episodes/{capture_id}/index.m3u8` returns a `no-store` VOD
+playlist with original prefix segment durations and server-owned media URLs.
+Every referenced prefix segment is hash-checked. The held-out suffix is neither
+read nor listed. Snapshots return 422 instead of masquerading as temporal media.
+Browser video seeks are approximate; source frame timestamps in observation
+artifacts remain authoritative for evidence references.
+
+Missing or damaged retention-pin metadata is rebuilt conservatively from sealed
+episodes. Corrupt manifests and missing/modified prefix bytes fail with a typed
+integrity response. A reset upstream media sequence stops that recording so it can
+be explicitly restarted with a fresh recording ID; sealed episodes survive.
 
 ## Limits and retention
 

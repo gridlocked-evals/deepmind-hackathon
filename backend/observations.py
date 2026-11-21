@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+from datetime import datetime, timezone
 import hashlib
 import json
 from pathlib import Path
@@ -17,7 +18,11 @@ from .capture import atomic_json, canonical
 from .contracts import Contract, Identifier, ImageRegion, ModelTrace, Observation, ObservationBatch, Probability, TimeInterval
 from .evidence_media import prepare_evidence
 from .gateway import GatewayError
-from .gateway.core import utc_now
+from .gateway.contracts import CallContext, Service
+
+def utc_now():
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
 
 PROMPT_ID = "hydrogen-observations-v1"
 CONFIG_ID = "observations-config-v2"
@@ -68,8 +73,14 @@ class ExtractedObservation(Contract):
             raise ValueError("Counts are instantaneous per-frame counts, never accumulated flow")
         if self.category == "count" and self.countLower is None and not self.unknownReason:
             raise ValueError("Unknown counts require a reason")
-        if self.state in {"unknown", "occluded"} and not self.unknownReason:
-            raise ValueError("Unobservable states require an explanation")
+        if self.state in {"unknown", "occluded"}:
+            if not self.unknownReason:
+                raise ValueError("Unobservable states require an explanation")
+            if self.countLower is not None:
+                raise ValueError("Unobservable counts must abstain rather than supply positive count bounds")
+        required_feature = {"signal": "traffic_signal", "lane": "lane_markings", "crossing": "crossing_markings"}.get(self.category)
+        if required_feature and self.feature != required_feature:
+            raise ValueError("Observation category and visible feature disagree")
         if self.state in {"red", "amber", "green", "unlit"} and (self.category != "signal" or self.feature != "traffic_signal"):
             raise ValueError("Signal states require a traffic signal observation")
         if (self.category == "event") != (self.eventType is not None):
@@ -80,25 +91,6 @@ class ExtractedObservation(Contract):
 class ExtractionOutput(Contract):
     observations: Annotated[list[ExtractedObservation], Field(min_length=1, max_length=16)]
     unknowns: Annotated[list[Annotated[str, Field(min_length=1, max_length=400)]], Field(max_length=16)]
-
-
-def provider_schema(schema: dict) -> dict:
-    """Keep serving grammar small; Pydantic still enforces every bound locally.
-
-    Numeric and nested array bounds multiply provider grammar states. The live
-    service rejected the full Pydantic schema with a states-limit 400 response.
-    """
-    omitted = {"title", "minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum",
-               "minItems", "maxItems", "minLength", "maxLength"}
-
-    def project(value):
-        if isinstance(value, dict):
-            return {key: project(item) for key, item in value.items() if key not in omitted}
-        if isinstance(value, list):
-            return [project(item) for item in value]
-        return value
-
-    return project(schema)
 
 
 class ObservationError(Exception):
@@ -113,16 +105,17 @@ class ObservationError(Exception):
 
 class ObservationService:
     def __init__(self, captures, gateway, root: str | Path, *, evidence_preparer=prepare_evidence,
-                 reserve_tokens: int = 16_384, reserve_usd: float = 1, max_attempts: int = 1000, concurrency: int = 2):
+                 max_attempts: int = 1000, concurrency: int = 2):
         if not 1 <= concurrency <= 4 or not 1 <= max_attempts <= 10_000:
             raise ValueError("Invalid observation service limits")
         self.captures, self.gateway, self.root = captures, gateway, Path(root)
         self.prepare = evidence_preparer
-        self.reserve_tokens, self.reserve_usd, self.max_attempts = reserve_tokens, reserve_usd, max_attempts
+        self.max_attempts = max_attempts
         self.lock = asyncio.Lock()
         self.slots = asyncio.Semaphore(concurrency)
         for category in ("attempts", "artifacts"):
             (self.root / category).mkdir(parents=True, exist_ok=True)
+        self.corrupt_attempts = False
         self._recover_interrupted_attempts()
 
     def _recover_interrupted_attempts(self):
@@ -137,7 +130,12 @@ class ObservationService:
                 # Corrupt artifacts cannot authorize events or be served by get().
                 continue
         for path in (self.root / "attempts").glob("*.json"):
-            record = json.loads(path.read_text())
+            try:
+                record = self.attempt(path.stem)
+            except ObservationError:
+                # Unknown ownership cannot safely authorize a new event attempt.
+                self.corrupt_attempts = True
+                continue
             if record["status"] not in {"preparing", "running"}:
                 continue
             artifact = accepted.get(record["attemptId"])
@@ -160,20 +158,40 @@ class ObservationService:
         path = self._path("attempts", attempt_id)
         if not path.is_file():
             raise ObservationError("not_found", 404)
-        return json.loads(path.read_text())
+        try:
+            record = json.loads(path.read_text())
+            if (record["attemptId"] != attempt_id or record["status"] not in
+                    {"preparing", "running", "accepted", "rejected", "cancelled", "interrupted"}):
+                raise ValueError()
+            request = ObservationRequest.model_validate(record["request"])
+            if record["captureId"] != request.captureId:
+                raise ValueError()
+            return record
+        except (OSError, ValueError, KeyError, TypeError):
+            raise ObservationError("integrity", 409) from None
 
     def _envelope(self, observation_id: str) -> dict:
         path = self._path("artifacts", observation_id)
         if not path.is_file():
             raise ObservationError("not_found", 404)
-        value = json.loads(path.read_text())
-        content = {key: item for key, item in value.items() if key != "sha256"}
-        if hashlib.sha256(canonical(content)).hexdigest() != value["sha256"]:
-            raise ObservationError("integrity", 409)
-        return value
+        try:
+            value = json.loads(path.read_text())
+            if not isinstance(value, dict) or set(value) != {"artifact", "attemptId", "evidence", "sha256"}:
+                raise ValueError()
+            content = {key: item for key, item in value.items() if key != "sha256"}
+            if (hashlib.sha256(canonical(content)).hexdigest() != value["sha256"]
+                    or not _ID.fullmatch(value["attemptId"])
+                    or value["artifact"]["id"] != observation_id):
+                raise ValueError()
+            return value
+        except (OSError, ValueError, KeyError, TypeError):
+            raise ObservationError("integrity", 409) from None
 
     def get(self, observation_id: str) -> ObservationBatch:
-        value = ObservationBatch.model_validate(self._envelope(observation_id)["artifact"])
+        try:
+            value = ObservationBatch.model_validate(self._envelope(observation_id)["artifact"])
+        except ValidationError:
+            raise ObservationError("integrity", 409) from None
         if not self._permitted_context(value.capture, self.captures.capture_context(value.capture.captureId)):
             raise ObservationError("capture_integrity", 409)
         return value
@@ -198,7 +216,7 @@ class ObservationService:
             raise ObservationError("invalid_event_interval", 422)
         async with self.lock:
             for path in (self.root / "attempts").glob("*.json"):
-                previous = json.loads(path.read_text())
+                previous = self.attempt(path.stem)
                 other = previous["request"].get("ownedInterval")
                 if (previous["attemptId"] != record["attemptId"] and previous["captureId"] == record["captureId"]
                         and previous["status"] in {"running", "accepted"} and other
@@ -209,9 +227,6 @@ class ObservationService:
 
     @staticmethod
     def _prompt(prepared, request: ObservationRequest) -> dict:
-        schema = provider_schema(ExtractionOutput.model_json_schema())
-        if not request.includeEvents:
-            schema["$defs"]["ExtractedObservation"]["properties"]["category"]["enum"].remove("event")
         instructions = (
             "Inspect only the attached camera pixels. Prioritize up to eight useful observations (hard maximum sixteen); "
             "do not repeat the same static fact for every frame. Use brief unknown explanations and one or two evidence frames per fact. "
@@ -235,8 +250,7 @@ class ObservationService:
         for index, frame in enumerate(prepared.frames):
             content.append({"type": "text", "text": f"Supplied frame {index}; source-relative time {frame.time_seconds:.6f} seconds."})
             content.append({"type": "image", "mime_type": frame.mime_type, "data": base64.b64encode(frame.data).decode("ascii")})
-        return {"input": content, "response_format": {"type": "text", "mime_type": "application/json", "schema": schema},
-                "generation_config": {"max_output_tokens": 4096}}
+        return {"input": content}
 
     @staticmethod
     def _build(extracted: ExtractionOutput, prepared, request, trace, artifact_id: str) -> ObservationBatch:
@@ -273,6 +287,8 @@ class ObservationService:
                                 observations=items)
 
     async def create(self, request: ObservationRequest) -> ObservationBatch:
+        if self.corrupt_attempts:
+            raise ObservationError("integrity", 409)
         attempt_id, artifact_id = f"attempt_{uuid4().hex}", f"observations_{uuid4().hex}"
         record = {"attemptId": attempt_id, "artifactId": None, "captureId": request.captureId,
                   "request": request.model_dump(), "status": "preparing", "startedAt": utc_now(), "completedAt": None,
@@ -297,16 +313,19 @@ class ObservationService:
             await self._claim_events(record, capture)
             record.update(status="running", evidence=prepared.metadata())
             self._record(record)
-            result = await self.gateway.run("hydrogen", self._prompt(prepared, request), prompt_id=PROMPT_ID,
-                                            config_id=CONFIG_ID, reserve_tokens=self.reserve_tokens, reserve_usd=self.reserve_usd,
-                                            source_id=capture.sourceId, capture_id=capture.captureId,
-                                            original_media_sha256=(capture.originalMediaSha256,))
-            record["trace"] = result.trace
-            extracted = ExtractionOutput.model_validate_json(result.text)
-            artifact = self._build(extracted, prepared, request, ModelTrace.model_validate(result.trace), artifact_id)
+            context = CallContext(episode_id=capture.captureId, prompt_id=PROMPT_ID,
+                                  source_id=capture.sourceId, capture_id=capture.captureId,
+                                  original_media_sha256=(capture.originalMediaSha256,))
+            result = await self.gateway.generate(Service.HYDROGEN, stage="observation",
+                                                 input_value=self._prompt(prepared, request)["input"],
+                                                 context=context, response_model=ExtractionOutput, qualify=False)
+            record["trace"] = self.gateway.trace(result, context, config_id=CONFIG_ID)
+            extracted = ExtractionOutput.model_validate(result.output)
+            artifact = self._build(extracted, prepared, request, ModelTrace.model_validate(record["trace"]), artifact_id)
             envelope = {"artifact": artifact.model_dump(), "attemptId": attempt_id, "evidence": prepared.metadata()}
             envelope["sha256"] = hashlib.sha256(canonical(envelope)).hexdigest()
             atomic_json(self._path("artifacts", artifact_id), envelope)
+            self.gateway.accept_artifact(result, artifact_id=artifact_id, artifact_sha256=envelope["sha256"])
             record.update(status="accepted", artifactId=artifact_id, completedAt=utc_now())
             self._record(record)
             return artifact
@@ -318,8 +337,8 @@ class ObservationService:
             if isinstance(exc, ObservationError):
                 error = exc
             elif isinstance(exc, GatewayError):
-                error = ObservationError("model_" + exc.code, 503)
-                record["gatewayTraceId"] = exc.trace_id
+                error = ObservationError("model_" + exc.code.value, 503)
+                record["gatewayRequestId"] = exc.request_id
             elif isinstance(exc, HTTPException):
                 error = ObservationError("evidence_unavailable", exc.status_code)
             elif isinstance(exc, (ValidationError, ValueError, TypeError, KeyError, IndexError)):

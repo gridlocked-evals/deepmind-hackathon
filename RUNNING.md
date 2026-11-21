@@ -40,7 +40,7 @@ Genie is optional: keep `GENIE_ENABLED=false` to prevent world-generation reques
 
 `.env` is ignored by Git. Do not put keys into `src/`, `VITE_*` variables, request URLs, or committed files. The status endpoint reports configuration and connectivity without returning credentials. Tier 3 describes the project's access tier; actual model availability and quota still need a successful project-specific smoke test. See [Model gateway](docs/MODEL_GATEWAY.md) for limits and the opt-in live smoke command.
 
-Runtime media and request evidence default to the ignored `data/` directory. Run one backend worker against a local data directory; this foundation does not coordinate budgets or capture state across multiple workers. Capture API behavior, supported media, and sealed-prefix access are documented in [Capture API](docs/CAPTURE_API.md).
+Runtime capture/observation evidence stays in ignored `data/`; the merged gateway uses ignored `.gateway/` and imports previous ledger reservations without resetting them. Run one backend worker against a local evidence directory: the gateway ledger coordinates reservations, but capture and observation state assume one worker. Capture API behavior, supported media, and sealed-prefix access are documented in [Capture API](docs/CAPTURE_API.md).
 
 ## Extract observations from a capture
 
@@ -54,7 +54,7 @@ curl -X POST http://127.0.0.1:8000/api/observations \
 
 This makes a budgeted Hydrogen request using only the retained permitted media. Accepted batches contain actual source-frame timestamps, image-space evidence regions, unknowns, and the gateway trace. The response header `X-Observation-Attempt-Id` identifies a retained attempt; failures also return an attempt ID. Retrieve accepted batches at `/api/observations/{id}` and frame audits at `/api/observations/{id}/evidence`. Window/crop reinspection, temporal event ownership, error handling, and annotation limitations are in [the observation API guide](docs/OBSERVATIONS_API.md).
 
-`OBSERVATION_STORAGE_DIR` defaults to `data/observations`. Keep that directory and its source captures together so persisted evidence links remain valid. Model extraction is currently an API workflow; the authored map demo does not yet display these observations.
+`OBSERVATION_STORAGE_DIR` defaults to `data/observations`. Keep that directory and its source captures together so persisted evidence links remain valid. Open **Evidence** in the workspace to record the selected video camera or capture its current snapshot, review retained pixels, and explicitly extract observations. Video interval controls offer only actual buffered segment boundaries. Extraction retries use the same sealed capture. This panel does not change the illustrative Vestry replay or start a generated world.
 
 ## Explore
 
@@ -83,9 +83,21 @@ See the detailed [architecture guide](docs/ARCHITECTURE.md), [camera API referen
 - MapLibre owns geographic projection and the shared WebGL context. A custom Three.js layer draws locally metric roads, instanced traffic, and the detailed ego vehicle. Local axes are east/north/up; headings are radians counterclockwise from east.
 - `ScenarioProvider.loadScenario()` returns the typed `ScenarioBundle`. `DemoScenarioProvider` is the initial implementation. A later backend adapter can supply compatible scene geometry and timestamped frames without rewriting the view.
 - Camera selection is separate from scene identity. Roadside video is an HTML layer above the map, not a calibrated projection onto it.
-- FastAPI supplies camera metadata, a DOT cache, bounded media transport, capture services, and model gateway status. HLS playlists resolve server-owned camera IDs and opaque resource tokens; arbitrary URLs are not accepted. The model pipeline is not yet wired into the authored demo UI.
+- FastAPI supplies camera metadata, a DOT cache, bounded media transport, capture services, and model gateway status. HLS playlists resolve server-owned camera IDs and opaque resource tokens; arbitrary URLs are not accepted. The Evidence drawer reads capture and observation artifacts independently from the authored demo.
 
-Public endpoints: `GET /api/health`, `GET /api/cameras`, `GET /api/vision/cameras`, and `/api/feeds/{camera_id}/index.m3u8` with tokenized child resources. See the local `/docs` route for exact schemas.
+
+Public endpoints: `GET /api/health`, `GET /api/cameras`, `GET /api/vision/cameras`, `/api/models/status`, and `/api/feeds/{camera_id}/index.m3u8` with tokenized child resources. See the local `/docs` route for exact schemas.
+
+## Optional model gateway
+
+See [model gateway setup and verification](docs/MODEL_GATEWAY.md) for backend-only credentials, budgets, model adapters, and the opt-in live smoke command. On Windows, inspect status with `.\.venv\Scripts\python -m backend.gateway.smoke`; this makes no model calls. All five services passed [live capability checks](docs/MODEL_GATEWAY_VERIFICATION.md) on November 21, 2026. Capture and observation use this gateway; edit, reference, and acceptance integration remain pending.
+
+The [Genie runtime](docs/GENIE_RUNTIME.md) adds authenticated session creation,
+a browser WebSocket relay, frame recording, bounded controls and explicit cleanup.
+The city UI is not connected to it yet. Production creation requires the trusted
+accepted-reference handoff from #8 and a separate backend `WORLD_API_TOKEN`.
+The opt-in development command is `.\.venv\Scripts\python -m backend.worlds.spike --live`;
+it creates one bounded paid session. See its [measured verification](docs/GENIE_RUNTIME_VERIFICATION.md).
 
 ## Verify
 
@@ -102,4 +114,4 @@ For a production-style local preview, run `npm run build`, then start `npm run d
 
 Implementation verification: production build, six scenario tests, and 19 API tests passed. Desktop (1440 × 900) and mobile (390 × 844) views were reviewed in-browser. Vestry HLS video visibly advanced through the local proxy. Camera changes, feed toggling, seeking, layer switches, and City/Intersection/Follow transitions were exercised; the active page kept at most one video element. Chrome reported approximately 120 map render events per second in Follow with one playing feed on the development machine; this is an observed local result, not a cross-device guarantee.
 
-The contracts, gateway, capture, and observation services are covered by automated tests. The primary project's live capability checks and real video/snapshot observation runs are recorded in [verification](docs/VERIFICATION.md). Full extraction/edit/image/world integration, Mayor Mode UI, human annotation, and independent evaluation remain acceptance work in [the Element 119 plan](GOTHAM_FORGE_PLAN.md). SUMO and calibrated reconstruction are later milestones.
+The contracts, gateway, capture, and observation services are covered by automated tests. The primary project's live capability checks and real video/snapshot observation runs are recorded in [verification](docs/VERIFICATION.md). The complete edit/image/world UI, human annotation, and independent evaluation remain acceptance work in [the Element 119 plan](GOTHAM_FORGE_PLAN.md). SUMO and calibrated reconstruction are later milestones.

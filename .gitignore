@@ -9,3 +9,5 @@ __pycache__/
 .env.*
 !.env.example
 data/
+.gateway/
+gateway.local.json

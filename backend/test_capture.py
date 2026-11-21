@@ -1,13 +1,14 @@
 import asyncio
 import base64
 import hashlib
+import json
 from pathlib import Path
 
 import httpx
 import pytest
 from fastapi import HTTPException
 
-from backend.capture import CaptureService, MAX_EPISODE_SECONDS, audit_video, parse_playlist
+from backend.capture import CaptureService, MAX_EPISODE_SECONDS, audit_video, canonical, digest, parse_playlist, run_decoder
 from backend.feeds import HLS_SOURCES
 
 CAMERA = "511ny-32998"
@@ -278,3 +279,199 @@ def test_discontinuity_sequence_metadata_is_not_a_discontinuity_marker():
     assert parsed["segments"][0]["durationSeconds"] == 5.005
     with pytest.raises(HTTPException):
         parse_playlist(CAMERA, BASE, "#EXTM3U\n#EXT-X-DISCONTINUITY\n#EXTINF:5.005,\na.ts\n")
+
+
+@pytest.mark.parametrize('damage', ['missing', 'malformed', 'wrong-shape'])
+def test_pin_ledger_recovery_preserves_sealed_evidence(tmp_path, damage):
+    async def run():
+        async with client_for(playlist()) as client:
+            service = CaptureService(tmp_path, client, auditor=fake_audit)
+            await service.poll_once(CAMERA)
+            episode = await service.create_episode(CAMERA, 0, 30)
+            path = tmp_path / 'pins.json'
+            if damage == 'missing':
+                path.unlink()
+            else:
+                path.write_text('{' if damage == 'malformed' else '{"bad-owner": false}')
+            restored = CaptureService(tmp_path, client, auditor=fake_audit)
+            assert restored.pins[episode['captureId']] == ['capture-retention']
+            restored.max_bytes = restored._usage()
+            with pytest.raises(HTTPException) as failure:
+                restored._reserve(1)
+            assert failure.value.status_code == 507
+            assert restored.manifest(episode['captureId']) == episode
+            if damage != 'missing':
+                assert list(tmp_path.glob('pins.corrupt-*.json'))
+    asyncio.run(run())
+
+
+def test_restart_removes_only_abandoned_preparation_pins(tmp_path):
+    async def run():
+        async with client_for(playlist()) as client:
+            service = CaptureService(tmp_path, client, auditor=fake_audit)
+            await service.poll_once(CAMERA)
+            episode = await service.create_episode(CAMERA, 0, 30)
+            service.pin(episode['captureId'], 'prepare_interrupted')
+            service.pin(episode['captureId'], 'attempt_accepted')
+            restored = CaptureService(tmp_path, client)
+            assert restored.pins[episode['captureId']] == ['attempt_accepted', 'capture-retention']
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize('damage', ['json', 'missing-hash', 'wrong-source', 'path-escape', 'partition-mismatch', 'time-gap'])
+def test_manifest_corruption_returns_typed_integrity_failure(tmp_path, damage):
+    async def run():
+        async with client_for(playlist()) as client:
+            service = CaptureService(tmp_path, client, auditor=fake_audit)
+            await service.poll_once(CAMERA)
+            episode = await service.create_episode(CAMERA, 0, 30)
+            path = tmp_path / 'episodes' / episode['captureId'] / 'manifest.json'
+            value = json.loads(path.read_text())
+            value.pop('manifestSha256')
+            if damage == 'wrong-source':
+                value['captureId'] = 'cap_other'
+            elif damage == 'path-escape':
+                value['media'][0]['path'] = '../../private-data'
+            elif damage == 'partition-mismatch':
+                value['media'][0]['partition'] = 'suffix'
+            elif damage == 'time-gap':
+                value['media'][1]['startSeconds'] += 1
+            if damage != 'missing-hash':
+                value['manifestSha256'] = digest(canonical(value))
+            path.write_text('{' if damage == 'json' else json.dumps(value))
+            with pytest.raises(HTTPException) as failure:
+                service.manifest(episode['captureId'])
+            assert failure.value.status_code == 409
+    asyncio.run(run())
+
+
+def test_missing_media_is_a_typed_integrity_failure(tmp_path):
+    async def run():
+        async with client_for(playlist()) as client:
+            service = CaptureService(tmp_path, client, auditor=fake_audit)
+            await service.poll_once(CAMERA)
+            episode = await service.create_episode(CAMERA, 0, 30)
+            path = tmp_path / 'episodes' / episode['captureId'] / episode['media'][0]['path']
+            path.unlink()
+            with pytest.raises(HTTPException) as failure:
+                service.read_prefix(episode['captureId'], 0)
+            assert failure.value.status_code == 409
+    asyncio.run(run())
+
+
+def test_source_sequence_reset_requires_new_history_and_preserves_episode(tmp_path):
+    async def run():
+        async with client_for(playlist(sequence=10)) as client, client_for(playlist(sequence=1)) as reset:
+            service = CaptureService(tmp_path, client, auditor=fake_audit)
+            old = await service.poll_once(CAMERA)
+            episode = await service.create_episode(CAMERA, 0, 30)
+            service.client = reset
+            await service.start(CAMERA)
+            await service.tasks[CAMERA]
+            assert service.history(CAMERA)['state'] == 'unavailable'
+            new = await service.start(CAMERA)
+            assert new['recordingId'] != old['recordingId']
+            assert new['latestSeconds'] is None
+            await service.close()
+            assert service.manifest(episode['captureId']) == episode
+    asyncio.run(run())
+
+
+def test_corrupt_live_ring_can_restart_without_losing_sealed_captures(tmp_path):
+    async def run():
+        async with client_for(playlist()) as client:
+            service = CaptureService(tmp_path, client, auditor=fake_audit)
+            await service.poll_once(CAMERA)
+            episode = await service.create_episode(CAMERA, 0, 30)
+            (tmp_path / 'rings' / CAMERA / 'index.json').write_text('{')
+            with pytest.raises(HTTPException) as failure:
+                service.history(CAMERA)
+            assert failure.value.status_code == 409
+            restarted = await service.start(CAMERA)
+            assert restarted['latestSeconds'] is None
+            await service.close()
+            assert service.manifest(episode['captureId']) == episode
+    asyncio.run(run())
+
+
+def test_decoder_timeout_includes_process_lifetime_after_pipes_close():
+    import sys
+    async def run():
+        with pytest.raises(TimeoutError):
+            await run_decoder([sys.executable, '-c', 'import os,time; os.close(1); os.close(2); time.sleep(3)'], output_limit=1024, timeout=.1)
+    asyncio.run(run())
+
+
+def test_decoder_output_is_bounded_before_collecting_the_whole_pipe():
+    import sys
+    async def run():
+        with pytest.raises(HTTPException) as failure:
+            await run_decoder([sys.executable, '-c', 'import sys; sys.stdout.write("x" * 1000000)'], output_limit=1024, timeout=3)
+        assert failure.value.status_code == 413
+    asyncio.run(run())
+
+
+def test_sealed_vod_playlist_serves_only_verified_prefix_with_original_durations(tmp_path):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from backend.capture import router
+    async def capture():
+        async with client_for(playlist(count=3, duration=5.005)) as client:
+            service = CaptureService(tmp_path, client, auditor=fake_audit)
+            await service.poll_once(CAMERA)
+            episode = await service.create_episode(CAMERA, 0, 15.015, split=10.01)
+            return service, episode
+    service, episode = asyncio.run(capture())
+    # The held-out bytes are neither opened nor advertised by the replay route.
+    suffix = tmp_path / 'episodes' / episode['captureId'] / episode['media'][2]['path']
+    suffix.write_bytes(b'not-for-review')
+    app = FastAPI()
+    app.state.capture = service
+    app.include_router(router)
+    with TestClient(app) as client:
+        url = f"/api/captures/episodes/{episode['captureId']}/index.m3u8"
+        response = client.get(url)
+        assert response.status_code == 200
+        assert response.headers['content-type'] == 'application/vnd.apple.mpegurl'
+        assert response.headers['cache-control'] == 'private, no-store'
+        assert '#EXT-X-TARGETDURATION:6\n' in response.text
+        assert '#EXT-X-PLAYLIST-TYPE:VOD\n' in response.text
+        assert response.text.count('#EXTINF:5.005,') == 2
+        assert response.text.endswith('#EXT-X-ENDLIST\n')
+        media_urls = [line for line in response.text.splitlines() if line.startswith('/')]
+        assert media_urls == [f"/api/captures/episodes/{episode['captureId']}/media/{index}" for index in (0, 1)]
+        assert all(client.get(media_url).status_code == 200 for media_url in media_urls)
+        assert client.get(f"/api/captures/episodes/{episode['captureId']}/media/2").status_code == 403
+        prefix = tmp_path / 'episodes' / episode['captureId'] / episode['media'][0]['path']
+        prefix.write_bytes(b'corrupted')
+        assert client.get(url).status_code == 409
+
+
+def test_vod_playlist_rejects_snapshot(tmp_path):
+    from backend.test_evidence_media import snapshot_capture
+    async def run():
+        service, episode = await snapshot_capture(tmp_path)
+        with pytest.raises(HTTPException) as failure:
+            service.prefix_playlist(episode['captureId'])
+        assert failure.value.status_code == 422
+        await service.client.aclose()
+    asyncio.run(run())
+
+
+def test_capture_received_at_is_byte_receipt_not_decoding_completion(tmp_path, monkeypatch):
+    import backend.capture as capture_module
+    before = '2026-11-21T15:00:00+00:00'
+    after = '2026-11-21T15:00:15+00:00'
+    clock = [before]
+    monkeypatch.setattr(capture_module, 'utc_now', lambda: clock[0])
+    async def delayed_audit(data, duration):
+        clock[0] = after
+        return await fake_audit(data, duration)
+    async def run():
+        async with client_for(playlist(count=1)) as client:
+            service = CaptureService(tmp_path, client, auditor=delayed_audit)
+            await service.poll_once(CAMERA)
+            episode = await service.create_episode(CAMERA, 0, 10)
+            assert episode['receivedAt'] == before
+            assert episode['createdAt'] == after
+    asyncio.run(run())

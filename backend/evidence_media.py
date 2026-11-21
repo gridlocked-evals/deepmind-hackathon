@@ -19,7 +19,7 @@ from uuid import uuid4
 
 from fastapi import HTTPException
 
-from .capture import CaptureService
+from .capture import CaptureService, MAX_DECODER_ALLOCATION, run_decoder, valid_dimensions
 from .contracts import CaptureContext, EvidenceRef, ImageRegion, TimeInterval
 
 DEFAULT_MAX_FRAMES = 121
@@ -102,41 +102,16 @@ class _Segment:
 
 
 async def _run(command: list[str], *, output_limit: int = MAX_PROBE_JSON_BYTES, timeout: float = 30) -> bytes:
-    try:
-        process = await asyncio.create_subprocess_exec(*command, stdout=asyncio.subprocess.PIPE,
-                                                       stderr=asyncio.subprocess.PIPE)
-    except (FileNotFoundError, OSError):
-        raise _error(503, "ffmpeg and ffprobe are required to prepare camera evidence.") from None
-
-    async def read_bounded(stream: asyncio.StreamReader, maximum: int) -> bytes:
-        output = bytearray()
-        while chunk := await stream.read(64 * 1024):
-            if len(output) + len(chunk) > maximum:
-                raise _error(413, "Media decoder output exceeds the evidence preparation budget.")
-            output.extend(chunk)
-        return bytes(output)
-
-    readers = [asyncio.create_task(read_bounded(process.stdout, output_limit)),
-               asyncio.create_task(read_bounded(process.stderr, 256 * 1024))]
-    try:
-        output, errors = await asyncio.wait_for(asyncio.gather(*readers), timeout)
-        await process.wait()
-        if process.returncode or errors.strip():
-            raise _error(502, "Camera evidence could not be fully decoded; no partial input was accepted.")
-        return output
-    except (BaseException,):
-        if process.returncode is None:
-            process.kill()
-        for reader in readers:
-            reader.cancel()
-        await asyncio.gather(*readers, return_exceptions=True)
-        await process.wait()
-        raise
+    output, errors, code = await run_decoder(command, output_limit=output_limit, timeout=timeout)
+    if code or errors.strip():
+        raise _error(502, "Camera evidence could not be fully decoded; no partial input was accepted.")
+    return output
 
 
 async def _probe(path: Path, *, snapshot: bool) -> dict:
     output = await _run([
-        "ffprobe", "-v", "error", "-protocol_whitelist", "file,pipe", "-select_streams", "v:0",
+        "ffprobe", "-v", "error", "-max_alloc", str(MAX_DECODER_ALLOCATION),
+        "-protocol_whitelist", "file,pipe", "-select_streams", "v:0",
         "-show_frames", "-show_entries", "frame=best_effort_timestamp_time,width,height:stream=width,height",
         "-of", "json", str(path),
     ])
@@ -145,7 +120,7 @@ async def _probe(path: Path, *, snapshot: bool) -> dict:
         frames = value["frames"]
         stream = value["streams"][0]
         width, height = int(stream["width"]), int(stream["height"])
-        if not isinstance(frames, list) or not frames or len(frames) > MAX_DECODED_FRAMES or min(width, height) <= 0:
+        if not isinstance(frames, list) or not frames or len(frames) > MAX_DECODED_FRAMES or not valid_dimensions(width, height):
             raise ValueError()
         if snapshot and len(frames) != 1:
             raise ValueError()
@@ -312,7 +287,8 @@ async def _prepare(captures: CaptureService, capture_id: str, *, window: TimeInt
             else:
                 expression = "+".join(f"eq(n\\,{frame.local_index})" for frame in selected)
                 filters = f"select={expression},format=yuv444p,crop={width}:{height}:{x}:{y}:exact=1"
-                raw_images = await _run(["ffmpeg", "-hide_banner", "-v", "error", "-protocol_whitelist", "file,pipe",
+                raw_images = await _run(["ffmpeg", "-hide_banner", "-v", "error", "-max_alloc", str(MAX_DECODER_ALLOCATION),
+                            "-protocol_whitelist", "file,pipe",
                             "-noautorotate", "-i", str(segment.path), "-map", "0:v:0", "-an", "-sn",
                             "-vf", filters, "-fps_mode", "passthrough", "-q:v", "3", "-threads", "1",
                             "-c:v", "mjpeg", "-f", "image2pipe", "pipe:1"],

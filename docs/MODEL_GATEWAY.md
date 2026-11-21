@@ -1,88 +1,257 @@
-# Element 119 model gateway
+# Model gateway (issue #3)
 
-`backend/gateway` provides server-only, bounded calls for the five required model IDs. No model request runs on application startup. `GET /api/models/status` reports configuration, verification state and reserved usage without exposing credentials.
+The backend now has adapters for Hydrogen and Carbon structured inference, Nano
+Banana image generation, typed Decisions judgments, and a bounded Genie capability
+probe. `GET /api/models/status` is read-only and never invokes a model. Existing
+camera endpoints still start without model credentials or legacy Pharos services.
 
-## Credentials
+**All five services passed live capability checks on November 21, 2026.** Each
+returned validated output and reported usage. Genie accepted the generated
+reference, returned frames and confirmed completion. See the
+[live verification record](MODEL_GATEWAY_VERIFICATION.md), including the initial
+Nano Banana failure and the adapter correction. These capability probes do not
+establish project throughput limits or submission eligibility.
 
-Place the two Gemini AI Studio keys in the ignored repository-root `.env`:
+## Configure and inspect
 
-```dotenv
-GEMINI_API_KEY=your_tier_3_key
-WORKSHOP_API_KEY=your_workshop_key
-GEMINI_KEY_PROFILE=primary
-GENIE_ENABLED=false
+Install `backend/requirements.txt` into the project virtual environment. Copy
+`.env.example` to `.env`, then set `GEMINI_API_KEY` (primary) and optionally
+`WORKSHOP_API_KEY`. Select one explicitly with `GEMINI_KEY_PROFILE=primary` or
+`workshop`; there is no automatic project fallback. Environment variables take
+precedence over `.env`. Neither key uses a
+`VITE_` prefix or reaches the frontend. Credentials, raw upstream error bodies,
+and connection authorization tokens are excluded from the gateway records.
+
+Optional: copy `gateway.example.json` to `gateway.local.json` and set
+`GATEWAY_CONFIG=gateway.local.json` in `.env`. Both local files are ignored by Git.
+All API workers and CLI processes must use the same data directory and budget
+configuration. The default directory is the repository's `.gateway/`.
+
+From the repository root, on Windows:
+
+```powershell
+.\.venv\Scripts\python -m backend.gateway.smoke
+.\.venv\Scripts\python -m uvicorn backend.main:app --host 127.0.0.1 --port 8000
 ```
 
-`primary` selects `GEMINI_API_KEY`; `workshop` selects `WORKSHOP_API_KEY`. All five adapters use the selected credential. There is no fallback between projects. A missing selected key blocks requests. Restart the backend after changing the profile. Credentials never use a `VITE_` prefix and never enter the frontend.
+On macOS/Linux, use `.venv/bin/python` instead. The CLI and
+`http://127.0.0.1:8000/api/models/status` show these states:
 
-Genie is optional and disabled by default to conserve credits. `GENIE_ENABLED=false` blocks its requests before spending admission or session creation. To explicitly enable billable world sessions later, set `GENIE_ENABLED=true` and restart the backend; choosing `--service genie` never enables it automatically. Prior successful Genie trace records are preserved.
+| State | Meaning |
+| --- | --- |
+| `configured` | Credentials exist, but calls are disabled in configuration. |
+| `unverified` | Credentials are configured; there is no matching successful probe, or a request is pending. |
+| `connected` | The latest dispatched call succeeded within the freshness interval. |
+| `stale` | The latest success is older than the configured freshness interval. |
+| `unavailable` | Credentials are absent, or the latest dispatched call failed. |
 
-## API surfaces
+Verification is scoped to the credential fingerprint and configuration hash.
+Status also exposes recorded latency, provider/local request IDs, whether usage
+was reported, expired pricing, and budget blocks. A connected service can still
+be blocked by a spending limit. Status does not list a guessed project quota.
 
-| Stage | Exact model | Transport |
-| --- | --- | --- |
-| Observation/navigation | `gemini-4-hydrogen` | Stateless Interactions JSON |
-| Edit compilation/repair | `gemini-4-carbon` | Stateless Interactions JSON |
-| Reference image | `gemini-nano-banana-2.1` | Stateless Interactions JSON |
-| Typed judgment | `gemini-decision-1` | Decisions JSON, validated typed answers |
-| Optional world capability probe | `genie-4` | Interactions creation plus SDK WebSocket session |
+Genie is optional and disabled by default. `GENIE_ENABLED=true` explicitly enables
+billable world requests, while `false` blocks both the probe and session manager.
+Default live smoke batches skip disabled Genie; explicit Genie requests fail without
+provider traffic. Status includes `key_profile`, service `enabled`, and `optional`.
 
-The current [Interactions documentation](https://aistudio.google.com/docs/interactions-overview) recommends Interactions for new text/image integrations. JSON calls use the documented `2026-05-20` API revision and `store=false`. [Decisions](https://aistudio.google.com/docs/decisions-api) has its own endpoint and typed result semantics. [Genie](https://aistudio.google.com/docs/genie) uses a separate connect/send/receive/complete lifecycle; disconnecting alone does not stop generation.
+## Live capability checks
 
-The Genie adapter is a capability probe, not the playable session manager from issue #9. It creates a world, receives one actual JPEG frame, hashes it, requests completion, and waits for the terminal acknowledgment. Deadline, cancellation, stream error and connect failure trigger cleanup. If socket cleanup fails, the installed SDK's `interactions.cancel(id)` provides a separate server-side cancellation path. An unconfirmed termination is recorded with the remote interaction ID and prevents further Genie sessions. Resolve that remote interaction before reconciling its ledger entry; deleting the ledger does not stop provider billing.
+These commands make real, potentially billable requests once credentials exist:
 
-## Calling a stage
+```powershell
+.\.venv\Scripts\python -m backend.gateway.smoke --live --services hydrogen carbon decisions
+.\.venv\Scripts\python -m backend.gateway.smoke --live
+```
+
+The full run exercises image input and structured Hydrogen output; structured
+Carbon compilation; Nano Banana image editing; Decisions image judgments; and
+Genie creation, WebSocket connection, world setup, received JPEG pixels, a short
+key press/release, and explicit completion. A generated Nano Banana reference is
+passed to Genie when available; an individually selected Genie probe uses text.
+All probe inputs are synthetic development fixtures, clearly excluded from
+external-camera evaluation and submission evidence.
+
+The report records every selected service's success/failure, exact model ID,
+local/provider request IDs, payload/result hashes, reported usage and accounting
+basis. The SQLite ledger records every attempt's latency and timestamps. A live
+report exits nonzero if any selected service fails or lacks reported usage.
+`request_id` is the locally generated durable attempt ID. The live stateless
+inference and Decisions responses omitted provider IDs; their absence stays
+explicit and is not replaced with a fabricated server ID. Genie must return its
+provider interaction ID because termination depends on it.
+One successful probe establishes access to that method, not the project's maximum
+RPM/TPM or sustainable control cadence. Rejected quotas are recorded as
+`quota_exceeded`; actual load limits remain to be measured with the integrated
+workloads. There is no automatic throughput stress test.
+
+## Backend integration contract
+
+`backend/gateway` is a server-only library. Backend stages use `app.state.models`:
+the observation route resolves retained source evidence before invoking Hydrogen.
+Local capture/observation routes are intended for a loopback development server;
+add deployment authentication before exposing these write routes publicly.
 
 ```python
-result = await gateway.run(
-    "hydrogen",
-    {"input": [{"type": "text", "text": "Describe visible street evidence."},
-               {"type": "image", "mime_type": "image/jpeg", "data": encoded_bytes}]},
-    prompt_id="observe-v1",
-    config_id="capture-inspection-v1",
-    reserve_tokens=8192,
-    reserve_usd=1,
-    source_id="511ny-32998",
-    capture_id="capture-example",
-    original_media_sha256=(original_sha256,),
+from pydantic import BaseModel, Field
+from backend.gateway import CallContext, Service
+
+class Observation(BaseModel):
+    visible_count: int = Field(ge=0)
+
+result = await gateway.generate(
+    Service.HYDROGEN,
+    stage="observation",
+    input_value=[
+        {"type": "text", "text": "Count visible vehicles; do not infer hidden actors."},
+        {"type": "image", "mime_type": "image/jpeg", "data": captured_base64},
+    ],
+    context=CallContext(
+        episode_id="episode-1", source_id="camera-1", capture_id="capture-1",
+        prompt_id="observation-v1", purpose="submission",
+    ),
+    response_model=Observation,
 )
 ```
 
-The caller retains `result.output` as its artifact and validates the stage-specific contract. `result.text` extracts only the final consecutive model text from REST `steps`, excluding thoughts, source text and tool content. For JSON extraction, pass `response_format={"type": "text", "mime_type": "application/json", "schema": schema}` and validate `result.text` with the stage-specific Pydantic model. The gateway returns a validated shared `ModelTrace`. `requestId` is locally assigned; `providerRequestId` contains the provider identifier when supplied and is otherwise explicitly null. `inputSha256` hashes the exact canonical request bytes, while `originalMediaSha256` preserves caller-provided original-media provenance separately. UTC timestamps end in `Z`.
+Use `generate` for Hydrogen, Carbon and Nano Banana, `judge` for Decisions, and
+`probe_world` only for development smoke tests. `judge` validates yes/no (`noul`),
+choice and score outputs, confidence, probability maps, score legends and rubric
+consistency. Domain-specific acceptance thresholds belong to issues #8 and #11.
 
-Media must be inline immutable bytes. URL/file references, tools, background jobs, streaming JSON requests and previous interaction references are rejected. Retries resend identical serialized bytes; they never capture another camera moment. Hydrogen/Carbon capability probes do not substitute for meaningful observation/edit outputs on a real submission episode.
+| Stage | Required service |
+| --- | --- |
+| `observation`, `navigation` | Hydrogen |
+| `compilation`, `repair` | Carbon |
+| `reference` | Nano Banana |
+| `image_gate`, `temporal_gate` | Decisions |
+| `world` | Genie |
 
-## Usage admission and logging
+Inputs are strings or inline text/image/video parts. URLs and mutable remote file
+references are rejected. Serialize the complete payload once before the first
+await; every retry sends those same bytes. Upstream capture must already be
+bounded and immutable. Capture timing, allowed prefix validation, domain schemas,
+and the 120-second episode cap remain owned by issues #2/#4/#5.
 
-The SQLite ledger at `MODEL_LEDGER_PATH` survives restart. Relative paths resolve against the repository root. Each attempt reserves tokens and dollars in a transaction before dispatch. Retries, unknown outcomes, timeouts and failed requests retain reservations. Actual token overages increase the ledger charge. The ledger records model, prompt/config IDs, input/output hashes, source/capture references, timestamps, latency, outcome, usage when reported and provider request ID. It never stores prompts, media bytes, provider error bodies, continuation tokens, API keys or raw output. Numeric HTTP status and an allowlisted provider status enum distinguish authentication, missing-model, quota and malformed-request failures without storing error prose. Measured usage is recorded even when output validation fails. A private credential digest scopes verification to the selected key; it is excluded from API results.
+`require_submission_models(episode_id=..., source_id=..., capture_id=...)` must be
+called by the eventual submission pipeline before declaring an episode complete.
+It requires successful schema-validated observation and compilation traces for
+that exact capture. Smoke/development traces, plain-text pings, navigation-only
+calls, and the other three services cannot satisfy that pair. The domain schemas
+and substantive output checks still belong to #5/#6; this gateway cannot judge
+whether an arbitrary caller-supplied schema describes a meaningful street edit.
 
-Dollar reservations are **caller-declared estimates, not measured provider prices or hard billing ceilings**. The gateway prevents new work that exceeds configured reservations; it cannot guarantee a provider invoice cap. Account-level billing controls and correct conservative per-request estimates are still needed. Token reservations are admission limits, with provider overages preserved; generation output is capped separately. Missing provider token usage remains null, never zero. Project quota maxima remain unmeasured until deliberately tested; a successful smoke call only verifies that capability for that project at that time.
+## Existing capture-branch configuration
 
-| Environment variable | Default | Meaning |
-| --- | --- | --- |
-| `GENIE_ENABLED` | `false` | Explicit opt-in for billable Genie sessions |
-| `MODEL_LEDGER_PATH` | `data/gateway.sqlite3` | Persistent private attempt ledger |
-| `MODEL_MAX_CONCURRENCY` | `2` | In-flight calls per server process |
-| `MODEL_MAX_RETRIES` | `1` | Additional attempts, maximum 3; Genie never retries creation |
-| `MODEL_TIMEOUT_SECONDS` | `30` | Per-attempt deadline; bounded Genie cleanup may extend it |
-| `MODEL_TOTAL_BUDGET_USD` | `20` | Total admission reservation limit |
-| `MODEL_DEMO_RESERVE_USD` | `5` | Reserved for explicit `demo=True` calls |
-| `MODEL_STAGE_BUDGET_USD` | `5` | Limit for each of the five service stages |
-| `MODEL_STAGE_TOKEN_BUDGET` | `100000` | Token admission limit per service stage |
-| `MODEL_MAX_REQUEST_TOKENS` | `16384` | Largest allowed single-attempt token reservation |
-| `MODEL_MAX_REQUEST_USD` | `4` | Largest allowed single-attempt dollar reservation |
+The merged application uses one gateway and one operational ledger at `.gateway/`.
+On startup, the former `data/gateway.sqlite3` ledger (or `MODEL_LEDGER_PATH`) is
+read-only imported once per legacy request ID. Its full token and dollar
+reservations remain charged, including failures and token overages; migration does
+not manufacture fresh headroom or reinterpret reservations as provider invoices.
+The original database and historical observation traces remain intact.
 
-Use one API worker for the configured concurrency cap. SQLite coordinates spending admission across processes, but the concurrency semaphore is process-local. Existing evidence is never removed when a budget stops new work. The ledger budget is intentionally cumulative until an operator archives/reconciles a run; restart does not refill it.
+Existing `MODEL_*` environment ceilings override the equivalent JSON settings.
+`MODEL_STAGE_BUDGET_USD` and `MODEL_STAGE_TOKEN_BUDGET` additionally cap each model
+service across its stages, preventing a move from observation to navigation from
+resetting the Hydrogen allowance. A legacy total request-token ceiling is split
+between bounded input and output allowances. Explicit larger JSON allowances must
+be reconciled deliberately. Copying `.env.example` therefore has stricter limits
+than constructing `GatewayConfig()` with library defaults below.
 
-State meanings: `configured` means the chosen key is present but untested; `unverified` means a request began without a known final result; `connected` requires a recent successful response from that same key; `stale` means its success is older than five minutes; `unavailable` means missing credentials or a failed last attempt. Provider failures return stable typed messages rather than raw exceptions. Disabled Genie remains listed with `optional=true`, `enabled=false`, `status=unavailable` and `error=disabled`, even if a historical successful trace exists.
+`ObservationService` uses `generate(..., response_model=ExtractionOutput)` and
+`gateway.trace(...)`; provider-facing schema bounds are projected to fit the
+serving grammar while Pydantic still validates all bounds and evidence references.
+Use `qualify=False` when a stage needs domain checks after structured output. Only
+after those checks and durable artifact storage, call `accept_artifact(result,
+artifact_id=..., artifact_sha256=...)` to bind the accepted output and qualify the
+request. Observations follow this path so nonexistent frame references never count
+as accepted submission evidence. No legacy `core.py` execution path or second
+spending ledger remains active.
 
-## Capability smoke tests
+## Accounting and evidence
 
-```sh
-.venv/bin/python -m backend.smoke_models --live --service hydrogen
-.venv/bin/python -m backend.smoke_models --live --service all
+Defaults are a $20 total local budget with $5 held for explicitly tagged demo
+calls, $5 and one million tokens per stage, two concurrent calls, two total
+attempts, and a 45-second request deadline. Input and output allowances default
+to 32,768 and 4,096 tokens per call. These are configurable development limits,
+not measured provider limits. Only demo calls can consume the reserve; they
+still obey stage and total budgets.
+
+Before each attempt, a SQLite transaction reserves its token/dollar allowance.
+Concurrent API/CLI processes cannot spend the same remaining allowance. Each
+retry gets its own reservation and trace. Only explicit 429/502/503/504 responses
+are retried with bounded delay; timeouts, malformed outputs, authentication
+failures and Genie creation are not retried. Cleanup never needs a new spending
+reservation.
+
+Reported input, output and thought tokens reconcile successful and invalid-output
+calls. Cost estimates use the configured standard rate card, the highest output
+modality rate, and no cache discounts. They are conservative estimates, not
+invoices. Missing usage, errors and interrupted calls retain their reservation.
+An observed allowance overrun latches a durable block on new calls. Review the
+evidence and reconcile the provider account before manually resolving a block;
+there is deliberately no automatic budget reset.
+
+**Local admission budgets are not provider-enforced billing caps.** Media input
+token allowances must be sized for the actual workload; the gateway does not
+perform token-count preflight. Output limits are sent to standard generation;
+input allowances and Genie duration are enforced locally. Lost connections or
+unreported usage can make the final upstream charge uncertain. Records retain
+that uncertainty rather than reporting zero cost.
+
+Rates were checked against the [official pricing page](https://aistudio.google.com/docs/pricing)
+on November 21, 2026. The default rate card expires November 30 because Carbon's
+published prices change December 1. Calls stop after expiry until a reviewed
+rate card and validity date are configured.
+
+`.gateway/usage.sqlite3` stores attempt IDs, requested model, stage, context,
+credential/config fingerprints, hashes, UTC Unix timestamps, latency, outcomes,
+and usage. `.gateway/artifacts/<sha256>.json` stores immutable request/result
+evidence and smoke reports. Files publish atomically. They remain available when
+a budget is exhausted or a process restarts; the directory is not publicly
+served or committed. Keep this directory with the experiment evidence.
+
+## Genie termination and recovery
+
+The separate [Genie session runtime](GENIE_RUNTIME.md) now provides authenticated
+streaming and bounded controls on top of this ledger. `probe_world` remains the
+small capability probe; use the runtime for playable-world lifecycle integration.
+
+The probe allows 15 seconds from connection through frame receipt/completion,
+plus a separate five-second cleanup deadline. It sends key-up after 100 ms
+independently of frame arrival, requests completion, and requires a terminal
+acknowledgment. Connection/setup/stream failures trigger HTTP cancellation.
+If termination is unconfirmed, new worlds are blocked across restarts.
+
+For a recorded interrupted interaction with a known provider ID:
+
+```powershell
+.\.venv\Scripts\python -m backend.gateway.smoke --cancel-world LOCAL_REQUEST_ID
 ```
 
-`--live` is required because the command makes billable calls. `--use-demo-reserve` explicitly admits work against the protected reserve. CLI output contains sanitized trace/usage/status JSON; provider output and credentials are not printed. The all-services probe skips disabled Genie and reserves $4 across the four enabled stages by default, plus any inference retries. With `GENIE_ENABLED=true`, it also probes Genie and reserves $8 across all five stages. This is an admission reservation, not a quoted or measured charge. Genie requests one frame and immediately terminates the session. Missing keys fail visibly without making requests. Hydrogen/Carbon probes allow 2,048 output tokens and Nano Banana allows 8,192 with an explicit 1K image because thinking and generated media consume the generation budget; very small caps can terminate before a final answer. Such a provider response returns typed `incomplete_output`, preserves measured usage, and never continues or retries automatically.
+This uses the recorded interaction and credential fingerprint, bypasses new-work
+budgets, and preserves previous failure evidence. If creation timed out before
+an interaction ID was returned, automatic cancellation is impossible; check the
+provider project before reconciling that record. Do not delete the ledger to
+clear a termination block. Production playable sessions, scoped browser tokens,
+accepted-image gating and the long-running watchdog remain issue #9.
 
-Offline validation: `python -m pytest backend/test_gateway.py -q` covers provider payloads, immutable retries, typed failures, timeouts, concurrency, budgets/restart, key rotation, trace schema compatibility, invalid judgment output, and Genie completion/cancellation around creation, connection and streaming. These mocks validate code behavior, not real project access, quota maxima, model quality or operational image/navigation gates. Real successful calls and measured limits remain required before closing issue #3.
+## Verification and remaining acceptance
+
+Run `.venv/Scripts/python -m pytest backend -q` on Windows (or the equivalent
+virtualenv path), `npm run build`, and `npm test`. Gateway tests use HTTP and
+session doubles; they are not live-service evidence. They exercise retries,
+timeouts, cancellation, concurrency, restart persistence, budgets, malformed
+responses, protocol separation, secret redaction, and required model roles.
+
+Remaining integrated acceptance includes measured project behavior under actual
+demo load and meaningful Hydrogen and Carbon episode outputs from real camera
+evidence. Successful capability probes do not establish submission eligibility.
+
+Protocol references: [Interactions](https://aistudio.google.com/api-reference/interactions-api/create-interaction),
+[structured output](https://aistudio.google.com/docs/structured-output),
+[image generation](https://aistudio.google.com/docs/image-generation),
+[Decisions](https://aistudio.google.com/docs/decisions-api),
+[Genie](https://aistudio.google.com/docs/genie). Genie uses the pinned
+`google-genai==3.6.1` SDK for WebSocket transport; the HTTP inference and cleanup
+adapters use `httpx` without SDK retries or automatic continuation.
