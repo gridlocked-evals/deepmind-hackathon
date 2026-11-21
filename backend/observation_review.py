@@ -96,12 +96,15 @@ def score_review(store: ArtifactStore, report: dict, review: ManualReview) -> di
             if best and best['disposition'] != 'accepted':
                 presence = 'model_abstained'
             elif best and expected.kind == 'count':
-                if iou(best['region'], region) < .95:
-                    presence = 'count_region_mismatch_unscored'
-                elif best['count']['lower'] == 0:
-                    presence = 'correct_absence' if best['count']['upper'] == 0 else 'model_abstained'
-                else:
-                    presence = 'false_positive'
+                comparable = [row for row in accepted if iou(row['region'], region) >= .95]
+                # Check every comparable count: a zero-count row must not hide
+                # another accepted positive claim or an uncertain interval.
+                positive = [row for row in comparable if row['count']['lower'] is not None and row['count']['lower'] > 0]
+                uncertain = [row for row in comparable if row['count']['lower'] is None or row['count']['upper'] != 0]
+                matches = positive or uncertain or comparable or accepted
+                best = max(matches, key=lambda row: iou(row['region'], region))
+                presence = ('false_positive' if positive else 'model_abstained' if uncertain else
+                            'correct_absence' if comparable else 'count_region_mismatch_unscored')
             elif best:
                 presence = 'false_positive'
             else:

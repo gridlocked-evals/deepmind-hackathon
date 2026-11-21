@@ -79,6 +79,27 @@ describe('operator auth, optional world and truthful gate', () => {
     await worldApi.create(reference, gate, token); const options = fetch.mock.calls[1][1] as RequestInit; const body = JSON.parse(options.body as string);
     expect(body.context).toEqual({ episode_id: saved().capture.id, source_id: saved().capture.id, capture_id: saved().capture.id, purpose: 'submission', prompt_id: 'interactive-world-ui-v1' }); expect(body.seconds).toBe(15); expect(body.max_usd).toBe('2.50'); expect(options.body).not.toContain(token);
   });
+  it('does not start a paid world after the view closes during handoff', async () => {
+    const pending = deferred<Response>(), lifetime = new AbortController();
+    const fetch = vi.fn<(url: string, options?: RequestInit) => Promise<Response>>(() => pending.promise); vi.stubGlobal('fetch', fetch);
+    const creating = worldApi.create(reference, gate, token, lifetime.signal);
+    lifetime.abort();
+    pending.resolve(new Response(JSON.stringify({ acceptedReference: 'a'.repeat(64), worldPrompt: 'Bounded proposal', context: {} }), { status: 200 }));
+    await expect(creating).rejects.toThrow('cancelled before the paid session');
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(fetch.mock.calls[0][0]).toContain('/accepted-references');
+  });
+  it('retains a started world response for cleanup when the view closes', async () => {
+    const pending = deferred<Response>(), lifetime = new AbortController();
+    const fetch = vi.fn(async (url: string) => url.endsWith('accepted-references')
+      ? new Response(JSON.stringify({ acceptedReference: 'a'.repeat(64), worldPrompt: 'Bounded proposal', context: {} }), { status: 200 })
+      : pending.promise); vi.stubGlobal('fetch', fetch);
+    const creating = worldApi.create(reference, gate, token, lifetime.signal);
+    await vi.waitFor(() => expect(fetch).toHaveBeenCalledTimes(2));
+    lifetime.abort();
+    pending.resolve(new Response(JSON.stringify({ session_id: 'session-to-stop' }), { status: 200 }));
+    await expect(creating).resolves.toMatchObject({ session_id: 'session-to-stop' });
+  });
 });
 describe('bounded human world controls', () => {
   it('requires running state and a received source frame before movement', () => { expect(canSendMovement({ state: 'running' }, false)).toBe(false); expect(canSendMovement({ state: 'running' }, true)).toBe(true); expect(canSendMovement({ state: 'stopping' }, true)).toBe(false); });
