@@ -158,3 +158,15 @@ def test_baseline_is_single_hydrogen_call():
     assert baseline.model_id == "gemini-4-hydrogen" and baseline.added_calls is None
     with pytest.raises(ValidationError):
         BaselineDefinition(prompt_id="p", input_sha256=H, schema_sha256=H, calibration_sha256=H, calls=2)
+
+
+def test_final_run_reads_fail_after_lock_changes(tmp_path):
+    test_bytes = b"test clip"
+    (tmp_path / "test.ts").write_bytes(test_bytes)
+    path = tmp_path / "lock.json"
+    pinned = lock(manifest(ep("d1"), ep("t1", "test", hash=digest(test_bytes))), path)
+    run = FinalRun(path, pinned)
+    assert read_source(tmp_path / "test.ts", None, run)[0].episode_id == "t1"
+    path.write_text(path.read_text().replace('"t1"', '"t1x"'))  # edit the lock after the run was opened
+    with pytest.raises(ValueError, match="changed"):
+        read_source(tmp_path / "test.ts", None, run)

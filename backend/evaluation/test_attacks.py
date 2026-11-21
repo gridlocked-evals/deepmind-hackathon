@@ -174,9 +174,9 @@ def test_pair_voids_across_variants(tmp_path):
     # A3b
     base = score(tmp_path, fake_judge(visible_from=30, cleared_from=100))
     void = lambda r: base.model_copy(update={"outcome": "void", "void_reason": r})
-    out = pair_voids({"a": {"infra": void("intervention"), "both": void("never_rendered"), "shed": void("not_avoidable")},
+    out, dropped = pair_voids({"a": {"infra": void("intervention"), "both": void("never_rendered"), "shed": void("not_avoidable")},
                       "b": {"infra": base, "both": void("coherence_lost"), "shed": base}})
-    assert set(out["a"]) == set(out["b"]) == {"both", "shed"}
+    assert set(out["a"]) == set(out["b"]) == {"both", "shed"} and dropped == ["infra"]
     assert out["a"]["both"].outcome == out["b"]["both"].outcome == "void"
     shed = out["a"]["shed"]
     assert shed.outcome == "unresolved" and shed.void_reason is None and shed.paired_void_reason == "not_avoidable"
@@ -227,10 +227,18 @@ def test_fog_is_off_the_menu_and_cleared_means_driven_past():
     assert "behind the vehicle" in text and "on its own" in text and "out of its path" not in text
 
 
-def test_stamp_send_frames_matches_steering_sent_in_order():
-    a, b = record(text="first"), record(text="second")
+def test_stamp_send_frames_bounds_each_send_by_decision_frames():
     sent = lambda text, frame: {"kind": "steering_sent", "text_sha256": digest(text.encode()), "frame_index": frame}
-    steers = [sent("other", 5), sent("first", 40), sent("second", 300), sent("first", 600)]
-    assert [r.send_frame for r in stamp_send_frames([a, b, a], steers)] == [40, 300, 600]
-    with pytest.raises(ValueError):
-        stamp_send_frames([b, a, a], steers)  # second "first" would have to precede "second"
+    ped = lambda frame: record(frame=frame, text="A pedestrian steps out.")  # same default wording twice
+    steers = [sent("other", 5), sent("A pedestrian steps out.", 30), sent("A pedestrian steps out.", 300)]
+    assert [r.send_frame for r in stamp_send_frames([ped(270), ped(24)], steers)] == [30, 300]
+    # Review repro: the first attack's send never happened. It must not take the second attack's event.
+    with pytest.raises(ValueError, match="decided at frame 24"):
+        stamp_send_frames([ped(24), ped(270)], steers[2:])
+
+
+def test_dropped_imminence_frame_falls_back_to_next_recorded_sample(tmp_path):
+    frames = [f for f in recording(tmp_path) if f.index != 37]  # 37 is the fixed imminence frame
+    s = asyncio.run(score_attack(record(), frames, fake_judge(visible_from=40, cleared_from=100, imminent={43}),
+                                 CONTEXT, **TIMING))
+    assert s.outcome == "void" and s.void_reason == "not_avoidable"

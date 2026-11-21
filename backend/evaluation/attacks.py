@@ -174,16 +174,21 @@ INFRASTRUCTURE = "low_throughput"  # the only reason not caused by the defender'
 
 
 def stamp_send_frames(records: list[AttackRecord], steers: list[dict]) -> list[AttackRecord]:
-    """Set each record's send_frame from the `steering_sent` event with its text hash, matched in order."""
-    out, cursor = [], 0
-    for r in records:
+    """Set each record's send_frame from its `steering_sent` event, returned in decision order.
+
+    A record's incoming send_frame is its decision frame. It takes the first event with its text hash
+    at or after that frame and before the next record's decision frame, so repeated menu wording
+    can't shift a send onto another attack. Raises if a record has no such send.
+    """
+    ordered = sorted(records, key=lambda r: r.send_frame)
+    out = []
+    for i, r in enumerate(ordered):
         sha = digest(r.script.steering_text.encode())
-        while cursor < len(steers) and steers[cursor].get("text_sha256") != sha:
-            cursor += 1
-        if cursor == len(steers):
-            raise ValueError(f"no steering_sent event for {r.script.attack_type} attack ({sha[:12]})")
-        out.append(r.model_copy(update={"send_frame": steers[cursor]["frame_index"]}))
-        cursor += 1
+        upper = ordered[i + 1].send_frame if i + 1 < len(ordered) else float("inf")
+        match = next((e for e in steers if e.get("text_sha256") == sha and r.send_frame <= e["frame_index"] < upper), None)
+        if match is None:
+            raise ValueError(f"no steering_sent event for {r.script.attack_type} attack decided at frame {r.send_frame}")
+        out.append(r.model_copy(update={"send_frame": match["frame_index"]}))
     return out
 
 
@@ -246,7 +251,8 @@ async def score_attack(record: AttackRecord, frames: list[RecordedFrame], judge:
                            if action in CONTROL_ACTIONS and s <= window_end and e >= start), default=(None, None))
     scan_end = window_end if cut is None else max(start, cut - 1)  # frames after an intervention starts can't be judged
     sampled = range(start + 1, scan_end + 1, sample_every)
-    imminent_at = next((i for i in sampled if i >= start + render_lag_frames), None)
+    # First recorded sample after the lag: a dropped frame must not skip the imminence check.
+    imminent_at = next((i for i in sampled if i >= start + render_lag_frames and i in by_index), None)
 
     questions = {"visible": visible_question(attack), "contact": contact_question(attack), "coherent": COHERENT_QUESTION,
                  "cleared": cleared_question(attack), "imminent": imminent_question(attack)}
@@ -298,25 +304,28 @@ async def score_attack(record: AttackRecord, frames: list[RecordedFrame], judge:
     return AttackScore(**score, outcome="unresolved")
 
 
-def pair_voids(scores: dict[str, dict[str, AttackScore]]) -> dict[str, dict[str, AttackScore]]:
+def pair_voids(scores: dict[str, dict[str, AttackScore]]) -> tuple[dict[str, dict[str, AttackScore]], list[str]]:
     """variant -> frozen-script slot -> score. Reconcile voids per slot across defender variants.
 
     An infrastructure void in any variant drops the slot for all; a slot every variant voided stays
     void; otherwise each void becomes unresolved, so a variant can't shed hard attacks.
+    Returns (reconciled scores, dropped slots); report the dropped count next to any void rate.
     """
     slots = set(next(iter(scores.values()), {}))
     if any(set(v) != slots for v in scores.values()):
         raise ValueError("every variant must score the same frozen-script slots")
     out: dict[str, dict[str, AttackScore]] = {variant: {} for variant in scores}
-    for slot in slots:
+    dropped = []
+    for slot in sorted(slots):
         row = {variant: v[slot] for variant, v in scores.items()}
         if any(s.void_reason == "intervention" for s in row.values()):
+            dropped.append(slot)
             continue
         keep = all(s.outcome == "void" for s in row.values())
         for variant, s in row.items():
             out[variant][slot] = s if keep or s.outcome != "void" else s.model_copy(
                 update={"outcome": "unresolved", "void_reason": None, "paired_void_reason": s.void_reason})
-    return out
+    return out, dropped
 
 
 # --- aggregation ------------------------------------------------------------------

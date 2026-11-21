@@ -168,3 +168,11 @@ def test_seal_rejects_cherry_picked_holdout_and_test_dev_scores(tmp_path):
     with pytest.raises(ValueError, match="dev-split"):
         seal(tmp_path, session, run, dev_after=[scored(TEST, DEV_FAIL.score.record.script, "avoided")])
     assert not session.sealed
+
+
+def test_dev_before_after_must_be_paired(tmp_path):
+    session = session_for(tmp_path / "manifest.json")
+    propose(session, FakeGateway(change("brake_lead_s", 2.0)))
+    run = session.open_holdout(*locked(tmp_path))
+    with pytest.raises(ValueError, match="dev before/after"):  # an after-set with the failure dropped
+        seal(tmp_path, session, run, dev_after=[])

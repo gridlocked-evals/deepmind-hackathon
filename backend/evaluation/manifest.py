@@ -206,12 +206,12 @@ def read_source(path: str | Path, manifest: Manifest | LockedManifest,
     """Load episode bytes by content hash; test bytes need a FinalRun.
 
     Without `run` the caller's in-memory manifest is trusted as given: this is a tripwire
-    against accidentally loading holdout bytes, not a security boundary. A FinalRun (which
-    re-verifies the lock on disk) is the real guard.
+    against accidentally loading holdout bytes, not a security boundary. With a FinalRun the lock
+    on disk is re-verified on every read, so a lock changed after the run was opened fails.
     """
     data = Path(path).read_bytes()
     fingerprint = digest(data)
-    episodes = run.locked.episodes() if run else (
+    episodes = run.verify().episodes() if run else (  # re-verify each read: the lock may change after the run
         manifest.episodes() if isinstance(manifest, LockedManifest) else manifest.episodes)
     episode = next((e for e in episodes if fingerprint in e.source_hashes), None)
     if episode is None:
