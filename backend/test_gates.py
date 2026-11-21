@@ -7,7 +7,8 @@ import httpx
 import pytest
 
 from backend.artifacts import ArtifactError, ArtifactStore
-from backend.contracts import ModelCall, SessionBudget, WorldSession
+from backend.contracts import ModelCall, Permissions, SessionBudget, WorldSession
+from backend.edits import EditBundle
 from backend.gates import (authorize_world, bind_world, check_world_session, claim_world, gate_reference,
                            load_thresholds, run_gated_reference)
 from backend.references import MAX_ATTEMPTS, generate_reference
@@ -164,6 +165,31 @@ def test_deterministic_failure_rejects_without_re_edit(tmp_path):
     blob.write_bytes(png((1280, 720), color=(0, 0, 0)))  # tampered after generation
     gate = run(tmp_path, provider, lambda gw: gate_reference(gw, store, bundle, rec.id))
     assert gate.state == "rejected" and gate.deterministic[0]["answer"] == "fail"
+    assert gate.gateDecision.modelCall.outcome == "blocked" and provider.count("gemini-decision-1") == 0
+
+
+@pytest.mark.parametrize("permission", ["forbidden", "unlisted", "missing_result"])
+def test_gate_rejects_legacy_edit_with_unpermitted_or_missing_destination(tmp_path, permission):
+    provider = FakeProvider()
+    store, bundle = setup(tmp_path, provider)
+    data = bundle.model_dump(mode="json")
+    if permission == "missing_result":
+        for operation in bundle.streetEdit.operations:
+            if operation.op == "modify":
+                del data["operationResults"][operation.id]
+    else:
+        permissions = bundle.streetEdit.permissions
+        data["streetEdit"]["permissions"] = Permissions(
+            allowed=[kind for kind in permissions.allowed if kind != "bike_lane"],
+            forbidden=[*permissions.forbidden, *(["bike_lane"] if permission == "forbidden" else [])]
+        ).model_dump(mode="json")
+    # These old bundles still satisfy StreetEdit's source-target contract; the gate must recheck results.
+    legacy = EditBundle.model_validate(data)
+    provider.images, provider.decisions = [png()], [answers()]
+    reference = run(tmp_path, provider, lambda gw: generate_reference(gw, store, legacy, style="photoreal"))
+    gate = run(tmp_path, provider, lambda gw: gate_reference(gw, store, legacy, reference.id))
+    assert gate.state == "rejected" and gate.gateDecision.effect == "block_world_creation"
+    assert next(c for c in gate.deterministic if c["name"] == "permissions")["answer"] == "fail"
     assert gate.gateDecision.modelCall.outcome == "blocked" and provider.count("gemini-decision-1") == 0
 
 

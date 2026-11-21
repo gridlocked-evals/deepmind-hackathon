@@ -14,7 +14,7 @@ from PIL import Image
 from pydantic import ValidationError
 
 from .config import GatewayConfig
-from .contracts import MODELS, AdapterResult, ErrorCode, GatewayError, PreparedCall, Service, Usage, canonical
+from .contracts import MODELS, AdapterResult, ErrorCode, GatewayError, GenieCallState, PreparedCall, Service, Usage, canonical
 
 BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
 
@@ -186,13 +186,29 @@ def event_dict(event) -> dict:
     return event if isinstance(event, dict) else event.model_dump(mode="json", exclude_none=True)
 
 
+async def finish_cleanup(cleanup) -> asyncio.CancelledError | None:
+    """Finish an already bounded cleanup, retaining caller cancellation for re-raise."""
+    task = asyncio.create_task(cleanup)
+    cancelled = None
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError as exc:
+            cancelled = exc
+    if not task.cancelled():
+        task.result()
+    return cancelled
+
+
 class GenieAdapter:
     """A bounded development probe, not the playable-world runtime from issue #9."""
 
     def __init__(self, http: HTTPAdapter, connector=sdk_connection):
         self.http, self.config, self.connector = http, http.config, connector
 
-    async def execute(self, call: PreparedCall, on_id: Callable[[str], None]) -> AdapterResult:
+    async def execute(self, call: PreparedCall, on_id: Callable[[str], None],
+                      state: GenieCallState | None = None) -> AdapterResult:
+        state = state if state is not None else GenieCallState()
         payload = json.loads(call.body)
         identifier = None
         confirmed = False
@@ -204,6 +220,7 @@ class GenieAdapter:
         create_started = False
         try:
             create_started = True
+            state.termination_pending = True
             created = await self.http.post("/interactions", canonical(payload["create"]), lambda _: None)
             identifier = safe_id(created.get("id"), self.http.api_key)
             if not identifier:
@@ -230,14 +247,15 @@ class GenieAdapter:
                                 finally:
                                     await session.send({"event_type": "user_action", "action": "key_up", "input": "key_w"})
                                 await session.complete()
-                        elif kind == "interaction.completed":
+                        elif kind in ("interaction.completed", "interaction.failed", "interaction.cancelled"):
                             confirmed = True
                             terminal = kind
                             usage = reported_usage(event.get("usage") or event.get("interaction", {}).get("usage"))
-                            if event.get("status", {}).get("code", 0) != 0:
+                            state.termination_pending, state.termination, state.usage = False, terminal, usage
+                            if kind != "interaction.completed" or event.get("status", {}).get("code", 0) != 0:
                                 raise GatewayError(ErrorCode.UPSTREAM)
                             break
-                        elif kind in ("error", "interaction.failed", "interaction.cancelled"):
+                        elif kind == "error":
                             raise GatewayError(ErrorCode.UPSTREAM)
             if not confirmed or not frames:
                 raise GatewayError(ErrorCode.INVALID_OUTPUT)
@@ -246,19 +264,28 @@ class GenieAdapter:
             # An explicit rejected (4xx) create cannot have opened a session.
             if not identifier and isinstance(exc, GatewayError) and 400 <= (exc.status or 0) < 500:
                 create_started = False
+                state.termination_pending = False
         finally:
             if identifier and not confirmed:
                 # HTTP cancellation works even when WebSocket connection/setup fails.
                 # This bypasses admission budgets: cleanup must always remain possible.
-                try:
-                    async with asyncio.timeout(self.config.cleanup_seconds):
-                        cancelled = await self.http.post(f"/interactions/{identifier}/cancel", b"{}", lambda _: None)
-                        confirmed = cancelled.get("status") in ("completed", "cancelled", "failed")
-                        terminal = cancelled.get("status")
-                        usage = reported_usage(cancelled.get("usage"))
-                except (GatewayError, TimeoutError, asyncio.CancelledError):
-                    # A second cancellation must not hide a possibly live session.
-                    pass
+                async def cancel_remote():
+                    nonlocal confirmed, terminal, usage
+                    try:
+                        async with asyncio.timeout(self.config.cleanup_seconds):
+                            cancelled = await self.http.post(f"/interactions/{identifier}/cancel", b"{}", lambda _: None)
+                            confirmed = cancelled.get("status") in ("completed", "cancelled", "failed")
+                            if confirmed:
+                                terminal = cancelled["status"]
+                                usage = reported_usage(cancelled.get("usage"))
+                                state.termination_pending, state.termination, state.usage = False, terminal, usage
+                    except (GatewayError, TimeoutError):
+                        pass
+                cancellation = await finish_cleanup(cancel_remote())
+                if cancellation is not None:
+                    error = cancellation
+        if isinstance(error, asyncio.CancelledError):
+            raise error
         if create_started and not confirmed:
             raise GatewayError(ErrorCode.TERMINATION) from None
         if error:

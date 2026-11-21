@@ -667,3 +667,97 @@ def test_example_configuration_is_valid():
     from pathlib import Path
     config = GatewayConfig.model_validate_json((Path(__file__).resolve().parent.parent / "gateway.example.json").read_text())
     assert config.rates[Service.CARBON].output_per_million == Decimal("10")
+
+
+@pytest.mark.parametrize("cleanup_outcome", ["acknowledged", "rejected", "timeout"])
+def test_cancelled_probe_finishes_bounded_cleanup_and_preserves_world_latch(tmp_path, cleanup_outcome):
+    async def run():
+        entered, release = asyncio.Event(), asyncio.Event()
+        requests = []
+
+        async def handler(request):
+            requests.append(request.url.path)
+            if request.url.path.endswith("/cancel"):
+                entered.set()
+                await release.wait()
+                if cleanup_outcome == "rejected":
+                    return httpx.Response(503)
+                return httpx.Response(200, json={"status": "cancelled", "usage": USAGE})
+            return httpx.Response(200, json={"id": "world-1"})
+
+        @asynccontextmanager
+        async def connector(*_):
+            raise RuntimeError("connection failed")
+            yield
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            config = settings(tmp_path, cleanup_seconds=.1)
+            gateway = ModelGateway(config, client, api_key=KEY, genie_connector=connector)
+            context = CallContext(episode_id="smoke", prompt_id="world-v1", purpose="smoke")
+            task = asyncio.create_task(gateway.probe_world(prompt="Street", context=context))
+            await entered.wait()
+            task.cancel()
+            await asyncio.sleep(0)
+            task.cancel()  # A second cancellation must not detach cleanup either.
+            if cleanup_outcome != "timeout":
+                release.set()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(task, 1)
+            assert task.cancelled()
+            row = gateway.ledger.attempts()[0]
+            assert row["provider_request_id"] == "world-1"
+            unresolved = gateway.ledger.budget_status()["unresolved_world_requests"]
+            if cleanup_outcome == "acknowledged":
+                assert row["outcome"] == "cancelled" and row["usage"]
+                assert unresolved == []
+            else:
+                assert row["outcome"] == "termination_unconfirmed"
+                assert unresolved == [row["request_id"]]
+                before = len(requests)
+                with pytest.raises(GatewayError) as exc:
+                    await gateway.probe_world(prompt="Another street", context=context)
+                assert exc.value.code == ErrorCode.TERMINATION
+                assert len(requests) == before
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("usage_source", ["cleanup", "terminal_failure"])
+def test_failed_probe_reconciles_reported_usage_and_latches_overrun(tmp_path, usage_source):
+    overrun = {"total_input_tokens": 1_000_000, "total_output_tokens": 2_000_000, "total_tokens": 3_000_000}
+    requests = []
+
+    def handler(request):
+        requests.append(request.url.path)
+        if request.url.path.endswith("/cancel"):
+            return httpx.Response(200, json={"status": "cancelled", "usage": overrun})
+        return httpx.Response(200, json={"id": "world-1"})
+
+    class FailedWorld(WorldSession):
+        async def receive(self):
+            yield {"event_type": "interaction.failed", "usage": overrun}
+
+    @asynccontextmanager
+    async def connector(*_):
+        if usage_source == "cleanup":
+            raise RuntimeError("connection failed")
+        yield FailedWorld()
+
+    async def run():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            gateway = ModelGateway(settings(tmp_path), client, api_key=KEY, genie_connector=connector)
+            context = CallContext(episode_id="smoke", prompt_id="world-v1", purpose="smoke")
+            with pytest.raises(GatewayError) as exc:
+                await gateway.probe_world(prompt="Street", context=context)
+            assert exc.value.code == (ErrorCode.TRANSPORT if usage_source == "cleanup" else ErrorCode.UPSTREAM)
+            row = gateway.ledger.attempts()[0]
+            assert json.loads(row["usage"])["total_tokens"] == 3_000_000
+            assert row["charged_tokens"] == 3_000_000
+            assert row["charged_microusd"] == 36_500_000
+            assert gateway.ledger.budget_status()["blocks"]
+            evidence = json.loads((gateway.config.data_dir / "artifacts" / f"{row['result_hash']}.json").read_bytes())
+            assert evidence["usage"]["total_tokens"] == 3_000_000
+            before = len(requests)
+            with pytest.raises(GatewayError) as blocked:
+                await observe(gateway)
+            assert blocked.value.code == ErrorCode.BUDGET and len(requests) == before
+    asyncio.run(run())
