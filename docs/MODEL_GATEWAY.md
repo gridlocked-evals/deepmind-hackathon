@@ -177,6 +177,10 @@ served or committed. Keep this directory with the experiment evidence.
 
 ## Genie termination and recovery
 
+The separate [Genie session runtime](GENIE_RUNTIME.md) now provides authenticated
+streaming and bounded controls on top of this ledger. `probe_world` remains the
+small capability probe; use the runtime for playable-world lifecycle integration.
+
 The probe allows 15 seconds from connection through frame receipt/completion,
 plus a separate five-second cleanup deadline. It sends key-up after 100 ms
 independently of frame arrival, requests completion, and requires a terminal

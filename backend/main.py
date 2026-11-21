@@ -18,6 +18,8 @@ from fastapi.staticfiles import StaticFiles
 from .feeds import HLS_SOURCES, REGISTRY_URL, public_cameras, utc_now
 from .proxy import proxy_media, resolve_token
 from .gateway import GatewayConfig, ModelGateway
+from .worlds.api import router as world_router
+from .worlds.runtime import WorldManager
 
 DOT_URL = "https://webcams.nyctmc.org/api/cameras"
 DOT_PAGE = "https://webcams.nyctmc.org/map"
@@ -37,15 +39,23 @@ async def lifespan(app: FastAPI):
         async with httpx.AsyncClient(follow_redirects=False,
             limits=httpx.Limits(max_connections=config.max_concurrency + 1)) as model_http:
             app.state.models = ModelGateway(config, model_http)
-            yield
+            app.state.worlds = WorldManager(app.state.models)
+            recovery = asyncio.create_task(app.state.worlds.watch_abandoned())
+            try:
+                yield
+            finally:
+                recovery.cancel()
+                await asyncio.gather(recovery, return_exceptions=True)
+                await app.state.worlds.close()
 
 
 app = FastAPI(title="Gotham Forge", version="0.1.0", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware, allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
-    allow_methods=["GET"], allow_headers=["Range"],
+    allow_methods=["GET", "POST"], allow_headers=["Range", "Authorization", "Content-Type"],
     expose_headers=["Content-Range", "Accept-Ranges", "Content-Length"],
 )
+app.include_router(world_router)
 
 
 class CameraCache:
