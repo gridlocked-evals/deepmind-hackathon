@@ -27,7 +27,6 @@ import os
 from pathlib import Path
 import re
 import secrets
-import selectors
 import shutil
 import subprocess
 import threading
@@ -331,26 +330,35 @@ class HlsRecorder:
 
 def _bounded_probe(command: list[str], timeout: float = 20.0) -> bytes:
     """Bound both decoder output and its entire process lifetime."""
+    # Reader threads, not selectors: Windows cannot select() on pipes.
     process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    selector = selectors.DefaultSelector()
-    output = {"stdout": bytearray(), "stderr": bytearray()}
+    limits = {"stdout": 65536, "stderr": 262144}
+    output = {name: bytearray() for name in limits}
+    overflow = threading.Event()
+
+    def drain(name: str) -> None:
+        fd = getattr(process, name).fileno()
+        while not overflow.is_set() and (chunk := os.read(fd, 8192)):
+            output[name].extend(chunk)
+            if len(output[name]) > limits[name]:
+                overflow.set()
+                process.kill()
+
+    readers = [threading.Thread(target=drain, args=(name,), daemon=True) for name in limits]
     deadline = time.monotonic() + timeout
     try:
-        for name in output:
-            pipe = getattr(process, name)
-            os.set_blocking(pipe.fileno(), False)
-            selector.register(pipe, selectors.EVENT_READ, name)
-        while selector.get_map() or process.poll() is None:
-            if time.monotonic() >= deadline:
-                raise TruncatedCapture("Media decoding exceeded its time limit.")
-            for key, _ in selector.select(min(.1, max(0, deadline - time.monotonic()))):
-                chunk = os.read(key.fileobj.fileno(), 8192)
-                if not chunk:
-                    selector.unregister(key.fileobj)
-                    continue
-                output[key.data].extend(chunk)
-                if len(output[key.data]) > (65536 if key.data == "stdout" else 262144):
-                    raise TruncatedCapture("Media decoding exceeded its output limit.")
+        for reader in readers:
+            reader.start()
+        try:
+            process.wait(timeout)
+        except subprocess.TimeoutExpired:
+            raise TruncatedCapture("Media decoding exceeded its time limit.") from None
+        for reader in readers:
+            reader.join(max(0, deadline - time.monotonic()))
+        if overflow.is_set():
+            raise TruncatedCapture("Media decoding exceeded its output limit.")
+        if any(reader.is_alive() for reader in readers):
+            raise TruncatedCapture("Media decoding exceeded its time limit.")
         if process.returncode or output["stderr"]:
             raise TruncatedCapture("Media could not be decoded completely.")
         return bytes(output["stdout"])
@@ -358,7 +366,9 @@ def _bounded_probe(command: list[str], timeout: float = 20.0) -> bytes:
         if process.poll() is None:
             process.kill()
         process.wait()
-        selector.close()
+        for reader in readers:
+            if reader.is_alive():
+                reader.join(1)
         process.stdout.close()
         process.stderr.close()
 
