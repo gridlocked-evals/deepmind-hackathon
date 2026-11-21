@@ -136,12 +136,17 @@ export function replayScene(raw: unknown): ScenarioBundle {
   parseScenario(value.plan);
   const scene = value.scene, frames = value.frames;
   const finite = (n: unknown, low: number, high: number) => typeof n === 'number' && Number.isFinite(n) && n >= low && n <= high;
-  const point = (p: unknown): p is [number, number] => Array.isArray(p) && p.length === 2 && p.every(n => finite(n, -20000, 20000));
+  // Accepted street routes span up to 80 km; their local coordinates can exceed 20 km.
+  const point = (p: unknown): p is [number, number] => Array.isArray(p) && p.length === 2 && p.every(n => finite(n, -100000, 100000));
   if (!scene || !Array.isArray(scene.origin) || scene.origin.length !== 2 || !finite(scene.origin[0], -180, 180) || !finite(scene.origin[1], -85, 85)
     || !Array.isArray(scene.actors) || !scene.actors.length || scene.actors.length > 64 || !Array.isArray(frames) || !frames.length || frames.length > 400) throw new Error('Invalid replay scene.');
   if (!scene.geometry || !['roads', 'sidewalks', 'crosswalks', 'route', 'lanes'].every(key => Array.isArray(scene.geometry[key as keyof typeof scene.geometry]))) throw new Error('Invalid replay geometry.');
   const paths = [...scene.geometry.roads, ...scene.geometry.sidewalks, ...scene.geometry.crosswalks, scene.geometry.route, ...scene.geometry.lanes.map(lane => lane.points)];
-  if (paths.length > 100 || paths.some(path => !Array.isArray(path) || path.length > 5000 || !path.every(point)) || scene.geometry.route.length < 2) throw new Error('Invalid replay coordinates.');
+  // The planner accepts 50,000 source points, then resamples segments at 4 m.
+  // Keep other geometry bounded separately while allowing that route to round-trip.
+  if (paths.length > 100 || paths.some(path => !Array.isArray(path)
+    || path.length > (path === scene.geometry.route ? 75_000 : 5000) || !path.every(point))
+    || scene.geometry.route.length < 2) throw new Error('Invalid replay coordinates.');
   const safeText = (text: unknown, max: number): text is string => typeof text === 'string' && text.length > 0 && text.length <= max;
   for (const actor of scene.actors) {
     if (!safeText(actor.id, 100) || !safeText(actor.label, 160) || !safeText(actor.routeId, 100)
