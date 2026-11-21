@@ -65,3 +65,10 @@ incorporating the later comparison-plan changes and upstream decoder test, their
 focused capture/manifest/repair checks passed 75 tests with two symlink-privilege
 skips. Four H100 shell checks require POSIX; neither symlink check is skipped when
 Windows permits creating symlinks. No H100 job or paid model acceptance was rerun.
+
+After incorporating the concurrently merged design and optional review scope, the
+full Windows suite passed 489 tests with six platform skips. The later gateway and
+annotation changes passed another 128 focused tests. The latest frontend suite
+passed 76 tests, production build, and contract drift checks. The merged light
+evidence drawer was rechecked at 390-by-844 with the camera tools also open: focus
+stayed in the drawer, Escape dismissed it, and the page had no horizontal overflow.
