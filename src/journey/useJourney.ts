@@ -10,6 +10,9 @@ export function useJourney() {
   const lease = useRef<AbortController | null>(null);
   const frameRef = useRef<SimulationFrame>({ time: 0, signal: 'green', actors: [] });
   const traces = useRef<RunTrace[]>([]);
+  // Reset retires the UI lease immediately, but its final trace still belongs to
+  // this export until the user explicitly starts a new journey.
+  const traceOwner = useRef<AbortController | null>(null);
   const [scene, setScene] = useState<ScenarioBundle | null>(null);
   const [snapshot, setSnapshot] = useState(emptySnapshot);
   const [status, setStatus] = useState<'idle' | 'running' | 'stopped' | 'error'>('idle');
@@ -25,6 +28,7 @@ export function useJourney() {
   const start = useCallback(() => {
     if (document.hidden || (lease.current && !lease.current.signal.aborted)) return;
     const controller = lease.current = new AbortController();
+    traceOwner.current = controller;
     const current = () => lease.current === controller;
     traces.current = []; setScene(null); setSnapshot(emptySnapshot()); setError(null); setStatus('running');
     void runJourney({ signal: controller.signal, route: fetchStreetRoute, adversaryUrl: mediaUrl('/api/adversary/attack'),
@@ -41,7 +45,7 @@ export function useJourney() {
       onScene(next, frame) { if (current() && !controller.signal.aborted) { frameRef.current = frame; setScene(next); } },
       onFrame(frame) { if (current() && !controller.signal.aborted) frameRef.current = frame; },
       onUpdate(next) { if (current()) setSnapshot(next); },
-      onTrace(trace) { if (current()) traces.current = [...traces.current.slice(-3), structuredClone(trace)]; },
+      onTrace(trace) { if (traceOwner.current === controller) traces.current = [...traces.current.slice(-3), structuredClone(trace)]; },
     }).catch(failure => {
       if (!current() || controller.signal.aborted) return;
       setError(failure instanceof Error ? failure.message : 'Journey interrupted.'); setStatus('error');
