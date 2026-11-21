@@ -98,3 +98,16 @@ def test_paired_bootstrap():
     assert mixed["difference"] == .5 and mixed["ci95"] == (0.0, 1.0)
     with pytest.raises(ValueError):
         paired_bootstrap({"a": ["avoided"]}, {"b": ["avoided"]})
+
+
+def test_one_rerun_allowed_only_after_an_outage(tmp_path):
+    from backend.evaluation.breakpoints import Sweep, SweepLog, SettingResult, find_breakpoint
+    s = Sweep(sweep_id="rerun", dimension="visual_degradation", settings=[0.0], baseline={},
+              criterion={"metric": "observation_quality", "comparator": ">=", "threshold": .8})
+    log = SweepLog(tmp_path / "s.jsonl")
+    sha = log.freeze(s)
+    log.record(SettingResult(sweep_sha256=sha, setting=0.0, provider_outage=True))
+    log.record(SettingResult(sweep_sha256=sha, setting=0.0, observation_quality=.9))  # rerun after outage
+    assert find_breakpoint(s, log.results()).last_pass == 0.0
+    with pytest.raises(ValueError, match="no reruns"):  # no second rerun, and never after a real result
+        log.record(SettingResult(sweep_sha256=sha, setting=0.0, observation_quality=.95))

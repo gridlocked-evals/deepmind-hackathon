@@ -71,6 +71,9 @@ class SettingResult(BaseModel):
     provider_outage: bool = False  # flagged unrelated API outage
 
 
+MAX_OUTAGE_RERUNS = 1
+
+
 class SweepLog:
     """One JSON-lines file: line 1 is the frozen sweep, then append-only results."""
 
@@ -101,8 +104,11 @@ class SweepLog:
             raise ValueError("result was recorded against a different sweep hash")
         if result.setting not in sweep.settings:
             raise ValueError(f"setting {result.setting!r} was not predeclared")
-        if any(r.setting == result.setting for r in self.results()):
-            raise ValueError(f"setting {result.setting!r} already has a result; no reruns")
+        earlier = [r for r in self.results() if r.setting == result.setting]
+        # Only an outage may be rerun, once: a rerun after a real pass/fail would be retry-until-pass.
+        if earlier and (len(earlier) > MAX_OUTAGE_RERUNS
+                        or any(classify(sweep, r)[1] != "provider_outage" for r in earlier)):
+            raise ValueError(f"setting {result.setting!r} already has a result; no reruns except one after an outage")
         _append(self.path, result)
 
 
