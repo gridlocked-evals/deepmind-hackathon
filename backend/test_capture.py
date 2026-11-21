@@ -3,6 +3,7 @@ from datetime import datetime, timedelta, timezone
 import json
 import shutil
 import subprocess
+import threading
 
 import pytest
 from fastapi.testclient import TestClient
@@ -231,6 +232,46 @@ def test_pins_survive_cleanup_and_restart(tmp_path):
     assert set(removed) == {episodes[1], episodes[2]}
     assert restarted.get(episodes[0], verify=True)["id"] == episodes[0]
     assert (root / episodes[0] / "manifest.json").stat().st_mode & 0o222 == 0  # read-only
+
+
+def test_pin_cannot_land_between_eviction_check_and_delete(tmp_path):
+    root = tmp_path / "captures"
+    probe = lambda p: {"frames": 1800, "width": 640, "height": 352, "duration": 120.0}
+    clock = FakeClock()
+    store = CaptureStore(root=root, budget_bytes=10**9, clock=clock, probe=probe)
+    rec, _, _ = record(40)
+    target = store.create_hls_episode(rec, seconds_ago=20, duration_s=10)["id"]
+    store.budget_bytes = 1  # everything unpinned is now evictable
+    checked, pin_done, pin_result = threading.Event(), threading.Event(), {}
+    size = store._size
+
+    def hooked_size(path):  # runs after the pins() check and before the delete
+        if path.name == target and not checked.is_set():
+            checked.set()
+            pin_done.wait(1)  # without the lock the pin finishes here, inside the gap
+        return size(path)
+
+    store._size = hooked_size
+
+    def pin():
+        try:
+            pin_result["pins"] = store.pin(target, "job-accepted-1")
+        except CaptureError as error:
+            pin_result["error"] = error
+        pin_done.set()
+
+    evict = threading.Thread(target=store.enforce_budget)
+    evict.start()
+    assert checked.wait(5)
+    pinner = threading.Thread(target=pin)
+    pinner.start()
+    evict.join(5)
+    pinner.join(5)
+    # A pin that reports success must leave its episode on disk.
+    if "pins" in pin_result:
+        assert (root / target / "manifest.json").is_file(), "pinned episode was evicted"
+    else:
+        assert "Unknown capture episode" in str(pin_result["error"])
 
 
 def test_create_rejected_when_pinned_episodes_fill_budget(tmp_path):

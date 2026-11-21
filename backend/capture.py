@@ -28,6 +28,7 @@ import re
 import secrets
 import shutil
 import subprocess
+import threading
 import time
 from typing import Awaitable, Callable
 from urllib.parse import urljoin
@@ -327,6 +328,9 @@ class CaptureStore:
     clock: Clock = utcnow
     probe: Callable[[Path], dict | None] = probe_media
     _last_snapshot: dict[str, str] = field(default_factory=dict)
+    # Guards pins and eviction: episodes are written in to_thread, so a pin can race the check-then-delete.
+    # Reentrant because _write_episode holds it across its fit check and enforce_budget. Disk only, no network.
+    _lock: threading.RLock = field(default_factory=threading.RLock, repr=False, compare=False)
 
     def __post_init__(self):
         self.root = Path(self.root)
@@ -491,13 +495,14 @@ class CaptureStore:
             if path.is_file():
                 path.chmod(0o444)
         os.replace(tmp, self.root / episode_id)
-        # Check fit before evicting: evicting and then rejecting this episode anyway would lose data for nothing.
-        evictable = sum(self._size(p) for p in self.root.iterdir()
-                        if _EPISODE_ID.match(p.name) and p.name != episode_id and not self.pins(p.name))
-        if self.usage_bytes() - evictable > self.budget_bytes:
-            self._remove(self.root / episode_id)
-            raise CaptureError("Capture budget is exhausted by pinned episodes.", budgetBytes=self.budget_bytes)
-        self.enforce_budget(protect=episode_id)
+        with self._lock:
+            # Check fit before evicting: evicting and then rejecting this episode anyway would lose data for nothing.
+            evictable = sum(self._size(p) for p in self.root.iterdir()
+                            if _EPISODE_ID.match(p.name) and p.name != episode_id and not self.pins(p.name))
+            if self.usage_bytes() - evictable > self.budget_bytes:
+                self._remove(self.root / episode_id)
+                raise CaptureError("Capture budget is exhausted by pinned episodes.", budgetBytes=self.budget_bytes)
+            self.enforce_budget(protect=episode_id)
         return manifest
 
     # -- access -----------------------------------------------------------
@@ -562,13 +567,15 @@ class CaptureStore:
     def pin(self, episode_id: str, job_id: str) -> list[str]:
         if not _JOB_ID.match(job_id):
             raise CaptureError("Invalid job id.")
-        pins = sorted(set(self.pins(episode_id)) | {job_id})
-        self._write_pins(episode_id, pins)
+        with self._lock:
+            pins = sorted(set(self.pins(episode_id)) | {job_id})
+            self._write_pins(episode_id, pins)
         return pins
 
     def unpin(self, episode_id: str, job_id: str) -> list[str]:
-        pins = [p for p in self.pins(episode_id) if p != job_id]
-        self._write_pins(episode_id, pins)
+        with self._lock:
+            pins = [p for p in self.pins(episode_id) if p != job_id]
+            self._write_pins(episode_id, pins)
         return pins
 
     def _write_pins(self, episode_id: str, pins: list[str]):
@@ -591,17 +598,18 @@ class CaptureStore:
 
     def enforce_budget(self, protect: str | None = None) -> list[str]:
         """Delete the oldest unpinned episodes (never ``protect``) until usage fits the budget."""
-        removed = []
-        episodes = sorted((p for p in self.root.iterdir() if _EPISODE_ID.match(p.name)),
-                          key=lambda p: json.loads((p / "manifest.json").read_text())["createdAt"])
-        usage = self.usage_bytes()
-        for path in episodes:
-            if usage <= self.budget_bytes:
-                break
-            if path.name == protect or self.pins(path.name):
-                continue
-            size = self._size(path)
-            self._remove(path)
-            usage -= size
-            removed.append(path.name)
-        return removed
+        with self._lock:  # the pins() check and the delete must not interleave with pin()
+            removed = []
+            episodes = sorted((p for p in self.root.iterdir() if _EPISODE_ID.match(p.name)),
+                              key=lambda p: json.loads((p / "manifest.json").read_text())["createdAt"])
+            usage = self.usage_bytes()
+            for path in episodes:
+                if usage <= self.budget_bytes:
+                    break
+                if path.name == protect or self.pins(path.name):
+                    continue
+                size = self._size(path)
+                self._remove(path)
+                usage -= size
+                removed.append(path.name)
+            return removed
