@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { validateDecisionResponse } from '../agent/session';
 import { mediaUrl } from '../media/cameras';
 import { fetchStreetRoute } from '../navigation/routing';
 import type { ScenarioBundle, SimulationFrame } from '../types';
 import type { RunTrace } from '../scenarios/trace';
 import { emptySnapshot, runJourney } from './runtime';
+import { requestJourneyDecision } from './request';
 
 export function useJourney() {
   const lease = useRef<AbortController | null>(null);
@@ -32,16 +32,7 @@ export function useJourney() {
     const current = () => lease.current === controller;
     traces.current = []; setScene(null); setSnapshot(emptySnapshot()); setError(null); setStatus('running');
     void runJourney({ signal: controller.signal, route: fetchStreetRoute, adversaryUrl: mediaUrl('/api/adversary/attack'),
-      async driver(run, step, observation, signal) {
-        const response = await fetch(mediaUrl('/api/driver/decision'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, signal,
-          body: JSON.stringify({ run_id: run, step, observation }) });
-        const body: unknown = await response.json();
-        if (!response.ok) {
-          const detail = (body as { detail?: { message?: unknown } })?.detail;
-          throw new Error(typeof detail?.message === 'string' ? detail.message.slice(0, 280) : 'The driving service could not return a decision.');
-        }
-        return validateDecisionResponse(body, run, step);
-      },
+      driver: requestJourneyDecision,
       onScene(next, frame) { if (current() && !controller.signal.aborted) { frameRef.current = frame; setScene(next); } },
       onFrame(frame) { if (current() && !controller.signal.aborted) frameRef.current = frame; },
       onUpdate(next) { if (current()) setSnapshot(next); },
