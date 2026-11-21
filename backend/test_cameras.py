@@ -280,6 +280,48 @@ def test_media_task_cancellation_during_close_finishes_cleanup(monkeypatch):
     asyncio.run(run())
 
 
+def test_scope_cancellation_during_close_does_not_spin(monkeypatch):
+    import anyio
+    waits = []
+    real_wait = asyncio.wait
+
+    def counting_wait(fs, *args, **kwargs):
+        waits.append(1)
+        return real_wait(fs, *args, **kwargs)
+
+    async def run():
+        slots = asyncio.Semaphore(8)
+        monkeypatch.setattr(proxy, "_slots", slots)
+        monkeypatch.setattr(proxy.asyncio, "wait", counting_wait)
+        stream = TrackedMediaStream()
+        stream.close_gate = asyncio.Event()
+        async with httpx.AsyncClient(transport=httpx.MockTransport(lambda _: httpx.Response(
+                200, stream=stream, headers={"Content-Type": "video/mp2t"}))) as client:
+            response, scope, receive = await media_response(client)
+
+            async def send(_message):
+                pass
+
+            groups = []
+
+            async def serve():  # a task group like Starlette's disconnect listener
+                async with anyio.create_task_group() as group:
+                    groups.append(group)
+                    group.start_soon(response, scope, receive, send)
+
+            server = asyncio.create_task(serve())
+            await stream.close_started.wait()
+            groups[0].cancel_scope.cancel()
+            await asyncio.sleep(0.2)  # close is held open; an unshielded loop spins here
+            stream.close_gate.set()
+            await server
+            assert stream.closed and stream.close_calls == 1
+            assert slots._value == 8
+        monkeypatch.undo()
+        assert len(waits) < 10, f"cleanup loop spun {len(waits)} times"
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize("disconnect", [False, True])
 def test_media_cleanup_timeout_does_not_hold_capacity(monkeypatch, disconnect):
     async def run():
