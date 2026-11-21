@@ -55,7 +55,8 @@ cost. Failed attempts are stored too.
 | `insufficient_evidence` | any `unknown` answer: uncertain, low confidence, or judge timeout/error | `block_world_creation`; the judge is **never re-sampled** |
 
 - **One decision per image:** gating the same reference again returns the stored decision.
-- **World binding:** `claim_world(reference, gate)` re-verifies the accepted image's bytes against the hash the judge saw and atomically claims the gate, so it admits one session. `bind_world(session, imageSha256)` then records which `WorldSession` used it, and `check_world_session` verifies the binding. Rejected and unknown gates raise HTTP 409. The Genie runtime (#9) should call `claim_world` immediately before creating a session.
+- **World binding:** `claim_world(reference, gate)` re-verifies the accepted image's bytes against the hash the judge saw and atomically claims the gate, so it admits one session. `bind_world(session, imageSha256)` then records which `WorldSession` used it, and `check_world_session` verifies the binding. Rejected and unknown gates raise HTTP 409.
+- **Genie handoff (#9):** `publish_accepted(reference, gate)` (route `POST /api/worlds/accepted-references`, operator token required) re-runs `authorize_world` and publishes an `AcceptedReference` pinning the judged image hash and the exact gate record bytes. It spends nothing and does not claim. `WorldManager.create` re-checks the live gate record, creates the session (no paid request is sent until a client attaches), then calls `claim_world` and binds `world_<session id>` to the image hash. A gate that is rejected, unknown, already claimed or changed since publication fails before any Genie request; losing a claim race stops the new session before it can reach Genie.
 - **What the scores mean:** they are a model's visual judgments. They are not crash probabilities, safety ratings or proof of geographic identity.
 
 ### Blinded human checks and calibration — `backend/gate_review.py`

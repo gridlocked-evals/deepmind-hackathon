@@ -98,6 +98,11 @@ it creates one bounded paid session. See its [measured verification](docs/GENIE_
 
 ## Verify
 
+The [Hydrogen evidence extractor](docs/OBSERVATIONS.md) implements issue #5 over
+saved camera prefixes, with authenticated extraction/reinspection routes and
+an original-pixel review export. Its explicit live checks and remaining human
+annotation work are recorded in [observation verification](docs/OBSERVATIONS_VERIFICATION.md).
+
 ```sh
 npm run build
 npm test
