@@ -232,8 +232,8 @@ def _reject_constant(_):
     raise ValueError("Non-finite JSON number.")
 
 
-@router.post("/decision", response_model=DriverResponse)
-async def driver_decision(request: Request):
+async def read_json(request: Request, model: type[BaseModel]):
+    """Strict, size-bounded JSON body parsing shared by the simulator endpoints."""
     if request.headers.get("content-type", "").split(";", 1)[0].strip().lower() != "application/json":
         raise public_error(GatewayError(ErrorCode.INVALID_INPUT), status=415)
     try:
@@ -251,7 +251,11 @@ async def driver_decision(request: Request):
         raw.extend(chunk)
     try:
         parsed = json.loads(raw.decode("utf-8"), parse_constant=_reject_constant, object_pairs_hook=_unique_object)
-        body = DriverRequest.model_validate(parsed)
+        return model.model_validate(parsed)
     except (ValueError, TypeError, ValidationError, RecursionError):
         raise public_error(GatewayError(ErrorCode.INVALID_INPUT)) from None
-    return await request.app.state.driver.decide(body)
+
+
+@router.post("/decision", response_model=DriverResponse)
+async def driver_decision(request: Request):
+    return await request.app.state.driver.decide(await read_json(request, DriverRequest))

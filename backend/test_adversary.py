@@ -1,0 +1,298 @@
+"""Adversary budget, validation and transport tests; never use a provider or credentials."""
+import asyncio
+from copy import deepcopy
+import json
+from types import SimpleNamespace
+from uuid import uuid4
+
+from fastapi import FastAPI, HTTPException
+from fastapi.testclient import TestClient
+import pytest
+
+from backend.adversary import (
+    AdversaryController, AdversaryDecision, AttackRequest, MAX_CALLS, MAX_TRIGGER_SECONDS,
+    min_avoidable_distance, router,
+)
+from backend.driver import MAX_REQUEST_BYTES
+from backend.gateway.contracts import ErrorCode, GatewayError, Service
+
+URL = "/api/adversary/attack"
+ATTACK = {"action": "attack", "event_type": "car-crash", "trigger_seconds": 8.0,
+          "parameters": {"distanceAheadM": 40.0, "approachSeconds": 2.0}, "durationSeconds": 8.0,
+          "reason": "The car is cruising; a crash ahead tests braking."}
+WAIT = {"action": "wait", "event_type": None, "trigger_seconds": None, "parameters": None,
+        "durationSeconds": None, "reason": "The car is still accelerating."}
+
+
+def request_body(attack_index=0, previous=(), time=5.0, speed=5.0, run_id="test-run-0001"):
+    return {"run_id": run_id, "attack_index": attack_index,
+            "state": {"simulation_time": time, "speed_mps": speed, "remaining_m": 400.0},
+            "previous_attacks": [dict(item) for item in previous]}
+
+
+class FakeGateway:
+    def __init__(self, output=ATTACK):
+        self.calls = []
+        self.error = None
+        self.output = deepcopy(output)
+        self.release = None
+
+    async def generate(self, service, **kwargs):
+        self.calls.append((service, kwargs))
+        if self.release:
+            await self.release.wait()
+        if self.error:
+            raise self.error
+        return SimpleNamespace(output=deepcopy(self.output), model_id="gemini-4-carbon", request_id=str(uuid4()))
+
+
+def client_for(gateway=None):
+    gateway = gateway or FakeGateway()
+    app = FastAPI()
+    app.state.adversary = AdversaryController(gateway)
+    app.include_router(router)
+    return TestClient(app), gateway, app.state.adversary
+
+
+def detail(response):
+    return response.json()["detail"]
+
+
+def test_valid_attack_uses_carbon_adversary_stage_and_data_only_prompt():
+    client, gateway, _ = client_for()
+    response = client.post(URL, json=request_body())
+    assert response.status_code == 200
+    result = response.json()
+    assert result["run_id"] == "test-run-0001" and result["attack_index"] == 0
+    assert result["model_id"] == "gemini-4-carbon" and result["max_attacks"] == 2
+    assert result["request_id"] and result["decision"] == ATTACK
+    service, call = gateway.calls[0]
+    assert service == Service.CARBON and call["stage"] == "adversary"
+    assert call["response_model"] is AdversaryDecision
+    assert call["context"].episode_id == "sim-adversary:test-run-0001"
+    assert call["context"].prompt_id == "sim-adversary-v1:call-0" and call["context"].purpose == "development"
+    data = json.loads(call["input_value"].split("Input JSON:\n")[1])
+    assert data["state"] == request_body()["state"] and data["previous_attacks"] == []
+    assert data["budget"]["max_trigger_seconds"] == MAX_TRIGGER_SECONDS == 24
+    assert set(data["menu"]["event_types"]) == {"car-crash", "stalled-vehicle"}
+
+
+def test_valid_wait_leaves_slot_open_and_identical_replay_is_cached():
+    client, gateway, _ = client_for(FakeGateway(WAIT))
+    first = client.post(URL, json=request_body())
+    assert first.status_code == 200 and first.json()["decision"] == WAIT
+    assert client.post(URL, json=request_body()).json() == first.json() and len(gateway.calls) == 1
+    gateway.output = deepcopy(ATTACK)
+    later = client.post(URL, json=request_body(time=7.0))
+    assert later.status_code == 200 and later.json()["decision"]["action"] == "attack"
+    assert len(gateway.calls) == 2
+
+
+def test_second_attack_reason_is_never_fed_back():
+    client, gateway, _ = client_for()
+    client.post(URL, json=request_body())
+    gateway.output = dict(ATTACK, trigger_seconds=18.0, reason="second")
+    prior = [{"event_type": "car-crash", "trigger_seconds": 8.0}]
+    response = client.post(URL, json=request_body(1, prior, time=9.0))
+    assert response.status_code == 200 and response.json()["attack_index"] == 1
+    prompt = gateway.calls[1][1]["input_value"]
+    assert ATTACK["reason"] not in prompt
+    assert json.loads(prompt.split("Input JSON:\n")[1])["previous_attacks"] == prior
+
+
+@pytest.mark.parametrize("body", [
+    request_body(2, [{"event_type": "car-crash", "trigger_seconds": 3.0},
+                     {"event_type": "stalled-vehicle", "trigger_seconds": 14.0}]),
+    request_body(1, [{"event_type": "car-crash", "trigger_seconds": 3.0},
+                     {"event_type": "stalled-vehicle", "trigger_seconds": 14.0}]),
+    request_body(5),
+    request_body(1),  # index disagrees with previous_attacks
+    request_body(0, [{"event_type": "car-crash", "trigger_seconds": 3.0}]),
+    request_body(1, [{"event_type": "car-crash", "trigger_seconds": 3.0}]),  # ledger issued nothing
+])
+def test_budget_refused_without_gateway_call(body):
+    client, gateway, _ = client_for()
+    response = client.post(URL, json=body)
+    assert response.status_code == 409 and detail(response)["code"] == "invalid_input"
+    assert not gateway.calls
+
+
+def test_ledger_not_request_decides_budget():
+    client, gateway, _ = client_for()
+    client.post(URL, json=request_body())
+    wrong = [{"event_type": "stalled-vehicle", "trigger_seconds": 8.0}]
+    assert client.post(URL, json=request_body(1, wrong, time=9.0)).status_code == 409
+    assert len(gateway.calls) == 1
+
+
+def test_slot_replay_returns_stored_attack_even_with_new_state():
+    client, gateway, _ = client_for()
+    first = client.post(URL, json=request_body())
+    gateway.output = dict(ATTACK, event_type="stalled-vehicle")
+    assert client.post(URL, json=request_body(time=6.0)).json() == first.json()
+    assert len(gateway.calls) == 1
+
+
+def test_wait_calls_are_capped():
+    client, gateway, _ = client_for(FakeGateway(WAIT))
+    for call in range(MAX_CALLS):
+        assert client.post(URL, json=request_body(time=float(call))).status_code == 200
+    assert client.post(URL, json=request_body(time=20.0)).status_code == 409
+    assert len(gateway.calls) == MAX_CALLS
+
+
+def test_concurrent_same_slot_gets_one_call_and_one_result():
+    async def scenario():
+        gateway = FakeGateway()
+        gateway.release = asyncio.Event()
+        controller = AdversaryController(gateway)
+        one = AttackRequest.model_validate(request_body())
+        two = AttackRequest.model_validate(request_body(time=6.0))
+        tasks = [asyncio.create_task(controller.attack(one)), asyncio.create_task(controller.attack(two))]
+        await asyncio.sleep(0)
+        gateway.release.set()
+        first, second = await asyncio.gather(*tasks)
+        assert first == second and len(gateway.calls) == 1 and controller.in_flight == 0
+    asyncio.run(scenario())
+
+
+def test_cancellation_stores_failure_and_prevents_duplicate_bill():
+    async def scenario():
+        gateway = FakeGateway()
+        gateway.release = asyncio.Event()
+        controller = AdversaryController(gateway)
+        body = AttackRequest.model_validate(request_body())
+        task = asyncio.create_task(controller.attack(body))
+        await asyncio.sleep(0)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert controller.in_flight == 0
+        with pytest.raises(HTTPException) as exc:
+            await controller.attack(body)
+        assert exc.value.detail["code"] == "cancelled" and len(gateway.calls) == 1
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("change", [
+    {"extra": "x"}, {"action": "teleport"}, {"event_type": "pedestrian"},
+    {"trigger_seconds": MAX_TRIGGER_SECONDS + 0.5}, {"trigger_seconds": -1.0}, {"trigger_seconds": "8"},
+    {"trigger_seconds": True}, {"trigger_seconds": float("nan")},
+    {"parameters": {"distanceAheadM": 101.0, "approachSeconds": 2.0}},
+    {"parameters": {"distanceAheadM": 19.0, "approachSeconds": 2.0}},
+    {"parameters": {"distanceAheadM": 40.0, "approachSeconds": 4.5}},
+    {"parameters": {"distanceAheadM": 40.0, "approachSeconds": 2.0, "extra": 1}},
+    {"parameters": None}, {"durationSeconds": 0.5}, {"durationSeconds": 21.0},
+    {"reason": ""}, {"reason": "x" * 241},
+    {"trigger_seconds": 4.0},  # before state.simulation_time
+])
+def test_invalid_attack_output_is_rejected_without_fallback(change):
+    gateway = FakeGateway(dict(ATTACK, **change))
+    client, _, _ = client_for(gateway)
+    response = client.post(URL, json=request_body())
+    assert response.status_code == 502 and detail(response)["code"] == "invalid_output"
+    assert "decision" not in response.json()
+    assert client.post(URL, json=request_body()).json() == response.json() and len(gateway.calls) == 1
+
+
+@pytest.mark.parametrize("change", [
+    {"event_type": "car-crash"}, {"trigger_seconds": 8.0}, {"durationSeconds": 5.0},
+    {"parameters": {"distanceAheadM": 40.0, "approachSeconds": 2.0}},
+])
+def test_wait_with_any_attack_field_is_invalid(change):
+    client, _, _ = client_for(FakeGateway(dict(WAIT, **change)))
+    response = client.post(URL, json=request_body())
+    assert response.status_code == 502 and detail(response)["code"] == "invalid_output"
+
+
+@pytest.mark.parametrize("trigger", [17.9, 12.0])
+def test_trigger_too_close_to_previous_attack_is_rejected(trigger):
+    client, gateway, _ = client_for()
+    client.post(URL, json=request_body())
+    gateway.output = dict(ATTACK, trigger_seconds=trigger)
+    response = client.post(URL, json=request_body(1, [{"event_type": "car-crash", "trigger_seconds": 8.0}], time=9.0))
+    assert response.status_code == 502 and detail(response)["code"] == "invalid_output"
+
+
+def test_unavoidable_attack_is_a_typed_error_not_clamped():
+    speed = 10.0
+    limit = min_avoidable_distance(speed)
+    assert limit == pytest.approx(10 * 3 + 100 / 7 + 5)
+    client, _, _ = client_for(FakeGateway(dict(ATTACK, parameters={"distanceAheadM": limit - 0.1, "approachSeconds": 2.0})))
+    response = client.post(URL, json=request_body(speed=speed))
+    assert response.status_code == 502 and detail(response)["code"] == "unavoidable_attack"
+    assert "decision" not in response.json()
+    client, _, _ = client_for(FakeGateway(dict(ATTACK, parameters={"distanceAheadM": limit + 0.1, "approachSeconds": 2.0})))
+    assert client.post(URL, json=request_body(speed=speed)).status_code == 200
+
+
+@pytest.mark.parametrize("path,value", [
+    (("extra",), "x"), (("state", "extra"), "x"), (("run_id",), "short"), (("run_id",), "../a/b/c"),
+    (("attack_index",), True), (("attack_index",), "0"), (("attack_index",), -1),
+    (("state", "speed_mps"), True), (("state", "speed_mps"), "5"), (("state", "speed_mps"), 51),
+    (("state", "simulation_time"), 36.5), (("state", "remaining_m"), 100001),
+    (("previous_attacks",), [{"event_type": "car-crash", "trigger_seconds": 3.0, "reason": "x"}]),
+    (("previous_attacks",), [{"event_type": "car-crash", "trigger_seconds": True}]),
+    (("previous_attacks",), [{"event_type": "pedestrian", "trigger_seconds": 3.0}]),
+    (("previous_attacks",), [{"event_type": "car-crash", "trigger_seconds": 3.0}] * 3),
+])
+def test_request_strictness_rejects_before_gateway(path, value):
+    client, gateway, _ = client_for()
+    body = request_body()
+    target = body if len(path) == 1 else body[path[0]]
+    target[path[-1]] = value
+    response = client.post(URL, json=body)
+    assert response.status_code == 422 and detail(response)["code"] == "invalid_input"
+    assert not gateway.calls
+
+
+@pytest.mark.parametrize("raw", [
+    "{", "[]", '{"attack_index":0,"attack_index":1}',
+    json.dumps(request_body()).replace('"speed_mps": 5.0', '"speed_mps": NaN'),
+    json.dumps(request_body()).replace('"speed_mps": 5.0', '"speed_mps": Infinity'),
+    json.dumps(request_body()).replace('"speed_mps": 5.0', '"speed_mps": 1e999'),
+])
+def test_invalid_json_and_nonfinite_numbers(raw):
+    client, gateway, _ = client_for()
+    response = client.post(URL, content=raw, headers={"content-type": "application/json"})
+    assert response.status_code == 422 and not gateway.calls
+
+
+def test_oversized_and_wrong_content_type_bodies():
+    client, gateway, _ = client_for()
+    data = b" " * (MAX_REQUEST_BYTES + 1)
+    assert client.post(URL, content=data, headers={"content-type": "application/json"}).status_code == 413
+    assert client.post(URL, content="{}").status_code == 415
+    assert not gateway.calls
+
+
+@pytest.mark.parametrize("error,status,code", [
+    (GatewayError(ErrorCode.NOT_CONFIGURED), 503, "not_configured"),
+    (GatewayError(ErrorCode.BUDGET), 429, "budget_exceeded"),
+    (GatewayError(ErrorCode.TIMEOUT, retryable=True), 504, "timeout"),
+    (RuntimeError("upstream leaked secret-test-credential"), 502, "upstream_error"),
+])
+def test_provider_failure_is_redacted_stored_and_never_falls_back(error, status, code):
+    gateway = FakeGateway()
+    gateway.error = error
+    client, _, controller = client_for(gateway)
+    response = client.post(URL, json=request_body())
+    assert response.status_code == status and detail(response)["code"] == code
+    assert "secret-test-credential" not in response.text and "decision" not in response.json()
+    gateway.error = None
+    assert client.post(URL, json=request_body(time=6.0)).json() == response.json()
+    assert len(gateway.calls) == 1 and controller.in_flight == 0
+
+
+def test_no_secret_or_provider_text_escapes():
+    gateway = FakeGateway()
+    gateway.error = GatewayError(ErrorCode.UPSTREAM, request_id="secret-test-credential")
+    gateway.error.args = ("upstream leaked secret-test-credential",)
+    client, _, _ = client_for(gateway)
+    response = client.post(URL, json=request_body())
+    assert response.status_code == 502 and "secret-test-credential" not in response.text
+    assert detail(response)["request_id"] is None
+    leaky = FakeGateway(dict(ATTACK, reason="ok", extra="secret-test-credential"))
+    client, _, _ = client_for(leaky)
+    response = client.post(URL, json=request_body())
+    assert response.status_code == 502 and "secret-test-credential" not in response.text

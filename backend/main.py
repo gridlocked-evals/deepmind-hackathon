@@ -24,6 +24,7 @@ from .feeds import HLS_SOURCES, REGISTRY_URL, public_cameras, utc_now
 from .proxy import proxy_media, resolve_token
 from .gateway import GatewayConfig, ModelGateway
 from .driver import DriverController, router as driver_router
+from .adversary import AdversaryController, router as adversary_router
 from .worlds.api import router as world_router
 from .worlds.runtime import WorldManager
 
@@ -52,6 +53,7 @@ async def lifespan(app: FastAPI):
                 limits=httpx.Limits(max_connections=config.max_concurrency + 1)) as model_http:
                 app.state.models = ModelGateway(config, model_http)
                 app.state.driver = DriverController(app.state.models)
+                app.state.adversary = AdversaryController(app.state.models)
                 app.state.worlds = WorldManager(app.state.models, gates=app.state.artifacts)
                 recovery = asyncio.create_task(app.state.worlds.watch_abandoned())
                 try:
@@ -72,6 +74,7 @@ app.add_middleware(
 )
 app.include_router(world_router)
 app.include_router(driver_router)
+app.include_router(adversary_router)
 app.include_router(observation_router)
 
 
