@@ -110,12 +110,12 @@ registerEvent('two-car-roadblock', {
   },
 });
 export const eventTypes = () => [...registry].map(([type, entry]) => ({ type, label: entry.label }));
-/** Reserve enough route for every visible phase of a moving hazard. */
-export function eventTravelDistance(spec: EventSpec) {
+/** Scripted distance at a given age; admission defaults to the maximum visible lifetime. */
+export function eventTravelDistance(spec: EventSpec, age = spec.parameters.approachSeconds + 20) {
   const event: AppliedEvent = { spec, requestedAt: 0, appliedAt: 0, appliedFrame: 0, anchorProgress: 0 };
   // Admission must not reveal a future cleanup time by changing whether an actor
   // appears now. Reserve its maximum allowed lifetime, independent of durationSeconds.
-  return registry.get(spec.type)?.progressOffset?.(spec.parameters.approachSeconds + 20, event) ?? 0;
+  return registry.get(spec.type)?.progressOffset?.(age, event) ?? 0;
 }
 
 function object(value: unknown, keys: string[]): Record<string, unknown> {
