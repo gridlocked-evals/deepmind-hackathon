@@ -6,6 +6,7 @@ import { NYC_STOPS, ProgressWatch, randomStop } from './route';
 import { runJourney } from './runtime';
 import type { JourneyOptions, JourneySnapshot } from './runtime';
 import type { RunTrace } from '../scenarios/trace';
+import { requestJourneyDecision } from './request';
 
 const flush = async () => { for (let i = 0; i < 20; i++) await Promise.resolve(); };
 class Clock implements DriverClock {
@@ -110,6 +111,25 @@ it('Stop during the opening cancels motion and prevents live API calls', async (
   expect(h.clock.frames.size).toBe(0);
 });
 
+it('cancellation at the completed opening handoff prevents the first paid request', async () => {
+  const fetch = carbon();
+  const h = harness({ scriptedOpening: true });
+  const retain = h.options.onTrace;
+  h.options.onTrace = trace => {
+    retain(trace);
+    if (trace.modelSource === 'scripted-demo') h.controller.abort();
+  };
+  await h.clock.advance(45_000);
+  expect((await h.done).name).toBe('AbortError');
+  expect(h.traces).toHaveLength(1);
+  expect(h.traces[0]).toMatchObject({ modelSource: 'scripted-demo', modelPolicy: { service: 'scripted', modelId: null },
+    terminal: { reason: 'scripted-complete' }, steps: [] });
+  expect(h.snapshot().opening?.complete).toBe(true);
+  expect(h.snapshot().attacks).toEqual([]);
+  expect(h.observations).toEqual([]); expect(fetch).not.toHaveBeenCalled();
+  expect(h.clock.frames.size).toBe(0);
+});
+
 it('restarts a stalled car from a different NYC start after 25 simulated seconds', async () => {
   const h = harness({ driver: async (run, step) => ({ run_id: run, step, model_id: 'gemini-decision-1', request_id: 'fixture-stop', max_steps: 60,
     decision: { action: 'stop', target_speed_mps: 0, confidence: 1, reason: 'Stopped fixture.' } }) });
@@ -151,6 +171,30 @@ it('stops on Carbon or budget failure without rotating runs to retry', async () 
   expect((await h.done).message).toContain('Budget exhausted');
   expect(fetch).toHaveBeenCalledTimes(1); expect(h.route).toHaveBeenCalledTimes(1);
   expect(h.traces[0].terminal.reason).toBe('error');
+});
+
+it.each([
+  { name: 'provider failure', body: JSON.stringify({ detail: { code: 'invalid_output', request_id: '12345678-1234-4234-8234-123456789abc', message: 'The model returned invalid output.', raw: 'PRIVATE_RESPONSE' } }),
+    expected: { code: 'invalid_output', requestId: '12345678-1234-4234-8234-123456789abc' }, message: 'The model returned invalid output.' },
+  { name: 'invalid metadata', body: JSON.stringify({ detail: { code: 'PRIVATE_RESPONSE', request_id: 'PRIVATE_RESPONSE', message: 'The request failed.' } }),
+    expected: { code: 'request_failed', requestId: null }, message: 'The request failed.' },
+  { name: 'non-JSON response', body: 'PRIVATE_RESPONSE', expected: { code: 'request_failed', requestId: null }, message: 'The driving request failed.' },
+])('retains sanitized driving failure provenance for $name without retrying', async ({ body, expected, message }) => {
+  const adversaryFetch = globalThis.fetch;
+  const fetch = vi.fn((url: string, init: RequestInit) => url.includes('/api/driver/decision')
+    ? Promise.resolve(new Response(body, { status: 502 })) : adversaryFetch(url, init));
+  vi.stubGlobal('fetch', fetch);
+  vi.stubGlobal('document', { baseURI: 'http://fixture.test/' });
+  const h = harness({ driver: requestJourneyDecision });
+  await h.clock.advance(1000);
+  expect((await h.done).message).toBe(message);
+  expect(h.traces).toHaveLength(1);
+  expect(h.traces[0].terminal).toMatchObject({ reason: 'error', message });
+  expect(h.traces[0].steps).toHaveLength(1);
+  expect(h.traces[0].steps[0]).toMatchObject({ response: null, failure: expected });
+  expect(JSON.stringify(h.traces)).not.toContain('PRIVATE_RESPONSE');
+  expect(fetch.mock.calls.filter(([url]) => url.includes('/api/driver/decision'))).toHaveLength(1);
+  expect(h.route).toHaveBeenCalledTimes(1);
 });
 
 it('injects a future hazard planned at rest after the car accelerates to 25 mph', async () => {

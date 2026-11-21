@@ -2,7 +2,7 @@ import type { ActorDefinition, ActorState } from '../types';
 import { COMFORTABLE_BRAKING, MAX_ACCELERATION, prepareDriverDecision } from '../agent/physics';
 import type { DriverSimulation } from '../agent/physics';
 import { MAX_COMMAND_AGE_SECONDS, SPEED_LIMIT_MPS } from '../agent/types';
-import { EVENT_RUNTIME, parseScenario, requestEvent } from './events';
+import { EVENT_RUNTIME, eventTravelDistance, parseScenario, requestEvent } from './events';
 import type { EventSpec, ScenarioPlan } from './events';
 import type { RunTrace } from './trace';
 import { footprintContact } from './trace';
@@ -293,6 +293,7 @@ export function attackRecords(trace: RunTrace): AttackRecord[] {
     const applied = trace.eventLog.find(item => item.eventId === id && item.kind === 'applied');
     const removed = trace.eventLog.find(item => item.eventId === id && item.kind === 'cleared');
     const anchorProgress = trace.appliedEvents.find(item => item.id === id)?.anchorProgress;
+    const spec = trace.plan.events.find(item => item.id === id);
     const base = { eventId: id, eventType: row.decision.event_type!, chosenBy: row.chosenBy, reason: row.decision.reason, modelId: row.modelId,
       requestId: row.requestId, decidedAt: row.decidedAt, triggerTime: row.decision.trigger_seconds!, appliedAt: applied?.time ?? null };
     if (!applied) {
@@ -309,10 +310,11 @@ export function attackRecords(trace: RunTrace): AttackRecord[] {
       if (!ego || !hazards.length) return;
       for (const actor of hazards) minSeparation = Math.min(minSeparation, separation({ state: ego, def: egoDef }, { state: actor, def: defs.get(actor.id)! }));
       if (passed === null) {
-        // Route progress must first pass the attack anchor: a bend can put an upcoming hazard
-        // behind the ego's current heading even before the ego reaches it along the route.
+        // A bend can put an upcoming hazard behind the ego's heading. Moving hazards
+        // must be passed at their current scripted route progress, not the initial anchor.
         const c = Math.cos(ego.heading), s = Math.sin(ego.heading), rear = -egoDef.length / 2;
-        if (anchorProgress !== undefined && telemetry && telemetry.progress + rear > anchorProgress
+        const hazardProgress = anchorProgress !== undefined && spec ? anchorProgress + eventTravelDistance(spec, frame.time - applied.time) : null;
+        if (hazardProgress !== null && telemetry && telemetry.progress + rear > hazardProgress
           && hazards.every(actor => corners({ state: actor, def: defs.get(actor.id)! }).every(([x, y]) => (x - ego.x) * c + (y - ego.y) * s < rear))) passed = frame.time;
       }
       // The encounter's state at its end decides a safe hold, not whether the ego ever stopped.

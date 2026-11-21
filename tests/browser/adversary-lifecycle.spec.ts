@@ -25,9 +25,9 @@ test('Carbon pauses motion and command age, then its hazard reaches the next dri
   await driver.open();
   await startCarbon(driver);
   await driver.gateway.reply(0);
-  // A response arriving during Carbon's barrier is held until the barrier resumes.
-  expect(await driver.decisionCount()).toBe(0);
+  expect(await driver.decisionCount()).toBe(0); // The response is held until the barrier applies its state change.
   await driver.page.clock.fastForward(5000); // A barrier freezes physics; no driving frames are skipped.
+  expect(await driver.decisionCount()).toBe(0);
   expect(await driver.time()).toBe(0);
   expect(driver.gateway.calls).toHaveLength(1);
   expect(driver.adversary.calls).toHaveLength(1);
@@ -35,8 +35,8 @@ test('Carbon pauses motion and command age, then its hazard reaches the next dri
   await expect(driver.page.getByRole('alert')).toHaveCount(0);
   await expect(driver.page.getByLabel('Adversary', { exact: true })).toBeDisabled();
   await driver.adversary.reply(0, { decision: attack });
-  await driver.page.clock.runFor(1200);
   await expect.poll(() => driver.decisionCount()).toBe(1);
+  await driver.page.clock.runFor(1200);
   const next = await driver.gateway.waitForRequest(1);
   expect(next.observation.lead_gap_m).not.toBeNull();
   expect(next.observation.lead_gap_m!).toBeLessThan(80);

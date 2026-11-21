@@ -1,15 +1,18 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { validateDecisionResponse } from '../agent/session';
 import { mediaUrl } from '../media/cameras';
 import { fetchStreetRoute } from '../navigation/routing';
 import type { ScenarioBundle, SimulationFrame } from '../types';
 import type { RunTrace } from '../scenarios/trace';
 import { emptySnapshot, runJourney } from './runtime';
+import { requestJourneyDecision } from './request';
 
 export function useJourney() {
   const lease = useRef<AbortController | null>(null);
   const frameRef = useRef<SimulationFrame>({ time: 0, signal: 'green', actors: [] });
   const traces = useRef<RunTrace[]>([]);
+  // Reset retires the UI lease immediately, but its final trace still belongs to
+  // this export until the user explicitly starts a new journey.
+  const traceOwner = useRef<AbortController | null>(null);
   const [scene, setScene] = useState<ScenarioBundle | null>(null);
   const [snapshot, setSnapshot] = useState(emptySnapshot);
   const [status, setStatus] = useState<'idle' | 'running' | 'stopped' | 'error'>('idle');
@@ -25,23 +28,15 @@ export function useJourney() {
   const start = useCallback(() => {
     if (document.hidden || (lease.current && !lease.current.signal.aborted)) return;
     const controller = lease.current = new AbortController();
+    traceOwner.current = controller;
     const current = () => lease.current === controller;
     traces.current = []; setScene(null); setSnapshot(emptySnapshot()); setError(null); setStatus('running');
     void runJourney({ signal: controller.signal, route: fetchStreetRoute, adversaryUrl: mediaUrl('/api/adversary/attack'),
-      async driver(run, step, observation, signal) {
-        const response = await fetch(mediaUrl('/api/driver/decision'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, signal,
-          body: JSON.stringify({ run_id: run, step, observation }) });
-        const body: unknown = await response.json();
-        if (!response.ok) {
-          const detail = (body as { detail?: { message?: unknown } })?.detail;
-          throw new Error(typeof detail?.message === 'string' ? detail.message.slice(0, 280) : 'The driving service could not return a decision.');
-        }
-        return validateDecisionResponse(body, run, step);
-      },
+      driver: requestJourneyDecision,
       onScene(next, frame) { if (current() && !controller.signal.aborted) { frameRef.current = frame; setScene(next); } },
       onFrame(frame) { if (current() && !controller.signal.aborted) frameRef.current = frame; },
       onUpdate(next) { if (current()) setSnapshot(next); },
-      onTrace(trace) { if (current()) traces.current = [...traces.current.slice(-3), structuredClone(trace)]; },
+      onTrace(trace) { if (traceOwner.current === controller) traces.current = [...traces.current.slice(-3), structuredClone(trace)]; },
     }).catch(failure => {
       if (!current() || controller.signal.aborted) return;
       setError(failure instanceof Error ? failure.message : 'Journey interrupted.'); setStatus('error');

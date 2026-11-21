@@ -6,12 +6,15 @@ import { useCameraSources } from './media/cameras';
 import { LiveFeed } from './media/LiveFeed';
 import { usePlayback } from './hooks/usePlayback';
 import { EvidencePanel } from './evidence/EvidencePanel';
+import { useDemoCache } from './evidence/demoCache';
 import { useGeminiDriver } from './agent/useGeminiDriver';
 import { DriverPanel } from './agent/DriverPanel';
 import { useJourney } from './journey/useJourney';
 import { JourneyPanel } from './journey/JourneyPanel';
 import { MAX_DRIVER_STEPS, MAX_DRIVE_SECONDS } from './agent/types';
 import { preset, withEventActors } from './scenarios/events';
+import { evidenceApplies, evidencePlan, withEvidenceTraffic } from './scenarios/evidence';
+import type { EvidenceConditions } from './scenarios/evidence';
 import { ADVERSARY_PLAN } from './scenarios/adversary';
 import type { AdversarySettings } from './scenarios/adversary';
 import NavigationPanel, { cameraLocation } from './components/NavigationPanel';
@@ -28,7 +31,10 @@ const MODES: { id: ViewMode; label: string; icon: typeof Globe2 }[] = [
 const formatTime = (time: number) => `${Math.floor(time / 60).toString().padStart(2, '0')}:${Math.floor(time % 60).toString().padStart(2, '0')}`;
 
 export default function App() {
-  const { cameras, status: registryStatus } = useCameraSources();
+  const { cameras: liveCameras, status: registryStatus } = useCameraSources();
+  const demoCache = useDemoCache();
+  // The demo cache script drops cameras whose feeds were too slow.
+  const cameras = useMemo(() => demoCache ? liveCameras.filter(camera => !(camera.id in demoCache.dropped)) : liveCameras, [liveCameras, demoCache]);
   const [viewMode, setViewMode] = useState<ViewMode>('city');
   const [viewRevision, setViewRevision] = useState(0);
   const [selectedCameraId, setSelectedCameraId] = useState(demoScenario.cameraId);
@@ -44,10 +50,13 @@ export default function App() {
   const [railTab, setRailTab] = useState<'cameras' | 'route' | 'driver'>('cameras');
   const [scenario, setScenario] = useState<ScenarioBundle>(demoScenario);
   const [scenarioPlan, setScenarioPlan] = useState(() => preset());
+  const [evidenceDrive, setEvidenceDrive] = useState<EvidenceConditions | null>(null);
   const [adversary, setAdversary] = useState<AdversarySettings>({ mode: 'off', seed: 1, guardsIgnoreHazards: false });
+  const drivePlan = useMemo(() => evidencePlan(scenario, evidenceDrive, scenarioPlan), [scenario, evidenceDrive, scenarioPlan]);
   // With an adversary, its attack slots replace the Scenario Lab plan for the run.
-  const runPlan = adversary.mode === 'off' ? scenarioPlan : ADVERSARY_PLAN;
-  const renderedScenario = useMemo(() => scenario.motionSource === 'event-replay' ? scenario : withEventActors(scenario, runPlan), [scenario, runPlan]);
+  const runPlan = adversary.mode === 'off' ? drivePlan : ADVERSARY_PLAN;
+  const renderedScenario = useMemo(() => scenario.motionSource === 'event-replay' ? scenario
+    : withEventActors(withEvidenceTraffic(scenario, evidenceDrive), runPlan), [scenario, runPlan, evidenceDrive]);
   const [pickedLocation, setPickedLocation] = useState<NavigationPoint | null>(null);
   const [navigationStart, setNavigationStart] = useState<NavigationPoint | null>(null);
   const [navigationEnd, setNavigationEnd] = useState<NavigationPoint | null>(null);
@@ -114,6 +123,16 @@ export default function App() {
     if (mode === 'start') setNavigationStart(point); else setNavigationEnd(point);
     setPickingMode('inspect'); setRailTab('route');
   }, [invalidateRoute]);
+  const driveWithEvidence = useCallback((conditions: EvidenceConditions) => {
+    journey.reset();
+    driver.stop();
+    setEvidenceDrive(conditions);
+    closeEvidence(); setSidebarOpen(true);
+    // Without a drivable street here yet, start a route at the camera so the next planned drive picks up the evidence.
+    const camera = cameras.find(item => item.id === conditions.cameraId);
+    if (evidenceApplies(scenario, conditions)) setRailTab('driver');
+    else if (camera) setEndpoint('start', cameraLocation(camera));
+  }, [journey.reset, driver.stop, closeEvidence, scenario, cameras, setEndpoint]);
   const selectLocation = useCallback((point: NavigationPoint) => {
     if (pickingMode !== 'inspect') {
       setEndpoint(pickingMode, point);
@@ -302,7 +321,7 @@ export default function App() {
         <div className="camera-list" key={`${sourceFilter}-${boroughFilter}-${currentPage}`}>{visibleCameras.map(camera => <CameraRow key={camera.id} camera={camera} selected={camera.id === selectedCameraId} onSelect={() => chooseCamera(camera.id)} />)}{filteredCameras.length === 0 && <div className="empty-sources"><Camera size={25} /><p>{search ? 'No matching cameras.' : 'No cameras available in this filter.'}</p><span>{search ? 'Try another street or borough.' : sourceFilter === 'hls' ? 'No configured video feeds here. Try All or Images.' : registryStatus === 'connected' ? 'Try All or choose another borough.' : 'The DOT directory may be offline. Try All or Video.'}</span></div>}</div>
         {pageCount > 1 && <div className="camera-pagination"><button className="icon-button" disabled={currentPage === 0} onClick={() => setCameraPage(currentPage - 1)} aria-label="Previous camera page"><ChevronLeft size={17} /></button><span>{currentPage * 40 + 1}–{Math.min((currentPage + 1) * 40, filteredCameras.length)} of {filteredCameras.length}</span><button className="icon-button" disabled={currentPage === pageCount - 1} onClick={() => setCameraPage(currentPage + 1)} aria-label="Next camera page"><ChevronRight size={17} /></button></div>}
         <div className="rail-bottom"><div className="registry-note"><Radio size={13} /><span>{registryStatus === 'connected' ? 'Public camera directory connected' : registryStatus === 'loading' ? 'Loading NYC camera directory…' : registryStatus === 'stale' ? 'Directory partially available · saved cameras retained' : 'Directory offline · saved sources only'}</span></div><button className="explore-button" onClick={() => { setRailTab('route'); if (selectedCamera && !navigationStart) setEndpoint('start', cameraLocation(selectedCamera)); }}><Route size={16} />Plan a drive from here</button><div className="rail-credit">NYC DOT <span>·</span> 511NY / NYSDOT</div></div>
-      </> : railTab === 'driver' ? <DriverPanel driver={driver} onStart={startDriver} plan={scenarioPlan} onPlanChange={setScenarioPlan} onReplay={runScenario} adversary={adversary} onAdversaryChange={setAdversary} /> : <NavigationPanel start={navigationStart} end={navigationEnd} cameras={cameras} pickingMode={pickingMode} route={plannedRoute} status={routeStatus} error={routeError} onStart={point => setEndpoint('start', point)} onEnd={point => setEndpoint('destination', point)} onPick={mode => { driver.stop(); setPickingMode(pickingMode === mode ? 'inspect' : mode); setViewMode('city'); setPickedLocation(null); if (window.innerWidth < 760) setSidebarOpen(false); }} onPlan={() => void planRoute()} onRun={() => { if (plannedRoute && navigationStart) runScenario(createRouteScenario(plannedRoute, navigationStart, selectedCameraId)); }} onClear={() => { invalidateRoute(); setNavigationStart(null); setNavigationEnd(null); setPickingMode('inspect'); }} />}
+      </> : railTab === 'driver' ? <DriverPanel driver={driver} onStart={startDriver} plan={drivePlan} onPlanChange={setScenarioPlan} onReplay={runScenario} adversary={adversary} onAdversaryChange={setAdversary} /> : <NavigationPanel start={navigationStart} end={navigationEnd} cameras={cameras} pickingMode={pickingMode} route={plannedRoute} status={routeStatus} error={routeError} onStart={point => setEndpoint('start', point)} onEnd={point => setEndpoint('destination', point)} onPick={mode => { driver.stop(); setPickingMode(pickingMode === mode ? 'inspect' : mode); setViewMode('city'); setPickedLocation(null); if (window.innerWidth < 760) setSidebarOpen(false); }} onPlan={() => void planRoute()} onRun={() => { if (plannedRoute && navigationStart) runScenario(createRouteScenario(plannedRoute, navigationStart, selectedCameraId)); }} onClear={() => { invalidateRoute(); setNavigationStart(null); setNavigationEnd(null); setPickingMode('inspect'); }} />}
     </aside></>}
 
     <div className="scene-heading"><h2>{journey.scene ? 'Driver vs adversary' : viewMode === 'city' ? 'New York, in motion.' : scenario.label}</h2><p>{journey.scene ? journey.snapshot.routeLabel : viewMode === 'city' ? 'Find a camera. Choose a street. Take the wheel.' : driver.hasRun ? `Gemini at the wheel · ${driver.status === 'thinking' ? 'deciding the next move' : driver.status === 'driving' ? 'following the route' : driver.status}` : scenario.motionSource === 'event-replay' ? 'Recorded synthetic run · playback only' : scenario.geometryKind === 'street-route' ? scenario.motionSource === 'location-preview' ? 'Location preview · choose a destination to drive' : scenario.motionSource === 'street-preview' ? 'Local preview · direction unverified' : 'Driving route · simulated vehicle motion' : `${demoScenario.actors.length} simulated vehicles · signals · 60-second loop`}</p>{viewMode === 'city' && <button className="text-action" onClick={() => { setRailTab('route'); setSidebarOpen(true); }}>Plan a route <ArrowUpRight size={15} /></button>}</div>
@@ -327,7 +346,7 @@ export default function App() {
     </section>}
 
     <div className="bottom-caption"><span>Simulated motion · camera evidence reviewed separately</span><span>Map context © OpenStreetMap</span></div>
-    <EvidencePanel camera={selectedCamera} open={evidenceOpen} modal={evidenceIsModal} onClose={closeEvidence} />
+    <EvidencePanel camera={selectedCamera} open={evidenceOpen} modal={evidenceIsModal} onClose={closeEvidence} onDrive={driveWithEvidence} cached={selectedCamera ? demoCache?.cameras[selectedCamera.id] : undefined} />
     {!mapReady && !mapError && <div className="map-loading"><span className="loading-orbit" /><span>Opening New York</span></div>}
     {mapError && <div className="map-notice"><span>{mapError}</span><button onClick={() => setMapError('')} aria-label="Dismiss map notice"><X size={14} /></button></div>}
     {journeyOpen && <JourneyPanel journey={journey} onStart={startJourney} onClose={() => setJourneyOpen(false)} />}

@@ -3,6 +3,7 @@ import type { DriverClock } from '../agent/continuous';
 import { createDriverSimulation, driverFrame } from '../agent/physics';
 import type { DriverSimulation } from '../agent/physics';
 import type { DriverObservation, DriverResponse } from '../agent/types';
+import { DriverRequestError, traceError } from '../agent/trace';
 import { createRouteScenario } from '../navigation/routeScenario';
 import type { NavigationPoint, PlannedRoute } from '../navigation/types';
 import { adversaryBarrier, ADVERSARY_PLAN, attackRecords } from '../scenarios/adversary';
@@ -12,6 +13,7 @@ import { beginDecision, createTrace, finishTrace, recordFrame } from '../scenari
 import type { RunTrace, ScriptedOpeningTrace, Terminal, TraceStep } from '../scenarios/trace';
 import type { ScenarioBundle, SimulationFrame } from '../types';
 import { ProgressWatch, randomStop, STUCK_SECONDS } from './route';
+import { JourneyRequestError } from './request';
 import { createOpening, playOpening } from './opening';
 
 export interface JourneySnapshot {
@@ -108,14 +110,22 @@ export async function runJourney(options: JourneyOptions): Promise<void> {
             const result = barrier.run(current);
             const check = () => {
               if (batch.signal.aborted) return;
-              if (trace.adversary?.error) throw new Error(trace.adversary.error);
+              if (trace.adversary?.error) throw new DriverRequestError(trace.adversary.error);
               stats.phase = 'driving'; publish();
             };
             if (result) { stats.phase = 'thinking'; publish(); return result.then(check); }
             check(); return null;
           } },
           onRequest(step, observation, current) { pending = beginDecision(trace, current, step, observation); },
-          requestDecision: (step, observation, requestSignal) => options.driver(trace.runId, step, observation, requestSignal),
+          async requestDecision(step, observation, requestSignal) {
+            const entry = pending;
+            try { return await options.driver(trace.runId, step, observation, requestSignal); }
+            catch (error) {
+              if (entry && !requestSignal.aborted && !batch.signal.aborted) entry.failure = error instanceof JourneyRequestError
+                ? error.failure : { code: 'request_failed', requestId: null };
+              throw error;
+            }
+          },
           onDecision(response, _observation, current) {
             stats.decisions++; stats.driverAction = response.decision.action;
             if (pending) { pending.response = response; pending.appliedSimulationTime = current.time; pending = null; }
@@ -137,7 +147,7 @@ export async function runJourney(options: JourneyOptions): Promise<void> {
         });
         terminal = completion; arrived = completion === 'route-complete';
       } catch (error) {
-        if (!stuck && !signal.aborted) { terminal = 'error'; message = error instanceof Error ? error.message : 'Journey failed.'; throw error; }
+        if (!stuck && !signal.aborted) { terminal = 'error'; message = traceError(error); throw new DriverRequestError(message); }
       } finally {
         batch.abort(); signal.removeEventListener('abort', cancel);
         finishTrace(trace, state, terminal, message);

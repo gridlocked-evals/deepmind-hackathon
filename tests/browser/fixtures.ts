@@ -3,6 +3,7 @@ import type { DriverDecision, DriverObservation, DriverResponse } from '../../sr
 import type { ModelGatewayStatus } from '../../src/models/types';
 import type { CameraSource } from '../../src/types';
 import type { AttackDecision } from '../../src/scenarios/adversary';
+import { EvidenceFixtures } from './evidence-fixtures';
 
 export { expect };
 
@@ -155,6 +156,7 @@ export class AdversaryGateway {
 export class DriverHarness {
   readonly gateway = new Gateway();
   readonly adversary = new AdversaryGateway();
+  readonly evidence = new EvidenceFixtures();
   readonly unexpectedRequests: string[] = [];
   readonly routeRequests: string[] = [];
   readonly pageErrors: string[] = [];
@@ -177,10 +179,11 @@ export class DriverHarness {
       const url = new URL(request.url());
       const local = url.origin === origin;
       const get = request.method() === 'GET';
+      if (await this.evidence.handle(route, local)) return;
       if (local && get && url.pathname === '/api/models/status') {
         await route.fulfill({ json: MODEL_STATUS });
       } else if (local && get && url.pathname === '/api/cameras') {
-        await route.fulfill({ json: { cameras: Object.values(FIXTURE_CAMERAS), metadata: { mode: 'connected' } } });
+        await route.fulfill({ json: { cameras: Object.values(FIXTURE_CAMERAS).map(camera => this.evidence.camera(camera)), metadata: { mode: 'connected' } } });
       } else if (local && get && url.pathname === '/api/vision/cameras') {
         await route.fulfill({ json: { cameras: [], metadata: { mode: 'connected' } } });
       } else if (local && url.pathname === '/api/driver/decision' && request.method() === 'POST') {
@@ -275,6 +278,7 @@ export class DriverHarness {
   async dispose() {
     await this.gateway.dispose();
     await this.adversary.dispose();
+    await this.evidence.dispose();
     await Promise.allSettled(this.pendingBasemap.splice(0).map(route => route.abort('aborted')));
   }
 
@@ -385,6 +389,8 @@ export const test = base.extend<{ driver: DriverHarness }>({
           body: JSON.stringify({
             gatewayCalls: driver.gateway.calls.map(({ index, body, replied }) => ({ index, body, replied })),
             adversaryCalls: driver.adversary.calls,
+            evidenceReportCalls: driver.evidence.reportCalls,
+            evidenceMediaCalls: driver.evidence.mediaCalls,
             routeRequests: driver.routeRequests,
             unexpectedRequests: driver.unexpectedRequests,
             pageErrors: driver.pageErrors,
