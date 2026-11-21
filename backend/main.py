@@ -20,6 +20,7 @@ from .capture import CaptureService, router as capture_router
 from .config import load_environment
 from .feeds import HLS_SOURCES, REGISTRY_URL, public_cameras, utc_now
 from .gateway import ModelGateway
+from .observations import ObservationService, router as observation_router
 from .proxy import proxy_media, resolve_token
 
 DOT_URL = "https://webcams.nyctmc.org/api/cameras"
@@ -48,6 +49,10 @@ async def lifespan(app: FastAPI):
             snapshot_loader=snapshots,
         )
         app.state.gateway = ModelGateway.from_env()
+        observation_storage = Path(os.environ.get("OBSERVATION_STORAGE_DIR", "data/observations"))
+        if not observation_storage.is_absolute():
+            observation_storage = ROOT / observation_storage
+        app.state.observations = ObservationService(app.state.capture, app.state.gateway, observation_storage)
         try:
             yield
         finally:
@@ -59,9 +64,10 @@ app = FastAPI(title="Crash Test NYC / Element 119", version="0.2.0", lifespan=li
 app.add_middleware(
     CORSMiddleware, allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
     allow_methods=["GET", "POST"], allow_headers=["Range", "Content-Type"],
-    expose_headers=["Content-Range", "Accept-Ranges", "Content-Length"],
+    expose_headers=["Content-Range", "Accept-Ranges", "Content-Length", "X-Observation-Attempt-Id"],
 )
 app.include_router(capture_router)
+app.include_router(observation_router)
 
 
 class CameraCache:

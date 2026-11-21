@@ -2,6 +2,8 @@
 
 Approved submission scope, November 21, 2026. [Issue tracker](https://github.com/Paradox560/deepmind-hackathon/issues/1).
 
+**Current implementation preference:** Genie is optional and disabled by default while credits are limited (`GENIE_ENABLED=false`). Capture, Hydrogen/Carbon reasoning, reference generation, and Decisions remain usable without starting a world. The full world/control sequence below remains the intended later integration; do not claim it is running when Genie is disabled.
+
 ## Product and evidence boundary
 
 Select a real NYC camera and capture at most **120 seconds of original evidence**. Hydrogen extracts evidence; Carbon compiles a mayor edit; Nano Banana produces a reference image; Decisions accepts or rejects that reference; Genie creates a navigable visual world. Human or Hydrogen navigation is supervised by temporal Decisions checks. Evaluate the pipeline on unseen real camera inputs with a simple baseline and retain failures and unknown outcomes.
@@ -20,9 +22,9 @@ The repository is already public. Pharos attribution and its source revision rem
 
 ## Implemented foundation versus pending integration
 
-This tranche adds versioned Python/TypeScript artifact contracts and a shared validation fixture, a server-only model gateway with credential profiles and bounded usage, and bounded capture/storage primitives. [Contracts](docs/CONTRACTS.md), [gateway](docs/MODEL_GATEWAY.md), and [capture](docs/CAPTURE_API.md) document their exact interfaces and limitations.
+The backend includes versioned Python/TypeScript artifact contracts, a server-only model gateway, bounded capture/storage, and timestamped Hydrogen observation extraction with window/crop reinspection. [Contracts](docs/CONTRACTS.md), [gateway](docs/MODEL_GATEWAY.md), [capture](docs/CAPTURE_API.md), and [observations](docs/OBSERVATIONS_API.md) document their exact interfaces and limitations.
 
-Automated fixtures and mocked provider tests validate implementation behavior; they do not prove account access, quotas, live capture quality, or model quality. Required live model smoke records, real-media acceptance, the end-to-end pipeline, Mayor Mode UI, and held-out evaluation remain integration work. The existing UI still displays its authored demonstration.
+Automated fixtures and mocked provider tests validate implementation behavior. Separate live checks have verified the primary project's five service capabilities and Hydrogen extraction from one real video and one snapshot; [verification records](docs/VERIFICATION.md) retain the measured outcomes and failures. Project maximum quotas, annotation-based quality, the full end-to-end pipeline, Mayor Mode UI, and held-out evaluation remain acceptance work. The existing UI still displays its authored demonstration, and Genie is now disabled by default.
 
 ## Four work lanes
 

@@ -62,6 +62,8 @@ The HLS proxy accepts registered camera IDs rather than arbitrary upstream URLs.
 
 The local API loads `.env` only on the server. `GEMINI_KEY_PROFILE` explicitly selects the Tier 3 or Workshop AI Studio key; neither key reaches the Vite bundle. Run one backend worker per local evidence/budget directory until shared coordination is implemented.
 
+`ObservationService` prepares retained prefix bytes through `evidence_media`, which reads actual decoded presentation timestamps and samples across the requested interval. It sends inline frames to Hydrogen with a structured response schema, resolves model references back to supplied frames, validates the shared artifact, and persists the result with an attempt record. Optional crops map back to original image-space coordinates. All accepted and failed attempts retain their source capture pins; no inference retry fetches fresh camera footage. See [observation routes](OBSERVATIONS_API.md) and [media preparation](EVIDENCE_MEDIA.md).
+
 ## Extension points and current limits
 
 - Add a backend `ScenarioProvider`, runtime payload validation, and loading/error state in `App` to replace its static bundle import. Preserve the metric axes, actor IDs, ordered frame times, provenance, and version identity.

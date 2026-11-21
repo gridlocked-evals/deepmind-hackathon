@@ -1,5 +1,34 @@
 # Verification record
 
+## Live services and Hydrogen extraction — November 21, 2026
+
+The primary Gemini project completed capability checks for all five configured services. Genie returned a video frame and acknowledged termination before the user requested that it become optional; it is now disabled with `GENIE_ENABLED=false`, including in default smoke batches. No further Genie calls were made. The Workshop project was not probed or used as an automatic fallback.
+
+| Capability | Successful trace | Latency | Reported total tokens |
+| --- | --- | --- | --- |
+| Hydrogen | `trace-8e60c228-adb1-4031-88ff-6cdc24f53cd5` | 7.821 s | 274 |
+| Carbon | `trace-a0ad7aab-7de6-4f15-8be4-f1c08d821dcf` | 20.423 s | 1,216 |
+| Decisions | `trace-45d3a940-bc11-458a-8960-2b1152cb5540` | 0.273 s | 96 |
+| Nano Banana | `trace-15f03630-9493-405e-968c-975f4c29bcb3` | 12.722 s | 2,326 |
+| Genie | `trace-25c769bc-b2d8-4d70-8143-53c7a967dda5` | 5.738 s | 2,896 |
+
+The integrated observation API then returned HTTP 201 for both retained real inputs and successfully retrieved their persisted artifacts:
+
+| Input | Capture and artifact | Measured result |
+| --- | --- | --- |
+| 511NY Vestry video | `cap_73ad25cf6ce245a182ad9d010df99a19`; `observations_4e08cad932a64d008cdc8d48bcbf2d76` | 10.009 s declared / 10.008466 s decoded; 150 frames sampled to 11; 8 observations, 4 explicit unknowns; 19.747 s inference; 19,561 total tokens |
+| NYC DOT snapshot | `cap_86e874e035164f38a5e9c1d791688aeb`; `observations_d1ccdd4682af4f67ad2be87e54c4651b` | One original image; 7 observations, 1 explicit unknown; 16.030 s inference; 6,161 total tokens |
+
+The successful extraction traces are `trace-18fd77ca-18bc-496a-ba3d-7371565da885` and `trace-78a0e5fb-2cd5-43bb-8fcc-f02645a15e3c`. Source bytes/manifests, observation envelopes, attempts, and the private gateway ledger remain under ignored `data/`. Provider request IDs absent from stateless responses remain null; local request/trace IDs are not mislabeled as provider IDs. No accuracy scores or human ground truth have been established for these outputs.
+
+All **13 provider attempts** remain recorded: 7 successful capability/extraction calls and 6 unsuccessful probes/diagnostics. Two tiny Hydrogen probes and one Nano Banana probe exhausted their output allowance. Two initial extraction requests and one diagnostic request hit the provider's schema-state limit. The fixes increased bounded smoke output allowances and simplified only the provider-facing schema; strict local field, bounds, and cross-field validation remain enforced. No incomplete result was accepted.
+
+After explicit user approval, the local total reservation ceiling became $21, stage ceiling $7 / 131,072 tokens, retaining the $5 demo reserve. The ledger retained $15.25 in reservations; this is **not measured billing**. The video call exceeded its 16,384-token estimate, and the ledger retained the actual 19,561-token usage to reduce subsequent headroom. The current Hydrogen stage dollar allowance is exhausted. Quota maxima and invoice costs remain unmeasured.
+
+The implementation passes **142 Python tests** and generated-contract drift checks. The tests cover actual ffmpeg/ffprobe timing and frame selection, snapshot restrictions, cropped/windowed evidence, provider schema projection plus strict local validation, persisted success/failure/restart recovery, tamper detection, concurrency/cancellation, and disabled Genie making no transport or budget reservation. Frontend code was unchanged in this tranche.
+
+Remaining acceptance: independent human development annotations, quantified count/event/anchor errors and abstentions, temporal-event live validation, held-out baseline comparison, and the downstream edit/reference/gate/UI pipeline. Issues #3–#5 are not closed solely on these checks.
+
 ## Element 119 foundation — November 21, 2026
 
 The shared Python/TypeScript contracts, model gateway, capture service, configuration, and integrated API pass **95 Python tests**, **35 frontend tests**, contract generation drift checks, and the production build. The existing large application-chunk warning remains. Provider HTTP/SDK tests use mocks and do not verify model availability or project quotas.

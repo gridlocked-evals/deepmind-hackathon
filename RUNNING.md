@@ -36,9 +36,25 @@ GEMINI_KEY_PROFILE=primary
 
 Both credentials are Gemini AI Studio keys. `primary` selects `GEMINI_API_KEY`; `workshop` selects `WORKSHOP_API_KEY`. Selection is explicit: quota failures do not switch projects automatically. Restart the backend after changing configuration. The API and smoke CLI load this checkout's `.env`; exported environment variables take precedence.
 
+Genie is optional: keep `GENIE_ENABLED=false` to prevent world-generation requests and preserve credits. The default smoke batch skips disabled Genie. Set `GENIE_ENABLED=true` deliberately when ready to test or use billable world generation; neither credential setup nor starting the app enables it.
+
 `.env` is ignored by Git. Do not put keys into `src/`, `VITE_*` variables, request URLs, or committed files. The status endpoint reports configuration and connectivity without returning credentials. Tier 3 describes the project's access tier; actual model availability and quota still need a successful project-specific smoke test. See [Model gateway](docs/MODEL_GATEWAY.md) for limits and the opt-in live smoke command.
 
 Runtime media and request evidence default to the ignored `data/` directory. Run one backend worker against a local data directory; this foundation does not coordinate budgets or capture state across multiple workers. Capture API behavior, supported media, and sealed-prefix access are documented in [Capture API](docs/CAPTURE_API.md).
+
+## Extract observations from a capture
+
+Create a retained episode or snapshot using the [capture routes](docs/CAPTURE_API.md), then pass its returned capture ID to the observation API:
+
+```sh
+curl -X POST http://127.0.0.1:8000/api/observations \
+  -H 'Content-Type: application/json' \
+  -d '{"captureId":"cap_REPLACE_WITH_CAPTURE_ID","maxFrames":16}'
+```
+
+This makes a budgeted Hydrogen request using only the retained permitted media. Accepted batches contain actual source-frame timestamps, image-space evidence regions, unknowns, and the gateway trace. The response header `X-Observation-Attempt-Id` identifies a retained attempt; failures also return an attempt ID. Retrieve accepted batches at `/api/observations/{id}` and frame audits at `/api/observations/{id}/evidence`. Window/crop reinspection, temporal event ownership, error handling, and annotation limitations are in [the observation API guide](docs/OBSERVATIONS_API.md).
+
+`OBSERVATION_STORAGE_DIR` defaults to `data/observations`. Keep that directory and its source captures together so persisted evidence links remain valid. Model extraction is currently an API workflow; the authored map demo does not yet display these observations.
 
 ## Explore
 
@@ -86,4 +102,4 @@ For a production-style local preview, run `npm run build`, then start `npm run d
 
 Implementation verification: production build, six scenario tests, and 19 API tests passed. Desktop (1440 × 900) and mobile (390 × 844) views were reviewed in-browser. Vestry HLS video visibly advanced through the local proxy. Camera changes, feed toggling, seeking, layer switches, and City/Intersection/Follow transitions were exercised; the active page kept at most one video element. Chrome reported approximately 120 map render events per second in Follow with one playing feed on the development machine; this is an observed local result, not a cross-device guarantee.
 
-The current contract/gateway/capture foundation is covered by automated tests. Real model access, live-media acceptance, end-to-end extraction/edit/image/world integration, Mayor Mode UI, and independent evaluation remain acceptance work in [the Element 119 plan](GOTHAM_FORGE_PLAN.md). SUMO and calibrated reconstruction are later milestones.
+The contracts, gateway, capture, and observation services are covered by automated tests. The primary project's live capability checks and real video/snapshot observation runs are recorded in [verification](docs/VERIFICATION.md). Full extraction/edit/image/world integration, Mayor Mode UI, human annotation, and independent evaluation remain acceptance work in [the Element 119 plan](GOTHAM_FORGE_PLAN.md). SUMO and calibrated reconstruction are later milestones.

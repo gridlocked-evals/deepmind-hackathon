@@ -1,6 +1,8 @@
 # Crash Test NYC / Element 119
 
-NYC camera evidence → Hydrogen observation → Carbon mayor edit → Nano Banana reference → Decisions acceptance → Genie exploration. The shared contracts, model gateway, and capture foundation are being implemented against the [core issues](https://github.com/Paradox560/deepmind-hackathon/issues/1). The existing interface contains a city map, an illustrative Vestry traffic demo, and public camera feeds; the full model-driven UI is still pending.
+NYC camera evidence → Hydrogen observation → Carbon mayor edit → Nano Banana reference → Decisions acceptance → Genie exploration. The backend now includes shared contracts, a model gateway, bounded capture, and timestamped Hydrogen extraction against the [core issues](https://github.com/Paradox560/deepmind-hackathon/issues/1). The existing interface contains a city map, an illustrative Vestry traffic demo, and public camera feeds; the full model-driven UI is still pending.
+
+Genie world generation is optional and disabled by default to preserve credits. Camera capture and reasoning do not require a world session.
 
 **[Setup and controls](RUNNING.md)** · [Architecture](docs/ARCHITECTURE.md) · [Camera API](docs/CAMERA_API.md) · [Verification](docs/VERIFICATION.md)
 
@@ -9,6 +11,8 @@ NYC camera evidence → Hydrogen observation → Carbon mayor edit → Nano Bana
 Quick start after installing dependencies: run `npm run dev:api` and `npm run dev` in separate terminals. Camera browsing works without model credentials. For model access, copy `.env.example` to `.env` and follow [credential setup](RUNNING.md#model-credentials).
 
 [Shared contracts](docs/CONTRACTS.md) · [Model gateway](docs/MODEL_GATEWAY.md) · [Capture API](docs/CAPTURE_API.md)
+
+[Hydrogen observation API](docs/OBSERVATIONS_API.md) · [Evidence sampling and reinspection](docs/EVIDENCE_MEDIA.md)
 
 ---
 

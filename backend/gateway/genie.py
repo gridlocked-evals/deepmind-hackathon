@@ -47,6 +47,27 @@ async def smoke_genie(config, payload, record, persist, client_factory=None):
         raise GatewayError("sdk_unavailable")
     result = {"completed": False, "frameSha256": None, "usage": {}}
     interaction_id = None
+
+    def record_terminal(event):
+        result["completed"] = True
+        usage = getattr(event, "usage", None)
+        if usage is not None:
+            usage = usage.model_dump() if hasattr(usage, "model_dump") else usage
+            if isinstance(usage, dict):
+                result["usage"] = usage
+                for local, wire in (("inputTokens", "total_input_tokens"), ("outputTokens", "total_output_tokens"),
+                                    ("thoughtTokens", "total_thought_tokens"), ("totalTokens", "total_tokens")):
+                    value = usage.get(wire)
+                    record[local] = value if type(value) is int and value >= 0 else None
+        status = getattr(event, "status", None)
+        rpc_code = status.get("code") if isinstance(status, dict) else getattr(status, "code", None)
+        if type(rpc_code) is int and 0 <= rpc_code <= 16:
+            record["providerRpcCode"] = rpc_code
+        persist(record)
+        if rpc_code not in (None, 0):
+            code = "quota" if rpc_code == 8 else "unavailable" if rpc_code in {5, 7, 16} else "timeout" if rpc_code == 4 else "transport"
+            raise GatewayError(code)
+
     try:
         try:
             async with asyncio.timeout(config.timeout_seconds):
@@ -70,7 +91,7 @@ async def smoke_genie(config, payload, record, persist, client_factory=None):
                                 result["frameSha256"] = hashlib.sha256(frame).hexdigest()
                                 break
                             if event.event_type == "interaction.completed":
-                                result["completed"] = True
+                                record_terminal(event)
                                 raise GatewayError("invalid_output")
                     finally:
                         if not result["completed"]:
@@ -78,10 +99,7 @@ async def smoke_genie(config, payload, record, persist, client_factory=None):
                                 await session.complete()
                                 async for event in receiver:
                                     if event.event_type == "interaction.completed":
-                                        result["completed"] = True
-                                        usage = getattr(event, "usage", None)
-                                        if usage is not None:
-                                            result["usage"] = usage.model_dump() if hasattr(usage, "model_dump") else usage
+                                        record_terminal(event)
                                         return
                                 raise GatewayError("termination_unconfirmed")
                             await _shielded_cleanup(terminate())
