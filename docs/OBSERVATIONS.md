@@ -55,8 +55,10 @@ signals must use `unknown`. There is no state for physical disappearance: leavin
 the image or becoming occluded does not establish that an actor ceased to exist.
 Snapshot, repeated-still, stale-source and low-cadence jobs cannot publish events.
 
-Temporal events require at least two distinct continuous-media frames. Their
-entire uncertainty interval must fit one half-open owned interval (the final
+Temporal events require at least two cited continuous-media frames with distinct
+original and model-image hashes; motion in uncited frames or outside a repeated
+crop cannot establish an event. Their entire uncertainty interval must fit one
+half-open owned interval (the final
 interval includes its end). Boundary-crossing uncertainty is retained for review,
 not counted as another event. Matching overlapping event intervals and regions
 are conservatively deduplicated. This is an image-space heuristic, not an actor

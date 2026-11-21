@@ -322,6 +322,51 @@ def test_scope_cancellation_during_close_does_not_spin(monkeypatch):
     asyncio.run(run())
 
 
+def test_failed_close_after_cancellation_is_observed(monkeypatch):
+    import gc
+
+    class FailingClose(TrackedMediaStream):
+        async def aclose(self):
+            self.close_calls += 1
+            self.close_started.set()
+            await self.close_gate.wait()
+            raise httpx.ReadError("close failed")
+
+    unobserved = []
+
+    async def run():
+        asyncio.get_running_loop().set_exception_handler(lambda _loop, ctx: unobserved.append(ctx["message"]))
+        slots = asyncio.Semaphore(8)
+        monkeypatch.setattr(proxy, "_slots", slots)
+        stream = FailingClose()
+        stream.close_gate = asyncio.Event()
+        async with httpx.AsyncClient(transport=httpx.MockTransport(lambda _: httpx.Response(
+                200, stream=stream, headers={"Content-Type": "video/mp2t"}))) as client:
+            response, scope, receive = await media_response(client)
+
+            async def send(_message):
+                pass
+
+            task = asyncio.create_task(response(scope, receive, send))
+            await stream.close_started.wait()
+            task.cancel()  # caller cancelled, then the close fails before the deadline
+            await asyncio.sleep(0)
+            stream.close_gate.set()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            else:
+                raise AssertionError("cancellation was not re-raised")
+            assert slots._value == 8
+            del task  # its traceback keeps the close task alive
+        gc.collect()  # unretrieved task exceptions are reported when the task is collected
+        await asyncio.sleep(0)
+    asyncio.run(run())
+    gc.collect()
+    assert not [m for m in unobserved if "never retrieved" in m], unobserved
+
+
 def test_close_that_ignores_cancellation_cannot_hold_a_slot(monkeypatch):
     class StubbornStream(TrackedMediaStream):
         async def aclose(self):

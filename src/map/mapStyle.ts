@@ -6,7 +6,7 @@ export const MAP_STYLE_URL = 'https://tiles.openfreemap.org/styles/liberty';
 export function fallbackStyle(): StyleSpecification {
   return {
     version: 8,
-    name: 'Gotham Forge local scene',
+    name: 'Gridlocked local scene',
     glyphs: 'https://tiles.openfreemap.org/fonts/{fontstack}/{range}.pbf',
     sources: {},
     layers: [{ id: 'ground', type: 'background', paint: { 'background-color': '#09121b' } }],

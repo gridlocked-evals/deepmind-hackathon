@@ -1,12 +1,37 @@
-# Gotham Forge simulation workspace
+# Gridlocked
 
-Interactive NYC city map with the full public DOT camera directory across all five boroughs, configured 511NY video feeds, selectable intersections, and driving-route playback. Click a mapped street to start a local preview, or choose two locations to replay a street-following journey with turn slowdown and destination stops. Camera footage remains independent of simulated motion while image processing is being integrated.
+Explore New York through its public roadway cameras, pick a street, and give Gemini the wheel of a simulated car. **Cameras** browses the full public NYC DOT directory across all five boroughs and configured 511NY video feeds. **Route** selects a starting point and destination for a street-following journey. **Driver** lets Gemini choose the ego vehicle's target speed while deterministic steering and physics follow that route.
 
-**[Setup and controls](RUNNING.md)** · [Architecture](docs/ARCHITECTURE.md) · [Camera API](docs/CAMERA_API.md) · [Verification](docs/VERIFICATION.md)
+**Traffic demo** restores the original Vestry Street scene: 24 surrounding vehicles and the ego SUV, authored signals, and a 60-second replay. **Start Gemini drive** uses the backend's existing Gemini credential for up to 12 actual model decisions, each followed by up to three simulated seconds. Camera footage runs independently; model driving uses structured simulated state. Background traffic remains authored replay, and camera-image perception is not connected to this view.
+
+**[Setup and controls](RUNNING.md)** · [Driver API](docs/DRIVER_API.md) · [Live driver verification](docs/DRIVER_VERIFICATION.md) · [Architecture](docs/ARCHITECTURE.md) · [Camera API](docs/CAMERA_API.md) · [Verification](docs/VERIFICATION.md)
 
 [Implementation plan](GOTHAM_FORGE_PLAN.md) · [Element 119 contracts](docs/CONTRACTS.md) · [Source attribution](THIRD_PARTY_NOTICES.md)
 
-Quick start after installing dependencies: run `npm run dev:api` and `npm run dev` in separate terminals. No model credentials are needed.
+Quick start after installing dependencies: run `npm run dev:api` and `npm run dev` in separate terminals. Cameras, route previews, and traffic replay need no model credential. Gemini driving uses optional backend-only `GEMINI_API_KEY` or `GOOGLE_API_KEY` configuration; no key goes into the browser.
+
+The repository also implements capture storage, Carbon edits, Nano Banana references, Decisions gates, a bounded Genie runtime, and evaluation components. See [edit/reference/gate integration](docs/EDIT_REFERENCE_GATE.md) and [Genie runtime](docs/GENIE_RUNTIME.md) for their contracts and remaining integration work. The simulator driver is separate from the visual Genie navigation controller.
+
+## Hackathon provenance (Nov 21, 2026)
+
+Asked on Nov 21, 2026 when the starting React/Vite shell, Vestry traffic scene, 3D vehicle rendering, and camera/HLS proxy were built, the maintainer answered **"A mix / uncertain."** The exact boundary between work created before and during the event has not been verified; these foundations are not claimed as wholly event-built. The geographic map and camera playback architecture also adapt Pharos, as recorded in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+
+**Changes merged on the event day**
+
+The PRs below record integration on November 21. Merge dates establish when changes entered this repository, not when every part was originally written. This inventory is not a determination of demo eligibility.
+
+| Piece | Code | PRs |
+|---|---|---|
+| Model gateway, usage ledger, budgets, capability checks | `backend/gateway/` | #25, #39, #40 |
+| Genie session runtime, streaming, frame recording, explicit stop | `backend/worlds/` | #26, #40, #53 |
+| Bounded camera capture with immutable episode manifests | `backend/capture.py`, `backend/capture_api.py` | #35, #36, #49 |
+| Hydrogen street-evidence extraction | `backend/observation*.py` | #58 |
+| Carbon street edits, Nano Banana references, Decisions gate, gate → Genie binding | `backend/edits.py`, `backend/references.py`, `backend/gates.py` | #35, #52, #55 |
+| Evaluation core: temporal judge, locked eval set, breakpoints, Carbon repair, adversary scoring | `backend/evaluation/` | #27, #43, #44, #54 |
+| Citywide camera directory and street-route playback | `src/` | #34 |
+| Shared Element 119 contracts | `docs/CONTRACTS.md`, `contracts/` | #35 |
+
+**Third-party models and data:** Gemini 4, Decisions API, Nano Banana and Genie models (Google); NYC DOT and 511NY camera feeds; OpenStreetMap map and routing data. Attribution and adaptation details are in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
 ---
 

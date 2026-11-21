@@ -27,7 +27,6 @@ import os
 from pathlib import Path
 import re
 import secrets
-import selectors
 import shutil
 import subprocess
 import threading
@@ -332,33 +331,53 @@ class HlsRecorder:
 def _bounded_probe(command: list[str], timeout: float = 20.0) -> bytes:
     """Bound both decoder output and its entire process lifetime."""
     process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    selector = selectors.DefaultSelector()
     output = {"stdout": bytearray(), "stderr": bytearray()}
+    stopped = threading.Event()
+    finished = {name: threading.Event() for name in output}
+    failures = []
+
+    def read_pipe(name):
+        # Windows select() only supports sockets. Bounded pipe readers work on
+        # both Windows and POSIX without buffering unbounded decoder output.
+        try:
+            while not stopped.is_set():
+                chunk = os.read(getattr(process, name).fileno(), 8192)
+                if not chunk:
+                    break
+                if len(output[name]) + len(chunk) > (65536 if name == "stdout" else 262144):
+                    failures.append("Media decoding exceeded its output limit.")
+                    break
+                output[name].extend(chunk)
+        except OSError:
+            if not stopped.is_set():
+                failures.append("Media could not be decoded completely.")
+        finally:
+            finished[name].set()
+
+    readers = [threading.Thread(target=read_pipe, args=(name,), daemon=True) for name in output]
     deadline = time.monotonic() + timeout
     try:
-        for name in output:
-            pipe = getattr(process, name)
-            os.set_blocking(pipe.fileno(), False)
-            selector.register(pipe, selectors.EVENT_READ, name)
-        while selector.get_map() or process.poll() is None:
+        for reader in readers:
+            reader.start()
+        while not all(done.is_set() for done in finished.values()) or process.poll() is None:
+            if failures:
+                raise TruncatedCapture(failures[0])
             if time.monotonic() >= deadline:
                 raise TruncatedCapture("Media decoding exceeded its time limit.")
-            for key, _ in selector.select(min(.1, max(0, deadline - time.monotonic()))):
-                chunk = os.read(key.fileobj.fileno(), 8192)
-                if not chunk:
-                    selector.unregister(key.fileobj)
-                    continue
-                output[key.data].extend(chunk)
-                if len(output[key.data]) > (65536 if key.data == "stdout" else 262144):
-                    raise TruncatedCapture("Media decoding exceeded its output limit.")
+            stopped.wait(min(.01, max(0, deadline - time.monotonic())))
+        if failures:
+            raise TruncatedCapture(failures[0])
         if process.returncode or output["stderr"]:
             raise TruncatedCapture("Media could not be decoded completely.")
         return bytes(output["stdout"])
     finally:
+        stopped.set()
         if process.poll() is None:
             process.kill()
         process.wait()
-        selector.close()
+        for reader in readers:
+            if reader.ident is not None:
+                reader.join()
         process.stdout.close()
         process.stderr.close()
 
@@ -604,7 +623,7 @@ class CaptureStore:
         (tmp / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True))
         (tmp / "pins.json").write_text("[]")
         for path in tmp.rglob("*"):
-            if path.is_file():
+            if path.is_file() and path.name != "pins.json":
                 path.chmod(0o444)
         with self._lock:
             os.replace(tmp, self.root / episode_id)  # publish under the lock: a pin can't land before the fit check
@@ -813,6 +832,10 @@ class CaptureStore:
         path = self._pins_path(episode_id)
         tmp = path.with_suffix(".tmp")
         tmp.write_text(json.dumps(pins))
+        # Pins are mutable ownership metadata. Older captures marked this file
+        # read-only alongside evidence, preventing atomic replacement on Windows.
+        if path.exists():
+            path.chmod(0o600)
         os.replace(tmp, path)
 
     def usage_bytes(self) -> int:
