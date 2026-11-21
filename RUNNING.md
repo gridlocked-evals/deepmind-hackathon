@@ -59,6 +59,13 @@ Public endpoints: `GET /api/health`, `GET /api/cameras`, `GET /api/vision/camera
 
 See [model gateway setup and verification](docs/MODEL_GATEWAY.md) for backend-only credentials, budgets, model adapters, and the opt-in live smoke command. On Windows, inspect status with `.\.venv\Scripts\python -m backend.gateway.smoke`; this makes no model calls. All five services passed [live capability checks](docs/MODEL_GATEWAY_VERIFICATION.md) on November 21, 2026. The gateway does not implement the full capture/edit/world pipeline.
 
+The [Genie runtime](docs/GENIE_RUNTIME.md) adds authenticated session creation,
+a browser WebSocket relay, frame recording, bounded controls and explicit cleanup.
+The city UI is not connected to it yet. Production creation requires the trusted
+accepted-reference handoff from #8 and a separate backend `WORLD_API_TOKEN`.
+The opt-in development command is `.\.venv\Scripts\python -m backend.worlds.spike --live`;
+it creates one bounded paid session. See its [measured verification](docs/GENIE_RUNTIME_VERIFICATION.md).
+
 ## Verify
 
 ```sh

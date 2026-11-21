@@ -136,13 +136,16 @@ class ModelGateway:
             return value.replace(self._key, "[REDACTED]")
         return value
 
-    async def _execute(self, call: PreparedCall) -> CallResult:
+    async def _execute(self, call: PreparedCall, *, world_executor=None,
+                       world_timeout: float | None = None) -> CallResult:
         call_id = str(uuid4())
         model = MODELS[call.service]
         rate = self.config.rates[call.service]
         timeout = self.config.timeout_seconds
         if call.service == Service.GENIE:
             timeout += self.config.genie_seconds + self.config.cleanup_seconds + 1
+            if world_timeout is not None:
+                timeout = world_timeout
         attempts = 1 if call.service == Service.GENIE else self.config.max_attempts
         for attempt in range(attempts):
             request_id = None
@@ -167,7 +170,7 @@ class ModelGateway:
                     response_evidence = self._redact(raw)
                 async with asyncio.timeout(timeout):
                     if call.service == Service.GENIE:
-                        result = await self.genie.execute(call, on_id)
+                        result = await (world_executor or self.genie).execute(call, on_id)
                     else:
                         result = await self.http.execute(call, on_id, on_response)
                 evidence = self._redact(result.evidence)
@@ -189,6 +192,10 @@ class ModelGateway:
                     error = GatewayError(ErrorCode.CANCELLED)
                 else:
                     error = GatewayError(ErrorCode.STORAGE)
+                if world_executor is not None and world_executor.termination_pending:
+                    # Preserve the unresolved-world admission latch even if caller
+                    # cancellation or a storage failure interrupts finalization.
+                    error = GatewayError(ErrorCode.TERMINATION)
                 try:
                     if request_id:
                         evidence = response_evidence or {"error": error.public()}
