@@ -357,7 +357,7 @@ class WorldSession:
         except BaseException as exc:
             self.error = exc.code.value if isinstance(exc, GatewayError) else ErrorCode.TRANSPORT.value
             self.reason = "upstream_error"
-            if not self.provider_id and isinstance(exc, GatewayError) and exc.code in (ErrorCode.AUTH, ErrorCode.QUOTA):
+            if not self.provider_id and isinstance(exc, GatewayError) and 400 <= (exc.status or 0) < 500:
                 created_maybe = False
                 self.creation_may_be_active = False
         finally:

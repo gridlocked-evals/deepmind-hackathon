@@ -46,7 +46,8 @@ class WorldLimits(Contract):
     send_seconds: float = Field(default=.5, gt=0)
     max_key_ms: int = Field(default=500, ge=1, le=1000)
     max_recording_bytes: int = Field(default=128 * 1024 * 1024, ge=1024)
-    max_sessions: int = Field(default=16, ge=1)
+    # One live Genie world per key; refuse extra creates up front instead of failing them later.
+    max_sessions: int = Field(default=1, ge=1)
     max_steering_bytes: int = Field(default=8000, ge=0)
 
 
