@@ -51,9 +51,13 @@ See the detailed [architecture guide](docs/ARCHITECTURE.md), [camera API referen
 - MapLibre owns geographic projection and the shared WebGL context. A custom Three.js layer draws locally metric roads, instanced traffic, and the detailed ego vehicle. Local axes are east/north/up; headings are radians counterclockwise from east.
 - `ScenarioProvider.loadScenario()` returns the typed `ScenarioBundle`. `DemoScenarioProvider` is the initial implementation. A later backend adapter can supply compatible scene geometry and timestamped frames without rewriting the view.
 - Camera selection is separate from scene identity. Roadside video is an HTML layer above the map, not a calibrated projection onto it.
-- FastAPI contains only camera metadata, a DOT cache, and bounded media transport. HLS playlists resolve server-owned camera IDs and opaque resource tokens; arbitrary URLs are not accepted.
+- FastAPI supplies camera metadata, a DOT cache, bounded media transport, and a server-only model gateway. HLS playlists resolve server-owned camera IDs and opaque resource tokens; arbitrary URLs are not accepted. The optional gateway starts without credentials and exposes read-only capability/budget status.
 
-Public endpoints: `GET /api/health`, `GET /api/cameras`, `GET /api/vision/cameras`, and `/api/feeds/{camera_id}/index.m3u8` with tokenized child resources. See the local `/docs` route for exact schemas.
+Public endpoints: `GET /api/health`, `GET /api/cameras`, `GET /api/vision/cameras`, `/api/models/status`, and `/api/feeds/{camera_id}/index.m3u8` with tokenized child resources. See the local `/docs` route for exact schemas.
+
+## Optional model gateway
+
+See [model gateway setup and verification](docs/MODEL_GATEWAY.md) for backend-only credentials, budgets, model adapters, and the opt-in live smoke command. On Windows, inspect status with `.\.venv\Scripts\python -m backend.gateway.smoke`; this makes no model calls. All five services passed [live capability checks](docs/MODEL_GATEWAY_VERIFICATION.md) on November 21, 2026. The gateway does not implement the full capture/edit/world pipeline.
 
 ## Verify
 
@@ -69,4 +73,4 @@ For a production-style local preview, run `npm run build`, then start `npm run d
 
 Implementation verification: production build, six scenario tests, and 19 API tests passed. Desktop (1440 × 900) and mobile (390 × 844) views were reviewed in-browser. Vestry HLS video visibly advanced through the local proxy. Camera changes, feed toggling, seeking, layer switches, and City/Intersection/Follow transitions were exercised; the active page kept at most one video element. Chrome reported approximately 120 map render events per second in Follow with one playing feed on the development machine; this is an observed local result, not a cross-device guarantee.
 
-Gemini/SUMO, footage capture, calibrated reconstruction, generated video, intervention search, and evaluation remain future integration work described in `GOTHAM_FORGE_PLAN.md`.
+The model gateway foundation is implemented and live access has been verified; footage capture, the integrated generated-world workflow, SUMO, calibrated reconstruction, intervention search, and evaluation remain future integration work. The [issue tracker](https://github.com/Paradox560/deepmind-hackathon/issues/1) contains the current submission scope; `GOTHAM_FORGE_PLAN.md` still awaits the scope update in issue #2.
