@@ -16,8 +16,10 @@ BASE = HLS_SOURCES[CAMERA]["_upstream"]
 
 
 def test_public_api_starts_without_model_credentials(monkeypatch):
+    monkeypatch.setenv("PYTHON_DOTENV_DISABLED", "1")
     for name in ("GPU_BEARER_TOKEN", "COSMOS3_REASON_URL", "YOLO_URL", "WANDB_API_KEY", "GEMINI_API_KEY"):
         monkeypatch.delenv(name, raising=False)
+    monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
     with TestClient(app) as client:
         assert client.get("/api/health").json()["status"] == "ok"
         result = client.get("/api/vision/cameras").json()

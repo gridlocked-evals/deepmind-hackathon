@@ -17,6 +17,7 @@ from fastapi.staticfiles import StaticFiles
 
 from .feeds import HLS_SOURCES, REGISTRY_URL, public_cameras, utc_now
 from .proxy import proxy_media, resolve_token
+from .gateway import GatewayConfig, ModelGateway
 
 DOT_URL = "https://webcams.nyctmc.org/api/cameras"
 DOT_PAGE = "https://webcams.nyctmc.org/map"
@@ -31,7 +32,12 @@ async def lifespan(app: FastAPI):
         headers={"User-Agent": "GothamForge/0.1 public-camera-viewer"},
     ) as client:
         app.state.http = client
-        yield
+        # Keep model traffic and camera transport on separate connection pools.
+        config = GatewayConfig.from_environment()
+        async with httpx.AsyncClient(follow_redirects=False,
+            limits=httpx.Limits(max_connections=config.max_concurrency + 1)) as model_http:
+            app.state.models = ModelGateway(config, model_http)
+            yield
 
 
 app = FastAPI(title="Gotham Forge", version="0.1.0", lifespan=lifespan)
@@ -131,6 +137,12 @@ async def cameras(request: Request):
         "sourceKind": "snapshot", "captureClock": "unknown",
         "notice": "NYC DOT supplies periodic images. Retrieval time is not source capture time.",
     }}
+
+
+@app.get("/api/models/status")
+async def model_status(request: Request):
+    """Read-only. Inspecting capability status never invokes a paid model."""
+    return request.app.state.models.status()
 
 
 @app.get("/api/vision/cameras")
