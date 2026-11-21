@@ -69,6 +69,9 @@ The outcome follows from the checks: any `fail` → reject, otherwise any `unkno
 Implemented now:
 
 - `GET /api/contracts/element119` — JSON Schema for every contract.
+- `POST /api/observations`, `POST /api/edits`, `POST /api/references`, `POST /api/references/{id}/gate`,
+  `POST /api/edits/{id}/gated-reference` and read routes — see [EDIT_REFERENCE_GATE.md](EDIT_REFERENCE_GATE.md) (#6–#8).
+  `POST /api/edits` takes `preset` and optional `frameTimeS`; `/api/edits/{id}` returns an `EditBundle` wrapping the `StreetEdit`.
 
 Proposed (owners implement against these shapes; none exist yet):
 
@@ -76,9 +79,6 @@ Proposed (owners implement against these shapes; none exist yet):
 | --- | --- | --- |
 | `POST /api/captures` `{cameraId, maxSeconds}` | `Capture` | #4 |
 | `POST /api/captures/{captureId}/observations` | `ObservationBatch` | #5 |
-| `POST /api/edits` `{observationBatchId, mayorRequest, permissions}` | `StreetEdit` | #6 |
-| `POST /api/references` `{streetEditId, style}` | `ReferenceImage` | #7 |
-| `POST /api/references/{referenceImageId}/gate` | `GateDecision` | #8 |
 | `POST /api/worlds` `{referenceImageId, gateDecisionId, budget}` | `WorldSession` | #9 |
 | `POST /api/worlds/{worldId}/terminate` `{reason}` | `WorldSession` | #9 |
 | `POST /api/worlds/{worldId}/navigation` / `GET .../events` | `NavigationEvent` | #10 |

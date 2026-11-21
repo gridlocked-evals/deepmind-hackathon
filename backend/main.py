@@ -16,6 +16,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from .capture_api import Recorders, make_store, router as capture_router
+from .pipeline_api import make_artifacts, router as pipeline_router
 from .contracts import json_schema
 from .feeds import HLS_SOURCES, REGISTRY_URL, public_cameras, utc_now
 from .proxy import proxy_media, resolve_token
@@ -35,6 +36,7 @@ async def lifespan(app: FastAPI):
     ) as client:
         app.state.http = client
         app.state.captures = make_store()
+        app.state.artifacts = make_artifacts()
         app.state.recorders = Recorders()
         # Keep model traffic and camera transport on separate connection pools.
         config = GatewayConfig.from_environment()
@@ -137,6 +139,7 @@ async def health():
 
 
 app.include_router(capture_router)
+app.include_router(pipeline_router)
 
 
 @app.get("/api/contracts/element119")
