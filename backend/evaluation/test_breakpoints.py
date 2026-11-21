@@ -87,6 +87,17 @@ def test_one_error_is_not_a_breakpoint():
     assert sweep(max_error_rate=.5).sha256 != sweep().sha256  # the threshold is frozen in the hash
 
 
+def test_invalid_output_counts_toward_error_rate():
+    s = sweep()
+    invalid = {Outcome.SUCCESS: 1, Outcome.INVALID_OUTPUT: 9}
+    assert classify(s, res(s, .5, observation_quality=.9, counts=invalid)) == ("fail", "errors_at_limit")
+    one = {Outcome.SUCCESS: 9, Outcome.INVALID_OUTPUT: 1}  # coded once, not double-counted: 10% < 20%
+    assert classify(s, res(s, .5, observation_quality=.9, counts=one, errors={ErrorCode.INVALID_OUTPUT: 1})) == (
+        "pass", "criterion_met")
+    refused = {Outcome.SUCCESS: 7, Outcome.REFUSAL: 3}  # refusals are a model-side limit too
+    assert classify(s, res(s, .5, observation_quality=.9, counts=refused)) == ("fail", "errors_at_limit")
+
+
 def test_outage_flag_needs_evidence():
     s = sweep()
     assert classify(s, res(s, .5, observation_quality=.9, provider_outage=True)) == ("pass", "criterion_met")
