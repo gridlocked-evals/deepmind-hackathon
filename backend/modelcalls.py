@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+import json
 from uuid import uuid4
 
 from .contracts import ModelCall
@@ -43,10 +44,15 @@ def from_result(gateway: ModelGateway, service: Service, result: CallResult, *, 
 def from_error(gateway: ModelGateway, service: Service, error: GatewayError, *, prompt_id: str,
                domain_hashes: list[str], requested_at: datetime, completed_at: datetime) -> ModelCall:
     """A failed attempt still gets a ModelCall so attempt history stays complete."""
+    row = gateway.ledger.get(error.request_id) if error.request_id else None
+    usage = json.loads(row["usage"]) if row and row.get("usage") else None
     return ModelCall(
         id=f"call_{uuid4().hex}", service=service.value, modelId=MODELS[service], promptId=prompt_id,
         configId=gateway.config.config_hash[:16],
         requestId=f"gateway:{error.request_id}" if error.request_id else None,
-        inputHashes=_ids(domain_hashes, None), requestedAt=requested_at, completedAt=completed_at,
+        inputHashes=_ids(domain_hashes, row["input_hash"] if row else None), requestedAt=requested_at, completedAt=completed_at,
         latencyMs=(completed_at - requested_at).total_seconds() * 1000,
+        inputTokens=usage["input_tokens"] if usage else None,
+        outputTokens=max(usage["output_tokens"]+usage.get("thought_tokens",0), usage["total_tokens"]-usage["input_tokens"]) if usage else None,
+        costUsd=row["charged_microusd"]/1_000_000 if usage else None,
         outcome=_OUTCOMES.get(error.code, "error"))

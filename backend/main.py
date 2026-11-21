@@ -17,6 +17,7 @@ from fastapi.staticfiles import StaticFiles
 
 from .capture_api import Recorders, make_store, router as capture_router
 from .pipeline_api import make_artifacts, router as pipeline_router
+from .observation_api import router as observation_router
 from .contracts import json_schema
 from .feeds import HLS_SOURCES, REGISTRY_URL, public_cameras, utc_now
 from .proxy import proxy_media, resolve_token
@@ -66,6 +67,7 @@ app.add_middleware(
     expose_headers=["Content-Range", "Accept-Ranges", "Content-Length"],
 )
 app.include_router(world_router)
+app.include_router(observation_router)
 
 
 class CameraCache:
