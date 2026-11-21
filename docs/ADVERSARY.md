@@ -59,7 +59,8 @@ A `wait` has `event_type`, `trigger_seconds`, `parameters` and `durationSeconds`
 all `null`. An attack must have all four. Carbon's output is validated strictly,
 with no clamping or substitution:
 
-- `event_type`: `car-crash` or `stalled-vehicle` (the registered events in
+- `event_type`: `car-crash`, `stalled-vehicle`, `cut-in-vehicle`, `hard-braking`,
+  `slow-traffic`, or `two-car-roadblock` (the registered events in
   `src/scenarios/events.ts`);
 - `trigger_seconds`: at least `state.simulation_time`, at most
   **`MAX_TRIGGER_SECONDS` = 48** (`RUN_SECONDS - 12`, leaving the driver model 12 s to
