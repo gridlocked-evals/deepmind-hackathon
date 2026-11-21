@@ -30,7 +30,7 @@ from .artifacts import ArtifactError, ArtifactStore, sha256, utcnow
 from .contracts import GATE_EFFECTS, GateCheck, GateDecision, GateSubject, ModelCall, ReferenceImage, WorldSession
 from .edits import EditBundle
 from .gateway import CallContext, GatewayError, ModelGateway, Service
-from .gateway.contracts import MODELS
+from .gateway.contracts import ErrorCode, MODELS
 from .modelcalls import from_error, from_result
 from .references import MAX_ATTEMPTS, TARGET_SIZE, attempts, generate_reference, validate_transport
 
@@ -130,8 +130,11 @@ def deterministic_checks(store: ArtifactStore, bundle: EditBundle, record: dict)
                  for x, y in op.region.points)
     add("coordinates", inside and bool(edit.operations), "all operation regions are normalized image coordinates")
     allowed = all(op.target in edit.permissions.allowed and op.target not in edit.permissions.forbidden
+                  and (op.op != "modify" or (bundle.operationResults.get(op.id) in edit.permissions.allowed
+                       and bundle.operationResults.get(op.id) not in edit.permissions.forbidden))
                   for op in edit.operations)
-    add("permissions", edit.status == "compiled" and allowed, "every operation target is permitted by the edit")
+    add("permissions", edit.status == "compiled" and allowed,
+        "every operation's source and resulting class are permitted by the edit")
     return checks
 
 
@@ -198,12 +201,16 @@ async def _judge(gateway, store, bundle, record, gate_id, thresholds, purpose) -
                           source_id=bundle.captureId, purpose=purpose)
     requested = utcnow()
     answers, judge_error = None, None
+    cancelled = None
     try:
         result = await gateway.judge(stage="image_gate", input_value=input_value, questions=questions, context=context)
         call = from_result(gateway, Service.DECISIONS, result, prompt_id=PROMPT_ID, domain_hashes=domain,
                            requested_at=requested, completed_at=utcnow())
         answers = result.output
-    except GatewayError as error:
+    except (GatewayError, asyncio.CancelledError) as exc:
+        cancelled = exc if isinstance(exc, asyncio.CancelledError) else None
+        error = (GatewayError(ErrorCode.CANCELLED, request_id=getattr(exc, "request_id", None))
+                 if cancelled is not None else exc)
         call = from_error(gateway, Service.DECISIONS, error, prompt_id=PROMPT_ID, domain_hashes=domain,
                           requested_at=requested, completed_at=utcnow())
         judge_error = error.public()
@@ -241,6 +248,8 @@ async def _judge(gateway, store, bundle, record, gate_id, thresholds, purpose) -
                                   "sha256": thresholds["sha256"]},
                       answers=answers, deterministic=det, judgeError=judge_error)
     store.put("gates", gate_id, gate)
+    if cancelled is not None:
+        raise cancelled  # the persisted unknown decision prevents re-sampling, without swallowing cancellation
     return gate
 
 
