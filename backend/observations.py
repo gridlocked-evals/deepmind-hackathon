@@ -181,7 +181,7 @@ async def extract(gateway: ModelGateway, store: ArtifactStore, captures: Capture
         'parentId': parent['id'] if parent else None, 'focus': reinspection.focus if reinspection else None,
         'clocks': manifest['clocks'], 'sourceLabels': manifest['labels'], 'createdAt': utcnow().isoformat(),
         'windows': [], 'facts': [], 'batchIds': [], 'status': 'failed', 'failures': [],
-        'manualReview': 'pending_human_annotations', 'promptId': PROMPT_ID}
+        'manualReview': 'optional_not_reviewed', 'promptId': PROMPT_ID}
     report['modelPolicy'] = {'thinking_level': 'low', 'max_output_tokens': gateway.config.output_tokens_per_call}
     try:
         index = await asyncio.to_thread(index_prefix, path, manifest)

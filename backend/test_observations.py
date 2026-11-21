@@ -72,7 +72,7 @@ def test_snapshot_has_real_gateway_trace_exact_pixels_and_reviewable_provenance(
     captures, store, manifest = setup(tmp_path)
     provider = Provider()
     report = asyncio.run(perform(tmp_path,captures,store,manifest,provider))
-    assert report['status']=='completed' and report['manualReview']=='pending_human_annotations'
+    assert report['status']=='completed' and report['manualReview']=='optional_not_reviewed'
     row = report['facts'][0]
     evidence = row['evidence'][0]
     assert evidence['captureId']==manifest['id'] and evidence['sourceId']=='dot-test'
@@ -326,7 +326,7 @@ def test_api_requires_operator_auth_and_keeps_original_pixels_next_to_facts(tmp_
         frame=report['windows'][0]['frameIds'][0]
         assert client.get(path+'/frames/'+frame,headers=auth).content==png(size=(200,100))
         assert client.get(path+'/failure-report',headers=auth).json()['humanAccuracy'] is None
-        assert client.get(path+'/reviews',headers=auth).json()['status']=='pending_human_annotations'
+        assert client.get(path+'/reviews',headers=auth).json()['status']=='optional_not_reviewed'
         body=manual_review(report).model_dump(mode='json')
         assert client.post(path+'/annotations',json=body).status_code==401
         submitted=client.post(path+'/annotations',json=body,headers=auth)

@@ -224,7 +224,7 @@ def main(argv=None) -> int:
                 with (args.export_dir / name).open('x', encoding='utf-8') as handle:
                     handle.write(content)
             print(json.dumps({'extractionId': report['id'], 'extractionSha256': sha256(canonical(report)),
-                              'status': 'pending_human_annotations', 'exportDirectory': str(args.export_dir)}))
+                              'status': 'optional_not_reviewed', 'exportDirectory': str(args.export_dir)}))
         return 0
     except (ArtifactError, OSError, ValueError, ValidationError) as exc:
         print(json.dumps({'error': str(exc) if isinstance(exc, ArtifactError) else 'Invalid review input or inaccessible review files.'}))

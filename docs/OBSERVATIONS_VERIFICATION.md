@@ -128,3 +128,7 @@ This follow-up used scripted providers and synthetic media tests only. It made
 no new paid model calls and created no human annotations. The partial snapshot
 feedback and pending clip labels described above are unchanged; tooling does not
 complete the remaining manual-review acceptance work.
+
+## Maintainer scope clarification — November 21
+
+Human clip review is optional and is not required for issue #5 completion. The maintainer confirmed that image processing is complete. Historical annotation gaps above remain an accurate description of what was measured, but no longer block acceptance. Existing live snapshot/clip traces, prefix validation, explicit unknowns, failure accounting and original-pixel access support closure under this clarified scope. No human labels or additional paid verification runs are implied.
