@@ -8,6 +8,13 @@ function response() {
 }
 
 describe('bounded driver session protocol', () => {
+  it('accepts a low-speed go-around decision and rejects an excessive passing speed', () => {
+    const passing = { ...response(), decision: { ...response().decision, action: 'go_around', target_speed_mps: 4 } };
+    expect(validateDecisionResponse(passing, 'test-run-123', 0).decision.action).toBe('go_around');
+    expect(() => validateDecisionResponse({ ...passing, decision: { ...passing.decision, target_speed_mps: 4.1 } }, 'test-run-123', 0))
+      .toThrow(/invalid driving decision/);
+  });
+
   it('aborts the transport and rejects late response application after Stop', async () => {
     const gate = new DriverRunGate();
     const lease = gate.begin('test-run-123');

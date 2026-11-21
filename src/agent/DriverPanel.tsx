@@ -28,6 +28,7 @@ function downloadTrace(driver: GeminiDriver) {
 
 export function DriverPanel({ driver, onStart, plan, onPlanChange, onReplay, adversary, onAdversaryChange }: DriverPanelProps) {
   const latest = driver.decisionLog.at(-1);
+  const observation = driver.trace?.steps.at(-1)?.observation;
   const statusLabel = driver.replaying ? 'Recorded playback' : driver.status === 'thinking' ? 'Gemini is deciding'
     : driver.status === 'driving' ? 'Driving the route'
     : driver.status === 'complete' ? driver.completionReason === 'route-complete' ? 'Destination reached' : 'Demo complete'
@@ -38,7 +39,7 @@ export function DriverPanel({ driver, onStart, plan, onPlanChange, onReplay, adv
       <div className="driver-title"><BrainCircuit size={17} aria-hidden="true" /><h2 id="driver-heading">Gemini driver</h2></div>
       <span className={`driver-status driver-status-${driver.status}`}>{driver.status === 'thinking' ? 'Thinking' : driver.status === 'driving' ? 'Live agent' : 'Simulation'}</span>
     </div>
-    <p className="driver-subtitle">Gemini Decisions sets speed as the car keeps moving.</p>
+    <p className="driver-subtitle">Gemini can slow down, stop, or go around an obstruction.</p>
     <div className="driver-metrics">
       <div><strong>{Math.round(driver.speedMps * 2.23694)}<small>mph</small></strong><span>{driver.hasRun ? 'Vehicle speed' : 'Starting speed'}</span></div>
       <div><strong>{Math.round(driver.remainingM)}<small>m</small></strong><span>Route remaining</span></div>
@@ -46,8 +47,10 @@ export function DriverPanel({ driver, onStart, plan, onPlanChange, onReplay, adv
     </div>
     <div className="driver-decision">
       <div className="driver-decision-heading" role="status"><ArrowUpRight size={15} aria-hidden="true" /><strong>{statusLabel}</strong></div>
-      {latest ? <p><span className="driver-action">{latest.decision.action}</span> · {latest.decision.reason}</p>
+      {latest ? <p><span className="driver-action">{latest.decision.action.replaceAll('_', ' ')}</span> · {latest.decision.reason}</p>
         : <p>Give Gemini the wheel for up to {MAX_DRIVE_SECONDS} seconds of continuous simulation.</p>}
+      {driver.active && observation?.go_around_available && <small>Clear simulated passing path on the {observation.go_around_side}.</small>}
+      {driver.active && observation?.go_around_active && !observation.go_around_available && <small>Passing maneuver active; traffic and signal limits apply.</small>}
       {driver.status === 'thinking' && <small>Waiting for the first driving decision.</small>}
       {driver.completionReason === 'time-limit' && <small>The {MAX_DRIVE_SECONDS}-second drive is complete. Start again for a new run.</small>}
       {driver.completionReason === 'decision-limit' && <small>The {MAX_DRIVER_STEPS}-decision limit is reached. Start again for a new run.</small>}
@@ -70,7 +73,7 @@ export function DriverPanel({ driver, onStart, plan, onPlanChange, onReplay, adv
     {driver.decisionLog.length > 0 && <details className="driver-history">
       <summary>Decision history <span>{driver.decisionLog.length}</span></summary>
       <ol>{driver.decisionLog.map(entry => <li key={entry.request_id}>
-        <div><strong>{entry.decision.action}</strong><span>{entry.simulationTime.toFixed(1)}s · {Math.round(entry.decision.target_speed_mps * 2.23694)} mph target</span></div>
+        <div><strong>{entry.decision.action.replaceAll('_', ' ')}</strong><span>{entry.simulationTime.toFixed(1)}s · {Math.round(entry.decision.target_speed_mps * 2.23694)} mph target</span></div>
         <p>{entry.decision.reason}</p>
       </li>)}</ol>
     </details>}

@@ -1,6 +1,6 @@
 # Gridlocked
 
-Explore New York through its public roadway cameras, pick a street, and give Gemini the wheel of a simulated car. **Cameras** browses the full public NYC DOT directory across all five boroughs and configured 511NY video feeds. **Route** selects a starting point and destination for a street-following journey. **Driver** lets Gemini choose the ego vehicle's target speed while deterministic steering and physics follow that route.
+Explore New York through its public roadway cameras, pick a street, and give Gemini the wheel of a simulated car. **Cameras** browses the full public NYC DOT directory across all five boroughs and configured 511NY video feeds. **Route** selects a starting point and destination for a street-following journey. **Driver** lets Gemini choose the ego vehicle's speed or a low-speed go-around maneuver in a clear neighboring lane, with deterministic steering and physics.
 
 **Traffic demo** restores the original Vestry Street scene: 24 surrounding vehicles and the ego SUV, authored signals, and a 60-second replay. **Start scenario with Gemini** uses the backend's existing Gemini credential for up to 60 Decisions model decisions and 60 simulated seconds. The car keeps moving while the next decision is requested, with a one-second refresh interval and a three-second command freshness limit. Camera footage runs independently; model driving uses structured simulated state. Background traffic remains authored replay, and camera-image perception is not connected to this view.
 

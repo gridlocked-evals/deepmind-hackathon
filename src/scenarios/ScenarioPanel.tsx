@@ -89,7 +89,7 @@ export function ScenarioPanel({ plan, onChange, driver, onReplay, onBaseline }: 
       <div className="scenario-file-controls"><button type="button" onClick={() => downloadJson(trace, `gridlocked-${trace.mode}-${trace.runId}.json`)}>Export trace</button>
         <button type="button" disabled={driver.active} onClick={() => { importRevision.current++; const scene = replayScene(trace); onChange(parseScenario(trace.plan)); onReplay(scene); }}>Replay recorded run</button></div>
       {comparison && <><p>Baseline: {comparison.baseline.progressM.toFixed(1)} m · Event: {comparison.event.progressM.toFixed(1)} m. Descriptive comparison; model decisions can vary.</p><button type="button" onClick={() => downloadJson({ ...comparison, runs: [baseline, eventRun] }, 'gridlocked-comparison.json')}>Export comparison</button></>}
-      <small>Near-miss measurement is unknown; rerouting is unsupported. Recorded replays make no model calls.</small>
+      <small>Go around uses a clear neighboring lane; changing the destination route is unsupported. Recorded replays make no model calls.</small>
     </details>}
     {driver.traces.length > 1 && <details className="scenario-results"><summary>Saved runs in this tab ({driver.traces.length})</summary>
       {driver.traces.map(item => <button type="button" key={item.runId} onClick={() => downloadJson(item, `gridlocked-${item.mode}-${item.runId}.json`)}>Export {item.mode} · {item.createdAt.slice(11,19)}</button>)}</details>}

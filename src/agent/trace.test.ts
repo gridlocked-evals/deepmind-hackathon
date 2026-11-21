@@ -238,6 +238,24 @@ describe('driver trace export', () => {
     expect(() => readDriverTrace(bare)).toThrow('malformed');
   });
 
+  it('round-trips go-around proposals and maneuver guards while keeping earlier v2 observations readable', () => {
+    const { trace } = runFixture(createDriverSimulation(streetScene()), [cruise], { interruptAt: { step: 0, ticks: 5 } });
+    const step = trace.steps[0];
+    step.proposed = { action: 'go_around', target_speed_mps: 4, reason: 'Pass the obstruction on the right.', confidence: .9 };
+    step.observation = { ...step.observation, go_around_available: true, go_around_active: false, go_around_side: 'right' };
+    step.guard = { intervened: true, reason: 'maneuver_guard', events: [{ reason: 'maneuver_guard', simulation_time: step.applied.start_time }] };
+    expect(readDriverTrace(JSON.stringify(trace))).toEqual(trace);
+    for (const patch of [{ go_around_available: 'true' }, { go_around_active: 1 }, { go_around_side: ['right'] }]) {
+      const malformed = structuredClone(trace);
+      Object.assign(malformed.steps[0].observation, patch);
+      expect(() => readDriverTrace(JSON.stringify(malformed))).toThrow('malformed');
+    }
+    delete step.observation.go_around_available;
+    delete step.observation.go_around_active;
+    delete step.observation.go_around_side;
+    expect(readDriverTrace(JSON.stringify(trace))).toEqual(trace);
+  });
+
   it.each(['observation', 'proposed', 'guard', 'request_id'])('rejects a step missing %s', field => {
     const { trace } = runFixture(createDriverSimulation(streetScene()), [accelerate], { interruptAt: { step: 0, ticks: 5 } });
     const malformed = JSON.parse(JSON.stringify(trace));

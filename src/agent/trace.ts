@@ -112,7 +112,7 @@ export function finishTrace(trace: DriverTrace | null, terminal: TraceTerminal) 
 }
 
 const TERMINAL_STATES = new Set(['route_complete', 'decision_limit', 'time_limit', 'stopped_by_user', 'interrupted', 'error']);
-const GUARDS = new Set(['leader_guard', 'red_line_guard']);
+const GUARDS = new Set(['leader_guard', 'red_line_guard', 'maneuver_guard']);
 const isObject = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value);
 const isFiniteNumber = (value: unknown): value is number => typeof value === 'number' && Number.isFinite(value);
 const numericFields = (value: Record<string, unknown>, fields: string[]) => fields.every(field => isFiniteNumber(value[field]));
@@ -126,7 +126,9 @@ function validStep(value: unknown): boolean {
     && numericFields(observation, ['simulation_time', 'speed_mps', 'speed_limit_mps', 'remaining_m', 'upcoming_turn_degrees'])
     && typeof observation.signal === 'string' && ['green', 'amber', 'red', 'unknown'].includes(observation.signal)
     && ['stop_distance_m', 'lead_gap_m', 'lead_speed_mps'].every(field => observation[field] === null || isFiniteNumber(observation[field]))
-    && isObject(proposed) && typeof proposed.action === 'string' && ['accelerate', 'cruise', 'brake', 'stop'].includes(proposed.action)
+    && ['go_around_available', 'go_around_active'].every(field => !(field in observation) || typeof observation[field] === 'boolean')
+    && (!('go_around_side' in observation) || observation.go_around_side === null || observation.go_around_side === 'left' || observation.go_around_side === 'right')
+    && isObject(proposed) && typeof proposed.action === 'string' && ['accelerate', 'cruise', 'brake', 'stop', 'go_around'].includes(proposed.action)
     && typeof proposed.reason === 'string' && numericFields(proposed, ['target_speed_mps', 'confidence'])
     && isObject(applied) && numericFields(applied, ['start_time', 'end_time', 'start_speed_mps', 'end_speed_mps', 'distance_m'])
     && isObject(guard) && typeof guard.intervened === 'boolean'
