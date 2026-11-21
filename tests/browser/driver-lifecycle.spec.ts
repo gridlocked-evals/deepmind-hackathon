@@ -12,12 +12,12 @@ async function rendered(driver: DriverHarness) {
   });
 }
 
-async function expectFrozen(driver: DriverHarness) {
+async function expectFrozen(driver: DriverHarness, milliseconds = 20_000) {
   const time = await driver.time();
   const frame = await rendered(driver);
   const requests = driver.gateway.calls.length;
   // No physics is running here; jumping wall time must not move the rendered car.
-  await driver.page.clock.fastForward(20_000);
+  await driver.page.clock.fastForward(milliseconds);
   expect(await driver.time()).toBe(time);
   expect(await rendered(driver)).toEqual(frame);
   expect(driver.gateway.calls).toHaveLength(requests);
@@ -89,8 +89,8 @@ test('late responses remain inert after Stop and after a newer run starts, even 
   expect(after.time).toBeGreaterThan(before.time);
   expect(after.y).toBeGreaterThan(before.y);
   expect(await driver.decisionCount()).toBe(1);
-  expect(driver.gateway.calls).toHaveLength(3);
-  expect(await driver.decisionSignals()).toEqual([true, true, true]);
+  expect(driver.gateway.calls).toHaveLength(4);
+  expect(await driver.decisionSignals()).toEqual([true, true, true, true]);
   await driver.openDriver();
   await expect(driver.page.locator('.driver-decision-heading')).toHaveText('Driving the route');
   await expect(driver.page.locator('.driver-decision')).toContainText('CURRENT RUN RESPONSE');
@@ -130,7 +130,7 @@ for (const change of ['camera', 'route', 'demo'] as const) {
     if (change !== 'camera') expect(next.observation.scenario_id).not.toBe(old.observation.scenario_id);
     await driver.page.clock.runFor(64);
     expect((await rendered(driver)).scenario).toBe(next.observation.scenario_id);
-    await expectFrozen(driver);
+    await expectFrozen(driver, 800);
   });
 }
 
@@ -189,7 +189,7 @@ test('replay, driver, and perspective changes share the frame consumed by the re
   expect(await driver.time()).toBe(0);
   expect((await rendered(driver)).time).toBe(0);
   expect((await rendered(driver)).y).not.toBe(replay.y);
-  await expectFrozen(driver);
+  await expectFrozen(driver, 800);
   await driver.gateway.reply(0);
   await expect.poll(() => driver.decisionCount()).toBe(1);
   await driver.page.clock.runFor(1100);
@@ -201,7 +201,7 @@ test('replay, driver, and perspective changes share the frame consumed by the re
     // City overview deliberately culls 3D cars. Check consumed frames at street zoom.
     if (perspective !== 'Map') expect(Math.abs((await rendered(driver)).time - await driver.time())).toBeLessThan(0.12);
   }
-  expect(driver.gateway.calls).toHaveLength(1);
+  expect(driver.gateway.calls).toHaveLength(2);
   await driver.page.getByRole('button', { name: 'Return to replay', exact: true }).click();
   await driver.page.clock.runFor(64);
   await expect(timeline).toBeEnabled();
@@ -214,34 +214,69 @@ test('replay, driver, and perspective changes share the frame consumed by the re
   expect(Math.abs((await rendered(driver)).time - await driver.time())).toBeLessThan(0.12);
 });
 
-test('twelve decisions advance at most three seconds each and finish with the decision-limit state', async ({ driver }) => {
+test('sixty decisions finish after applying the last command without exceeding sixty simulated seconds', async ({ driver }) => {
   test.setTimeout(180_000);
   await driver.open();
   await driver.planRoute('long');
   await driver.startDriver();
-  let runId: string | undefined;
-  for (let step = 0; step < 12; step++) {
+  const first = await driver.gateway.waitForRequest(0);
+  // Initial inference time counts toward command age, but not simulated motion.
+  await driver.page.clock.runFor(500);
+  await driver.gateway.reply(0);
+  await expect.poll(() => driver.decisionCount()).toBe(1);
+  await driver.page.clock.runFor(508);
+  let finalAppliedAt = 0;
+  for (let step = 1; step < 60; step++) {
     const request = await driver.gateway.waitForRequest(step);
-    runId ??= request.run_id;
-    expect(request.run_id).toBe(runId);
+    expect(request.run_id).toBe(first.run_id);
     expect(request.step).toBe(step);
-    expect(request.observation.simulation_time).toBeCloseTo(step * 3, 6);
-    await driver.page.clock.runFor(64);
-    await expectFrozen(driver);
+    expect(request.observation.simulation_time).toBeGreaterThan(0);
+    expect(request.observation.simulation_time).toBeLessThan(60);
+    finalAppliedAt = await driver.time();
     await driver.gateway.reply(step);
     await expect.poll(() => driver.decisionCount()).toBe(step + 1);
-    await driver.page.clock.runFor(3100);
-    expect(await driver.time()).toBeCloseTo((step + 1) * 3, 1);
+    await driver.page.clock.runFor(1008);
   }
   await driver.openDriver();
   await expect(driver.page.locator('.driver-decision-heading')).toHaveText('Demo complete');
-  await expect(driver.page.locator('.driver-decision')).toContainText('12-decision limit');
-  expect(await driver.time()).toBe(36);
-  expect(driver.gateway.calls).toHaveLength(12);
+  await expect(driver.page.locator('.driver-decision')).toContainText('60-decision limit');
+  expect(await driver.time()).toBeGreaterThan(finalAppliedAt + 0.8);
+  expect(await driver.time()).toBeLessThan(60);
+  expect(driver.gateway.calls).toHaveLength(60);
   await expectFrozen(driver);
 });
 
-test('arrival on a short real route finishes before the decision limit', async ({ driver }) => {
+test('sixty simulated seconds stop motion and cancel the still-pending last decision', async ({ driver }) => {
+  test.setTimeout(180_000);
+  await driver.open({ unabortableDecisions: true });
+  await driver.planRoute('long');
+  await driver.startDriver();
+  await driver.gateway.waitForRequest(0);
+  await driver.gateway.reply(0);
+  await expect.poll(() => driver.decisionCount()).toBe(1);
+  await driver.page.clock.runFor(1008);
+  for (let step = 1; step < 60; step++) {
+    const request = await driver.gateway.waitForRequest(step);
+    expect(request.step).toBe(step);
+    await driver.page.clock.runFor(700);
+    if (await driver.time() === 60) break;
+    await driver.gateway.reply(step);
+    await expect.poll(() => driver.decisionCount()).toBe(step + 1);
+    await driver.page.clock.runFor(308);
+  }
+  await driver.openDriver();
+  await expect(driver.page.locator('.driver-decision-heading')).toHaveText('Demo complete');
+  await expect(driver.page.locator('.driver-decision')).toContainText('60-second drive');
+  expect(await driver.time()).toBe(60);
+  expect(driver.gateway.calls).toHaveLength(60);
+  expect(await driver.decisionCount()).toBe(59);
+  await driver.gateway.reply(59, { decision: { reason: 'TOO LATE AT TIME LIMIT' } });
+  await expectFrozen(driver);
+  expect(await driver.decisionCount()).toBe(59);
+  await expect(driver.page.locator('.driver-panel')).not.toContainText('TOO LATE AT TIME LIMIT');
+});
+
+test('arrival on a short real route finishes before either run limit', async ({ driver }) => {
   await driver.open();
   await driver.planRoute('short');
   await driver.startDriver();
@@ -249,37 +284,70 @@ test('arrival on a short real route finishes before the decision limit', async (
     await driver.gateway.waitForRequest(step);
     await driver.gateway.reply(step);
     await expect.poll(() => driver.decisionCount()).toBe(step + 1);
-    await driver.page.clock.runFor(3100);
+    await driver.page.clock.runFor(1008);
     await driver.openDriver();
     if (await driver.page.locator('.driver-decision-heading').innerText() === 'Destination reached') break;
   }
   await expect(driver.page.locator('.driver-decision-heading')).toHaveText('Destination reached');
-  expect(driver.gateway.calls.length).toBeLessThan(12);
-  expect(await driver.time()).toBeLessThan(36);
+  expect(driver.gateway.calls.length).toBeLessThan(60);
+  expect(await driver.time()).toBeLessThan(60);
   await expect(driver.page.locator('.driver-metrics > div').nth(1)).toContainText('0m');
   await expectFrozen(driver);
 });
 
-test('event mode exposes its scheduled hazard at the next decision without advancing a pending run', async ({ driver }) => {
+test('event mode exposes its scheduled hazard as the driver keeps moving during inference', async ({ driver }) => {
   await driver.open();
   await driver.planRoute('long');
   await driver.startDriver('event');
   const first = await driver.gateway.waitForRequest(0);
   expect(first.observation.simulation_time).toBe(0);
   expect(first.observation.lead_gap_m).toBeNull();
-  await driver.gateway.reply(0);
-  await expect.poll(() => driver.decisionCount()).toBe(1);
-  await driver.page.clock.runFor(3100);
-  const next = await driver.gateway.waitForRequest(1);
+  for (let step = 0; step < 3; step++) {
+    await driver.gateway.reply(step);
+    await expect.poll(() => driver.decisionCount()).toBe(step + 1);
+    await driver.page.clock.runFor(1008);
+  }
+  const next = await driver.gateway.waitForRequest(3);
   expect(next.run_id).toBe(first.run_id);
-  expect(next.step).toBe(1);
+  expect(next.step).toBe(3);
   expect(next.observation.simulation_time).toBeCloseTo(3, 6);
   expect(next.observation.lead_gap_m).not.toBeNull();
   expect(next.observation.lead_gap_m!).toBeGreaterThan(0);
+  // The request applies the scheduled event after this frame's throttled UI
+  // publication. Let the next publication expose the already-recorded event.
+  await driver.page.clock.runFor(112);
   await driver.openDriver();
   await expect(driver.page.locator('.scenario-events')).toContainText('applied · 3.0s');
-  await expectFrozen(driver);
+  const pendingTime = await driver.time();
+  await driver.page.clock.runFor(500);
+  expect(await driver.time()).toBeGreaterThan(pendingTime + 0.3);
   await driver.page.getByRole('button', { name: 'Stop drive', exact: true }).click();
-  await expect(driver.page.locator('.driver-decision-heading')).toHaveText('Drive stopped');
+  await driver.page.clock.runFor(32);
   await expectFrozen(driver);
+});
+
+test('pending inference keeps moving until the accepted command expires, then a late response stays inert', async ({ driver }) => {
+  await driver.open({ unabortableDecisions: true });
+  await driver.planRoute('long');
+  await driver.startDriver();
+  await driver.gateway.waitForRequest(0);
+  await driver.gateway.reply(0);
+  await expect.poll(() => driver.decisionCount()).toBe(1);
+  await driver.page.clock.runFor(1100);
+  const pending = await driver.gateway.waitForRequest(1);
+  const before = await rendered(driver);
+  await driver.page.clock.runFor(1400);
+  const moving = await rendered(driver);
+  expect(moving.time).toBeGreaterThan(before.time + 1.2);
+  expect(moving.y).toBeGreaterThan(before.y);
+  expect(driver.gateway.calls).toHaveLength(2);
+  expect(pending.observation.simulation_time).toBeLessThan(moving.time);
+  await driver.page.clock.runFor(500);
+  await driver.openDriver();
+  await expect(driver.page.getByRole('alert')).toHaveText('The next driving decision did not arrive before the current command expired. Driving stopped.');
+  expect(await driver.time()).toBeLessThan(3);
+  await driver.gateway.reply(1, { decision: { reason: 'EXPIRED RESPONSE' } });
+  await expectFrozen(driver);
+  expect(await driver.decisionCount()).toBe(1);
+  await expect(driver.page.locator('.driver-panel')).not.toContainText('EXPIRED RESPONSE');
 });
