@@ -148,6 +148,15 @@ class AdapterResult:
     usage: Usage | None
 
 
+@dataclass
+class GenieCallState:
+    """Per-call progress retained even when a probe raises or is cancelled."""
+
+    termination_pending: bool = False
+    termination: str | None = None
+    usage: Usage | None = None
+
+
 @dataclass(frozen=True)
 class CallResult:
     request_id: str

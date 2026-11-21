@@ -398,8 +398,109 @@ def test_caller_cancellation_during_cleanup_keeps_receiver_and_cancels(tmp_path)
             while not stream.completes:
                 await asyncio.sleep(.001)
             session.task.cancel()
-            await finish(session)
+            with pytest.raises(asyncio.CancelledError):
+                await finish(session)
             assert session.termination == "cancelled" and stream.closed
+            assert session.state == "stopped" and session.error == "cancelled"
             assert requests[-1].url.path.endswith("/cancel")
             assert not manager.gateway.ledger.budget_status()["unresolved_world_requests"]
+    asyncio.run(run())
+
+
+def test_cancelled_world_with_unknown_creation_keeps_termination_block(tmp_path):
+    async def run():
+        entered = asyncio.Event()
+        async with harness(tmp_path) as (manager, _, requests):
+            async def pending_create(path, body, on_id):
+                assert path == "/interactions"
+                entered.set()
+                await asyncio.Event().wait()
+
+            manager.gateway.http.post = pending_create
+            session = development(manager)
+            await session.attach("human", session.tokens["human"])
+            await entered.wait()
+            session.task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await finish(session)
+            assert session.state == "termination_unconfirmed" and session.provider_id is None
+            row = manager.gateway.ledger.attempts()[0]
+            assert row["outcome"] == "termination_unconfirmed"
+            assert manager.gateway.ledger.budget_status()["unresolved_world_requests"] == [row["request_id"]]
+            assert not requests  # No identifier was returned, so cancellation cannot target a world.
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("setup_stage", ["create", "auth_tokens", "connect"])
+def test_stop_during_setup_never_sends_world_setup(tmp_path, setup_stage):
+    async def run():
+        entered, resume = asyncio.Event(), asyncio.Event()
+        async with harness(tmp_path) as (manager, stream, requests):
+            original_post = manager.gateway.http.post
+            original_connect = manager.gateway.genie.connector
+
+            async def post(path, body, on_id):
+                if ((setup_stage == "create" and path == "/interactions") or
+                        (setup_stage == "auth_tokens" and path.endswith("/auth_tokens"))):
+                    entered.set()
+                    await resume.wait()
+                return await original_post(path, body, on_id)
+
+            @asynccontextmanager
+            async def connect(*args):
+                if setup_stage == "connect":
+                    entered.set()
+                    await resume.wait()
+                async with original_connect(*args) as connection:
+                    yield connection
+
+            manager.gateway.http.post = post
+            manager.gateway.genie.connector = connect
+            session = development(manager)
+            await session.attach("human", session.tokens["human"])
+            await entered.wait()
+            await session.stop("emergency_stop")
+            resume.set()
+            await finish(session)
+            assert not any(item.get("event_type") == "world_setup" for item in stream.sent)
+            assert session.recording.frame_index == -1 and not session.ready.is_set()
+            assert session.state == "stopped" and session.reason == "emergency_stop"
+            assert session.termination in ("cancelled", "interaction.completed")
+            assert manager.gateway.ledger.get(session.request_id)["outcome"] == "cancelled"
+            assert not manager.gateway.ledger.budget_status()["unresolved_world_requests"]
+            if setup_stage == "create":
+                assert not any(request.url.path.endswith("/auth_tokens") for request in requests)
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("usage_source", ["cleanup", "terminal_failure"])
+def test_failed_world_reconciles_reported_usage_and_latches_overrun(tmp_path, usage_source):
+    overrun = {"total_input_tokens": 1_000_000, "total_output_tokens": 2_000_000, "total_tokens": 3_000_000}
+
+    async def run():
+        async with harness(tmp_path, fail="connect" if usage_source == "cleanup" else None) as (manager, stream, requests):
+            original_post = manager.gateway.http.post
+
+            async def post(path, body, on_id):
+                response = await original_post(path, body, on_id)
+                return {**response, "usage": overrun} if path.endswith("/cancel") else response
+
+            manager.gateway.http.post = post
+            session = development(manager)
+            if usage_source == "cleanup":
+                await session.attach("human", session.tokens["human"])
+            else:
+                await start(session)
+                await stream.queue.put({"event_type": "interaction.failed", "usage": overrun})
+            await finish(session)
+            assert session.state == "failed" and session.terminal.is_set()
+            row = manager.gateway.ledger.get(session.request_id)
+            assert json.loads(row["usage"])["total_tokens"] == 3_000_000
+            assert row["charged_tokens"] == 3_000_000 and row["charged_microusd"] == 36_500_000
+            assert manager.gateway.ledger.budget_status()["blocks"]
+            before = len(requests)
+            next_session = development(manager)
+            await next_session.attach("human", next_session.tokens["human"])
+            await finish(next_session)
+            assert next_session.error == "budget_exceeded" and len(requests) == before
     asyncio.run(run())
