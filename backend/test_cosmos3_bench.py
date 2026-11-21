@@ -4,6 +4,7 @@ import os
 import signal
 import json
 import pathlib
+import socket
 import sys
 import types
 
@@ -103,3 +104,21 @@ def test_serve_and_bench_fails_when_server_never_ready(tmp_path):
     assert not (tmp_path / "bench_ran").exists()
     log = next(root.glob("runs/*/pipeline.log")).read_text()
     assert "SERVER_NOT_READY" in log and "still loading" in log
+
+
+def test_serve_refuses_occupied_port_and_keeps_old_artifacts(tmp_path):
+    root = tmp_path / "spike"
+    (root / "logs").mkdir(parents=True)
+    (root / "logs" / "serve_gpu0.pid").write_text("old\n")
+    (root / "logs" / "serve_gpu0_ready_epoch.txt").write_text("old\n")
+    with socket.socket() as old_server:  # stands in for a previous server left running
+        old_server.bind(("127.0.0.1", 0))
+        old_server.listen()
+        port = str(old_server.getsockname()[1])
+        env = {"PATH": "/usr/local/bin:/usr/bin:/bin", "COSMOS3_ROOT": str(root), "TMPDIR": str(tmp_path)}
+        done = subprocess.run(["bash", str(BENCH.parent / "serve.sh"), "0", port],
+                              env=env, cwd=tmp_path, timeout=30, capture_output=True, text=True)
+    assert done.returncode == 1 and "PORT_IN_USE" in done.stderr
+    assert (root / "logs" / "serve_gpu0.pid").read_text() == "old\n"
+    assert (root / "logs" / "serve_gpu0_ready_epoch.txt").read_text() == "old\n"
+    assert not (root / "logs" / "serve_gpu0_start_epoch.txt").exists()

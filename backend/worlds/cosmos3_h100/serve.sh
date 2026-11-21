@@ -15,6 +15,8 @@ export SGLANG_PERF_LOG_DIR=$LOGDIR/perf_gpu$GPU          # performance.log (per-
 export TRITON_CACHE_DIR=$TMPDIR/triton_cache TORCHINDUCTOR_CACHE_DIR=$TMPDIR/inductor_cache
 export SGLANG_DIFFUSION_SYNC_STAGE_PROFILING=1           # accurate per-stage GPU timings (small overhead)
 LOG=$LOGDIR/serve_gpu$GPU.log
+# an old server on PORT would satisfy the readiness watcher; refuse before overwriting its pid/epoch files
+if (exec 3<>/dev/tcp/127.0.0.1/"$PORT") 2>/dev/null; then echo "PORT_IN_USE $PORT" >&2; exit 1; fi
 date +%s.%N > "$LOGDIR/serve_gpu${GPU}_start_epoch.txt"
 rm -f "$LOGDIR/serve_gpu${GPU}_ready_epoch.txt"
 nohup setsid sglang serve --model-path "$MODEL" --host 127.0.0.1 --port "$PORT" --num-gpus 1 \
