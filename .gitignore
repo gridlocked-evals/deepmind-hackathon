@@ -11,3 +11,6 @@ __pycache__/
 var/
 .gateway/
 gateway.local.json
+
+# Local browser review captures
+.impeccable/review/

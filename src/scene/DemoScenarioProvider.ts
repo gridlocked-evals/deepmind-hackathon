@@ -67,7 +67,7 @@ export function createDemoScenario(seed = 32998): ScenarioBundle {
         desiredSpeed: 6.5 + random() * 2.1, acceleration: 0, signalStop: false });
     }
   }
-  const ego: ActorDefinition = { id: 'ego', kind: 'car', label: 'Gotham 01', role: 'ego',
+  const ego: ActorDefinition = { id: 'ego', kind: 'car', label: 'Gridlocked 01', role: 'ego',
     length: 4.9, width: 1.98, height: 1.86, color: '#f4f8f8', routeId: 'lane-1' };
   moving.push({ definition: ego, across: 8, along: -111, direction: 1, speed: 6.2, desiredSpeed: 6.6, acceleration: 0, signalStop: false });
 
