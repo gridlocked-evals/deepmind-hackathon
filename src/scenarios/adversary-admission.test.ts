@@ -22,6 +22,25 @@ describe('shared adversary admission', () => {
     }
   });
 
+  // The same table as backend/test_adversary.py::test_requested_and_applied_attack_times_both_keep_minimum_gap,
+  // so the backend's attack_barrier and the browser's barrier rounding (used by validation and the random draw) agree.
+  it.each([
+    [3.1, 13.1, false], [3.1, 15.0, false], [3.1, 15.1, true], [3.0, 13.0, true],
+    [5.0, 15.0 + 5e-10, false], [5.0, 15.1, true], [37.1, 48.0, false], [36.0, 48.0, true],
+  ])('matches the backend gap table: %d then %d accepted=%s, and random draws obey the same rule', (first, second, accepted) => {
+    const check = () => attackEvent({ ...attack, trigger_seconds: second }, 1, [first], first + 1);
+    if (accepted) expect(check).not.toThrow(); else expect(check).toThrow(/apart|budget/);
+    if (nextAttackWindow([first], first + 1) === null) return;
+    for (let i = 0; i <= 20; i++) {
+      const draws = [.9, 0, i / 20 - (i === 20 ? 1e-9 : 0), 0, 0, 0];
+      let index = 0;
+      const chosen = randomDecision(() => draws[index++], [first], first + 1, 0);
+      const barrier = (t: number) => Math.ceil((t - 1e-9) / 3) * 3;  // backend attack_barrier
+      expect(chosen.trigger_seconds! - first).toBeGreaterThanOrEqual(10);
+      expect(barrier(chosen.trigger_seconds!) - barrier(first)).toBeGreaterThanOrEqual(10);
+    }
+  });
+
   it('samples random distances from the same choice-time avoidability gate as Carbon', () => {
     const draws = [.9, 0, 0, 0, 0, 0];
     let index = 0;
