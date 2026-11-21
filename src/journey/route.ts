@@ -27,4 +27,3 @@ export function randomStop(exclude: NavigationPoint | null, random = Math.random
   const choices = NYC_STOPS.filter(point => !exclude || Math.hypot(point.coordinates[0] - exclude.coordinates[0], point.coordinates[1] - exclude.coordinates[1]) > .003);
   return choices[Math.min(choices.length - 1, Math.max(0, Math.floor(random() * choices.length)))];
 }
-
