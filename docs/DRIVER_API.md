@@ -150,7 +150,8 @@ Decisions safety score. Each step holds the following:
 `terminal.state` is `route_complete`, `decision_limit`, `stopped_by_user`,
 `error` or `interrupted` (the tab was hidden). An `error` carries only the
 server's redacted message or the panel's own fixed text; any other failure,
-such as a non-JSON response, is recorded as "The driving request failed.". A
+such as a non-JSON response, is recorded as "The driving request failed." The
+panel displays that same sanitized error. A
 request still pending when the run ends adds no step, and a hold cut short ends
 at the stop time. A hold stopped before its first physics tick still appears,
 with zero applied motion, because the model's decision was received. The bounds come from the 12-decision and 3-second constants. The

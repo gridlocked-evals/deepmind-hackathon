@@ -186,8 +186,8 @@ export function useGeminiDriver(scenario: ScenarioBundle): GeminiDriver {
       } catch (failure) {
         if (!gate.current.isCurrent(lease)) return;
         activeRef.current = false;
-        const message = failure instanceof Error ? failure.message : 'The driving request failed.';
-        finishTrace(runTrace, { state: 'error', error: traceError(failure) });
+        const message = traceError(failure);
+        finishTrace(runTrace, { state: 'error', error: message });
         setError(message);
         setStatus('error'); gate.current.cancel();
       }
