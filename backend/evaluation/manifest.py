@@ -50,7 +50,7 @@ class Episode(BaseModel):
 
 
 def check_lineage(episodes: tuple[Episode, ...]) -> None:
-    """Unique ids; derivatives name a known parent and inherit its split."""
+    """Unique ids; derivatives name a known parent and inherit its split; no source hash spans splits."""
     by_id: dict[str, Episode] = {}
     for episode in episodes:
         if episode.episode_id in by_id:
@@ -64,6 +64,12 @@ def check_lineage(episodes: tuple[Episode, ...]) -> None:
             raise ValueError(f"{episode.episode_id}: unknown parent {episode.parent_id}")
         if parent.split != episode.split:
             raise ValueError(f"{episode.episode_id}: split {episode.split} differs from parent split {parent.split}")
+    split_of: dict[str, str] = {}
+    for episode in episodes:
+        for source_hash in episode.source_hashes:
+            # read_source matches by hash, so a shared hash would let dev access return test bytes.
+            if split_of.setdefault(source_hash, episode.split) != episode.split:
+                raise ValueError(f"{episode.episode_id}: source hash {source_hash} is in both dev and test")
 
 
 def split_report(episodes: tuple[Episode, ...] | list[Episode]) -> dict:
