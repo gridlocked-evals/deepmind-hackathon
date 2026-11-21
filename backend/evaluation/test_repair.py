@@ -52,6 +52,10 @@ def change(field, value):
     return {"changes": [{"field": field, "value": value}], "rationale": "brake earlier"}
 
 
+def session_for(lock_path="never-opened.lock.json"):
+    return RepairSession(SURFACE, VALUES, [DEV_FAIL], TEST_SUITE, lock_path=lock_path)
+
+
 def propose(session, gateway):
     return asyncio.run(session.propose(gateway, CONTEXT))
 
@@ -59,10 +63,10 @@ def propose(session, gateway):
 def test_out_of_surface_and_out_of_bounds_edits_rejected():
     for field, value in [("contact_threshold", .9), ("brake_lead_s", 9.0), ("brake_lead_s", "2"), ("mode", "panic"),
                          ("hazard_note", "x" * 41)]:
-        session = RepairSession(SURFACE, VALUES, [DEV_FAIL], TEST_SUITE)
+        session = session_for()
         record = propose(session, FakeGateway(change(field, value)))
         assert not record.accepted and record.request_id == "req-1" and session.values == VALUES
-    session = RepairSession(SURFACE, VALUES, [DEV_FAIL], TEST_SUITE)
+    session = session_for()
     assert propose(session, FakeGateway(change("brake_lead_s", 2.0))).accepted and session.values["brake_lead_s"] == 2.0
 
 
@@ -70,7 +74,7 @@ def test_packet_has_no_adversary_or_test_data():
     packet = build_packet([DEV_FAIL], TEST_SUITE)
     assert packet[0]["hazard"] == PED.value and packet[0]["defender_actions"] == ["hold_forward", "release_keys"]
     gateway = FakeGateway(change("mode", "alert"))
-    propose(RepairSession(SURFACE, VALUES, [DEV_FAIL], TEST_SUITE), gateway)
+    propose(session_for(), gateway)
     for text in (json.dumps(packet), gateway.inputs[0]):
         for secret in (DEV_TEXT, TEST_TEXT, "steering_text", "attack_type", "send_frame", "trigger_frame"):
             assert secret not in text
@@ -87,7 +91,7 @@ def test_test_split_source_raises():
 
 
 def test_attempt_cap_and_every_proposal_recorded():
-    session = RepairSession(SURFACE, VALUES, [DEV_FAIL], TEST_SUITE)
+    session = session_for()
     propose(session, FakeGateway(change("physics_gravity", 1.0)))
     propose(session, FakeGateway(change("brake_lead_s", 2.0)))
     with pytest.raises(RuntimeError, match="cap"):
@@ -95,30 +99,41 @@ def test_attempt_cap_and_every_proposal_recorded():
     assert [(p.round, p.accepted) for p in session.proposals] == [(1, False), (2, True)]
 
 
-def final_run(tmp_path):
+TEST = ep("b1", "test", "cam9")
+HOLDOUT_BEFORE = [scored(TEST, TEST_SUITE[0], "avoided"), scored(TEST, TEST_SUITE[1], "failed")]
+HOLDOUT_AFTER = [scored(TEST, TEST_SUITE[0], "failed"), scored(TEST, TEST_SUITE[1], "failed")]
+
+
+def locked(tmp_path):
     suite_sha = save_suite(tmp_path / "suite.json", TEST_SUITE)
-    manifest = Manifest(episodes=(DEV, ep("b1", "test", "cam9")), prompts={"p": "a" * 64}, thresholds={},
-                        attack_suite_sha256=suite_sha)
-    return FinalRun(tmp_path / "manifest.json", lock(manifest, tmp_path / "manifest.json"))
+    manifest = Manifest(episodes=(DEV, TEST), prompts={"p": "a" * 64}, thresholds={}, attack_suite_sha256=suite_sha)
+    path = tmp_path / "manifest.json"
+    return path, lock(manifest, path)
+
+
+def seal(tmp_path, session, run, **override):
+    kwargs = dict(dev_before=[DEV_FAIL], dev_after=[scored(DEV, DEV_FAIL.score.record.script, "avoided")],
+                  holdout_before=HOLDOUT_BEFORE, holdout_after=HOLDOUT_AFTER)
+    return session.seal(run, tmp_path / "suite.json", **(kwargs | override))
 
 
 def sealed_trial(tmp_path, session):
-    test = ep("b1", "test", "cam9")
-    return session.seal(final_run(tmp_path), tmp_path / "suite.json",
-                        dev_before=[DEV_FAIL.score], dev_after=[scored(DEV, DEV_FAIL.score.record.script, "avoided").score],
-                        holdout_before=[scored(test, TEST_SUITE[0], "avoided"), scored(test, TEST_SUITE[1], "failed")],
-                        holdout_after=[scored(test, TEST_SUITE[0], "failed"), scored(test, TEST_SUITE[1], "failed")])
+    return seal(tmp_path, session, session.open_holdout(*locked(tmp_path)))
 
 
 def test_trial_sealed_after_holdout(tmp_path):
-    session = RepairSession(SURFACE, VALUES, [DEV_FAIL], TEST_SUITE)
+    path, pinned = locked(tmp_path)
+    session = session_for(path)
     propose(session, FakeGateway(change("brake_lead_s", 2.0)))
-    trial = sealed_trial(tmp_path, session)
-    assert trial.diff == {"brake_lead_s": (1.0, 2.0)}
-    with pytest.raises(HoldoutError, match="sealed"):
+    outside = FinalRun(path, pinned)
+    with pytest.raises(HoldoutError, match="no tuning"):  # any FinalRun on the manifest stops tuning
         propose(session, FakeGateway(change("brake_lead_s", 2.5)))
-    with pytest.raises(HoldoutError):
-        session.seal(None, tmp_path / "suite.json", dev_before=[], dev_after=[], holdout_before=[], holdout_after=[])
+    with pytest.raises(HoldoutError, match="open_holdout"):  # only the session's own run can seal
+        seal(tmp_path, session, outside)
+    trial = seal(tmp_path, session, session.open_holdout(path, pinned))
+    assert trial.diff == {"brake_lead_s": (1.0, 2.0)}
+    with pytest.raises(HoldoutError, match="already sealed"):
+        seal(tmp_path, session, session.run)
     ledger = ResultsLedger(tmp_path / "repairs.jsonl", RepairTrial)
     ledger.append(trial)
     ledger.append(trial)
@@ -126,9 +141,29 @@ def test_trial_sealed_after_holdout(tmp_path):
 
 
 def test_regressions_and_unsuccessful_fixes_reported(tmp_path):
-    session = RepairSession(SURFACE, VALUES, [DEV_FAIL], TEST_SUITE)
+    session = session_for(tmp_path / "manifest.json")
     propose(session, FakeGateway(change("brake_lead_s", 2.0)))
     trial = sealed_trial(tmp_path, session)
     assert trial.dev_delta[PED.value] == 1.0 and trial.regressions["dev"] == []
     assert trial.holdout_delta[TRUCK.value] == -1.0 and trial.regressions["holdout"] == [TRUCK.value, "overall"]
     assert trial.unsuccessful_fixes == [PED.value]  # fixed on dev, still failing on held-out cameras
+
+
+def test_open_holdout_blocks_tuning(tmp_path):
+    path, pinned = locked(tmp_path)
+    session = session_for(path)
+    session.open_holdout(path, pinned)
+    with pytest.raises(HoldoutError, match="no tuning"):
+        propose(session, FakeGateway(change("brake_lead_s", 2.0)))
+
+
+def test_seal_rejects_cherry_picked_holdout_and_test_dev_scores(tmp_path):
+    session = session_for(tmp_path / "manifest.json")
+    run = session.open_holdout(*locked(tmp_path))
+    with pytest.raises(ValueError, match="same"):  # dropped the slot that regressed
+        seal(tmp_path, session, run, holdout_after=HOLDOUT_AFTER[1:])
+    with pytest.raises(ValueError, match="same"):  # same count, different slots
+        seal(tmp_path, session, run, holdout_after=[HOLDOUT_AFTER[1], HOLDOUT_AFTER[1]])
+    with pytest.raises(ValueError, match="dev-split"):
+        seal(tmp_path, session, run, dev_after=[scored(TEST, DEV_FAIL.score.record.script, "avoided")])
+    assert not session.sealed
