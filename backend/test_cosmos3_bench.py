@@ -4,6 +4,8 @@ import pathlib
 import sys
 import types
 
+import subprocess
+
 import pytest
 
 BENCH = pathlib.Path(__file__).parent / "worlds" / "cosmos3_h100" / "bench.py"
@@ -55,3 +57,18 @@ def test_failed_generation_exits_nonzero_and_keeps_diagnostics(monkeypatch, tmp_
 
     assert bench.main() == 1
     assert (tmp_path / "out" / "bench_result.json").exists()
+
+
+@pytest.mark.parametrize("bench_rc,expected", [(1, 1), (0, 0)])
+def test_bench_running_wrapper_exit_code_reflects_bench(tmp_path, bench_rc, expected):
+    root = tmp_path / "spike"
+    (root / "logs").mkdir(parents=True)
+    (root / "logs" / "serve_gpu0.log").write_text("server up\n")
+    fake = tmp_path / "env" / "bin" / "python"
+    fake.parent.mkdir(parents=True)
+    fake.write_text(f"#!/bin/sh\nexit {bench_rc}\n")  # stands in for bench.py
+    fake.chmod(0o755)
+    script = BENCH.parent / "bench_running.sh"
+    env = {"PATH": "/usr/local/bin:/usr/bin:/bin", "COSMOS3_ROOT": str(root), "COSMOS3_ENV": str(tmp_path / "env")}
+    done = subprocess.run(["bash", str(script), "0", "1", "61", "t"], env=env, cwd=tmp_path, timeout=30)
+    assert done.returncode == expected
