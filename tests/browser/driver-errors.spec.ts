@@ -11,7 +11,7 @@ async function startPendingDrive(driver: DriverHarness) {
   await driver.openDriver();
   expect(request.step).toBe(0);
   await expect(driver.page.getByRole('status').filter({ hasText: 'Gemini is deciding' })).toBeVisible();
-  await expect(driver.page.getByText('Simulation paused while the model responds.', { exact: true })).toBeVisible();
+  await expect(driver.page.getByText('Waiting for the first driving decision.', { exact: true })).toBeVisible();
   expect(await driver.time()).toBe(0);
   expect(await driver.decisionCount()).toBe(0);
   return request;
@@ -21,7 +21,7 @@ async function expectStoppedWithoutFallback(driver: DriverHarness, message: stri
   const { page } = driver;
   await expect(page.getByRole('alert')).toHaveText(message);
   await expect(page.getByRole('status').filter({ hasText: 'Drive interrupted' })).toBeVisible();
-  await expect(page.getByRole('button', { name: 'Restart Gemini drive', exact: true })).toBeEnabled();
+  await expect(page.getByRole('button', { name: 'Restart scenario', exact: true })).toBeEnabled();
   await expect(page.getByRole('button', { name: 'Stop drive', exact: true })).toHaveCount(0);
   await expect(page.locator('.driver-history')).toHaveCount(0);
   expect(await driver.time()).toBe(0);
@@ -46,17 +46,17 @@ test('HTTP 503 preserves the gateway error and never substitutes or retries a de
   expect(await driver.time()).toBe(0);
   expect(driver.gateway.calls).toHaveLength(1);
 
-  const message = 'Hydrogen gateway is temporarily unavailable for this driver run.';
+  const message = 'Decisions gateway is temporarily unavailable for this driver run.';
   await driver.gateway.reply(0, { status: 503, raw: { detail: { message } } });
   await expectStoppedWithoutFallback(driver, message);
 });
 
-test('a pending decision freezes simulation until the 130-second timeout stops the drive', async ({ driver }) => {
+test('the initial decision expires after three wall seconds without moving the car', async ({ driver }) => {
   await startPendingDrive(driver);
 
   // The request must remain pending right up to the deadline, with no
   // simulated progress or replacement request.
-  await driver.page.clock.fastForward(129_999);
+  await driver.page.clock.fastForward(2_999);
   expect(await driver.time()).toBe(0);
   expect(await driver.decisionCount()).toBe(0);
   expect(driver.gateway.calls).toHaveLength(1);
@@ -64,7 +64,7 @@ test('a pending decision freezes simulation until the 130-second timeout stops t
   await expect(driver.page.getByRole('button', { name: 'Stop drive', exact: true })).toBeVisible();
 
   await driver.page.clock.fastForward(1);
-  await expectStoppedWithoutFallback(driver, 'The Gemini request timed out. Driving stopped without a fallback.');
+  await expectStoppedWithoutFallback(driver, 'The next driving decision did not arrive before the current command expired. Driving stopped.');
 });
 
 test('invalid JSON is redacted and stops the run without fabricating a decision', async ({ driver }) => {
@@ -80,6 +80,9 @@ const invalidResponses: { name: string; response: DecisionReply }[] = [
   { name: 'malformed decision', response: { decision: { target_speed_mps: -1 } } },
   { name: 'wrong run identity', response: { run_id: 'another-driver-run' } },
   { name: 'wrong step identity', response: { step: 1 } },
+  { name: 'wrong model identity', response: { model_id: 'another-model' } },
+  { name: 'wrong decision budget', response: { max_steps: 12 } },
+  { name: 'nonzero stop speed', response: { decision: { action: 'stop', target_speed_mps: 5 } } },
 ];
 
 for (const { name, response } of invalidResponses) {
