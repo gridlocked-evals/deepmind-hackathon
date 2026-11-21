@@ -39,6 +39,16 @@ geometry kept passing unavailable, braked, and had no lateral deviation. Neither
 browser phase had uncaught page errors. These browser responses were fixtures,
 separate from the live Decisions calls above.
 
+Integration with main `35e9399` preserved adversary and camera-evidence behavior.
+The expanded suites passed 203 frontend tests, 678 backend tests, and 70 desktop/
+mobile browser checks; production build, browser type checks, and contract drift
+checks also passed. A regression verifies that an already stopped, model-commanded
+hold is not credited as a maneuver-guard intervention, while blocked acceleration
+is. The evaluation option disables only the injected-hazard leader guard; passing
+corridor checks remain active.
+After that attribution and label correction, all 10 affected desktop/mobile
+adversary browser checks passed again against the rebuilt production bundle.
+
 ## Decisions driver migration
 
 Three live calls through the updated `DriverController`, existing backend credential,

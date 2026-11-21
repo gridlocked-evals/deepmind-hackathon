@@ -47,7 +47,7 @@ export interface RunTrace {
   /** The compatible #60 action/guard trace; absent in exports made before integration. */
   driverTrace?: DriverTrace;
   eventLog: EventRecord[];
-  /** Eval option: guards ignored injected hazards (#91). Absent means false. */
+  /** Eval option: leader guards ignored injected hazards (#91); maneuver/signal guards still act. Absent means false. */
   guardsIgnoreHazards?: boolean;
   /** Adversary lane decisions, per-attack outcome records and run metrics (#91); absent when the adversary is off. */
   adversary?: AdversaryTrace;

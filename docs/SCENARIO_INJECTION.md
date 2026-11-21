@@ -170,10 +170,11 @@ second injector. Choose **Carbon**, **Random baseline** (with a seed) or **Off**
   If no distance is admissible, it waits. Both policies still recheck actual
   speed at injection. The policy uses its own seeded mulberry32 stream, never
   simulation randomness; numeric parameters are rounded to tenths.
-- **Eval option: guards ignore injected hazards.** The leader guard skips
+- **Eval option: leader guard ignores injected hazards.** The leader guard skips
   `event-*` actors, both in its target cap and in its hard-stop boundary. The
   model still sees them through `lead_gap_m`/`lead_speed_mps`, and the
-  observation is unchanged. Red-line and replayed-traffic guards still act.
+  observation is unchanged. Go-around corridor, red-line and replayed-traffic
+  guards still act.
 
 **Per-attack records** (`trace.adversary.attacks`) are derived from the frames,
 telemetry, contacts and event log:

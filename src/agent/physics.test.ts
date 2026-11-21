@@ -4,8 +4,10 @@ import type { ScenarioBundle } from '../types';
 import { advanceDriver, COMFORTABLE_BRAKING, createDriverSimulation, driverEligibility, driverFrame, driverObservation, MAX_ACCELERATION, routeComplete, routePosition } from './physics';
 import { SPEED_LIMIT_MPS } from './types';
 import type { DriverDecision } from './types';
-import { footprintContact } from '../scenarios/trace';
+import { createTrace, footprintContact, recordFrame } from '../scenarios/trace';
 import { createEvents, preset, withEventActors } from '../scenarios/events';
+import { ADVERSARY_PLAN, applyDue, attackRecords } from '../scenarios/adversary';
+import type { AdversaryDecisionRecord } from '../scenarios/adversary';
 
 const accelerate: DriverDecision = { action: 'accelerate', target_speed_mps: SPEED_LIMIT_MPS, reason: 'Proceed along the route.', confidence: 0.9 };
 const stop: DriverDecision = { action: 'stop', target_speed_mps: 0, reason: 'Wait here.', confidence: 0.9 };
@@ -103,6 +105,44 @@ describe('bounded adjacent-lane bypass', () => {
     state = advanceDriver(state, goAround, .1);
     expect(state.speed).toBe(0); expect(state.guard).toBe('maneuver_guard'); expect(state.braking).toBe(true);
     expect(driverFrame(state).actors[0]).toMatchObject({ x: before.x, y: before.y, heading: before.heading });
+    const held = advanceDriver({ ...state, guardsIgnoreHazards: true }, stop, .1);
+    expect(held.speed).toBe(0); expect(held.progress).toBe(state.progress);
+    expect(held.guard).toBe('none');
+    expect(held.control!.interventions).not.toContain('hard-stop-boundary');
+  });
+
+  it('does not credit an invalid maneuver when its cap leaves motion unchanged', () => {
+    const scene = bypassScene(); scene.geometry.lanes = [];
+    const initial = createDriverSimulation(scene);
+    expect(advanceDriver(initial, { ...goAround, target_speed_mps: 0 }, .1).guard).toBe('none');
+    // Both the model's target and the unavailable-maneuver cap saturate comfortable braking here.
+    const moving = { ...initial, speed: 8 };
+    const capped = advanceDriver(moving, goAround, .1);
+    const braking = advanceDriver(moving, { ...goAround, action: 'brake' }, .1);
+    expect(capped.speed).toBe(braking.speed);
+    expect(capped.progress).toBe(braking.progress);
+    expect(capped.guard).toBe('none');
+  });
+
+  it('scores a model-commanded hold as unassisted until the corridor guard changes motion', () => {
+    let state = createDriverSimulation(bypassScene());
+    for (let tick = 0; tick < 40; tick++) state = advanceDriver(state, goAround, .1);
+    state = { ...state, speed: 0, guardsIgnoreHazards: true,
+      scenario: withEventActors(state.scenario, ADVERSARY_PLAN), events: createEvents(ADVERSARY_PLAN, 'event') };
+    const trace = createTrace(state, 'fixture-held-bypass', 'test-fixture');
+    const attack: AdversaryDecisionRecord = { attackIndex: 0, decidedAt: state.time, chosenBy: 'random',
+      modelId: 'seeded-random', requestId: 'fixture', injection: null,
+      decision: { action: 'attack', event_type: 'stalled-vehicle', trigger_seconds: state.time,
+        parameters: { distanceAheadM: 35, approachSeconds: 1 }, durationSeconds: 8, reason: 'Fixture blocks the return corridor.' } };
+    trace.adversary = { mode: 'random', seed: 1, decisions: [attack], attacks: [], run: null, error: null };
+    state = applyDue(state, [attack]); recordFrame(trace, state);
+    expect(driverObservation(state)).toMatchObject({ go_around_active: true, go_around_available: false });
+    state = advanceDriver(state, stop, .1); recordFrame(trace, state);
+    expect(attackRecords(trace)[0]).toMatchObject({ guardAssisted: false, outcome: 'unresolved', resolution: 'safe_hold' });
+    // The same local check now prevents an actual acceleration requested by the model.
+    state = advanceDriver(state, goAround, .1); recordFrame(trace, state);
+    expect(state.guard).toBe('maneuver_guard');
+    expect(attackRecords(trace)[0].guardAssisted).toBe(true);
   });
 
   it('holds its lateral position when stopped, then rejoins after the original obstacle disappears', () => {

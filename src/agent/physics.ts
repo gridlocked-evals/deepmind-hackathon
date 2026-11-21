@@ -33,7 +33,7 @@ export interface DriverSimulation {
   /** A completed pass may finish its already accepted command without immediately braking or replanning. */
   completedBypass?: boolean;
   control?: { requestedTargetMps: number; constrainedTargetMps: number; interventions: string[] };
-  /** Eval option (#91): the leader guard ignores injected `event-*` actors, so only the model can avoid them. */
+  /** Eval option (#91): the leader guard ignores injected actors; maneuver and signal guards remain active. */
   guardsIgnoreHazards?: boolean;
   /** Which local guard changed the applied motion on the last tick; trace instrumentation only. */
   guard: GuardReason;
@@ -204,20 +204,20 @@ export function advanceDriver(state: DriverSimulation, decision: DriverDecision,
   };
   if (decision.action === 'brake') desired = Math.min(desired, state.speed);
   if (state.bypass || decision.action === 'go_around') constrain(GO_AROUND_SPEED_MPS, 'bypass-speed');
-  if (corridorBlocked || invalidBypass) constrain(0, corridorBlocked ? 'bypass-corridor-blocked' : 'bypass-unavailable');
   const remaining = state.path.length - state.progress;
   constrain(Math.min(Math.sqrt(Math.max(0, 2 * 2 * remaining)), remaining * 1.5), 'route-end');
   // Slow near sharp polyline turns; these are route steering, not model-generated steering commands.
   const turn = Math.abs(observation.upcoming_turn_degrees);
   if (turn > 25) constrain(Math.max(2.5, 8 * (1 - Math.min(150, turn) / 180)), 'route-turn');
   const accelerationFor = (target: number) => Math.max(-COMFORTABLE_BRAKING, Math.min(MAX_ACCELERATION, (target - state.speed) * 1.8));
-  let guard: GuardReason = corridorBlocked || invalidBypass ? 'maneuver_guard' : 'none';
+  let guard: GuardReason = 'none';
   const applyGuard = (cap: number, reason: GuardReason) => {
     if (cap >= desired) return;
     // A later target cap may be redundant after braking has saturated. Preserve
     // the earlier guard unless this cap changes the applied acceleration.
     if (accelerationFor(cap) < accelerationFor(desired) - 1e-9) guard = reason;
-    constrain(cap, reason === 'leader_guard' ? 'obstacle-spacing' : 'signal-stop');
+    constrain(cap, reason === 'leader_guard' ? 'obstacle-spacing' : reason === 'maneuver_guard'
+      ? corridorBlocked ? 'bypass-corridor-blocked' : 'bypass-unavailable' : 'signal-stop');
   };
   // The model still observes injected hazards; with the eval flag only the guard skips them.
   const guardLead = state.guardsIgnoreHazards ? nearestLeader(state, state.time, true) : undefined;
@@ -236,6 +236,9 @@ export function advanceDriver(state: DriverSimulation, decision: DriverDecision,
     const cap = Math.min(Math.sqrt(2 * 2 * observation.stop_distance_m), observation.stop_distance_m * 1.5);
     applyGuard(cap, 'red_line_guard');
   }
+  // Credit the maneuver guard only when it changes motion after the other constraints.
+  // An already stopped model command must not become an assisted avoidance just because its corridor is blocked.
+  if (corridorBlocked || invalidBypass) applyGuard(0, 'maneuver_guard');
 
   const acceleration = accelerationFor(desired);
   const unclampedSpeed = Math.max(0, Math.min(SPEED_LIMIT_MPS, state.speed + acceleration * delta));
@@ -246,7 +249,8 @@ export function advanceDriver(state: DriverSimulation, decision: DriverDecision,
   // Collision and end boundaries may override comfortable braking in an emergency.
   const clamped = clampAtBoundaries(state.progress,
     state.progress + (state.speed + unclampedSpeed) * 0.5 * delta, unclampedSpeed, state.path.length, bounds);
-  const { progress, speed, guard: boundaryGuard } = corridorBlocked
+  const freezeChangesMotion = corridorBlocked && (clamped.progress > state.progress + 1e-9 || clamped.speed > 1e-9);
+  const { progress, speed, guard: boundaryGuard } = freezeChangesMotion
     ? { progress: state.progress, speed: 0, guard: 'maneuver_guard' as const } : clamped;
   if (boundaryGuard !== 'none') interventions.push('hard-stop-boundary');
   const time = Math.round((state.time + delta) * 1e9) / 1e9;
