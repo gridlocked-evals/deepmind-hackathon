@@ -537,6 +537,62 @@ def test_expired_pricing_and_invalid_config_fail_closed(tmp_path):
     asyncio.run(run())
 
 
+def test_genie_rejected_create_resolves_and_next_probe_can_start(tmp_path):
+    creates = []
+    @asynccontextmanager
+    async def connector(*_):
+        yield WorldSession()
+    def handler(request):
+        creates.append(request.url.path)
+        # A 400 (e.g. a refused prompt) means no interaction exists.
+        if len(creates) == 1:
+            return httpx.Response(400, json={"error": "rejected"})
+        return httpx.Response(200, json={"id": "world-1", "status": "in_progress"})
+    async def run():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            gateway = ModelGateway(settings(tmp_path, genie_seconds=.2), client, api_key=KEY, genie_connector=connector)
+            context = CallContext(episode_id="smoke", prompt_id="world-v1", purpose="smoke")
+            with pytest.raises(GatewayError) as error:
+                await gateway.probe_world(prompt="A branded street", context=context)
+            assert error.value.code == ErrorCode.UPSTREAM
+            assert gateway.ledger.get(error.value.request_id)["outcome"] == ErrorCode.UPSTREAM.value
+            assert not gateway.status()["budgets"]["unresolved_world_requests"]
+            result = await gateway.probe_world(prompt="A quiet street", context=context)
+            assert result.output["termination"] == "interaction.completed"
+    asyncio.run(run())
+
+
+def test_genie_cancellation_during_cleanup_stays_unresolved_and_cancellable(tmp_path):
+    in_cleanup = asyncio.Event()
+    cancellation_works = False
+    @asynccontextmanager
+    async def connector(*_):
+        yield WorldSession(fail=True)
+    async def handler(request):
+        if request.url.path.endswith("/cancel"):
+            if cancellation_works:
+                return httpx.Response(200, json={"id": "world-1", "status": "cancelled"})
+            in_cleanup.set()
+            await asyncio.sleep(10)
+        return httpx.Response(200, json={"id": "world-1", "status": "in_progress"})
+    async def run():
+        nonlocal cancellation_works
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            gateway = ModelGateway(settings(tmp_path), client, api_key=KEY, genie_connector=connector)
+            context = CallContext(episode_id="smoke", prompt_id="world-v1", purpose="smoke")
+            task = asyncio.create_task(gateway.probe_world(prompt="Street", context=context))
+            await asyncio.wait_for(in_cleanup.wait(), 2)
+            task.cancel()  # e.g. shutdown while the cleanup cancel is in flight
+            with pytest.raises((GatewayError, asyncio.CancelledError)):
+                await task
+            unresolved = gateway.status()["budgets"]["unresolved_world_requests"]
+            assert len(unresolved) == 1
+            assert gateway.ledger.get(unresolved[0])["outcome"] == ErrorCode.TERMINATION.value
+            cancellation_works = True
+            assert (await gateway.cancel_world(unresolved[0]))["termination"] == "cancelled"
+            assert not gateway.status()["budgets"]["unresolved_world_requests"]
+    asyncio.run(run())
+
 def test_known_world_recovery_bypasses_disabled_budget_and_preserves_failure(tmp_path):
     cancellation_works = False
     @asynccontextmanager
