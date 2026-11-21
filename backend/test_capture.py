@@ -527,6 +527,20 @@ def test_probe_output_and_process_lifetime_are_bounded():
         _bounded_probe([sys.executable, "-c", "import os,time; os.close(1); os.close(2); time.sleep(10)"], timeout=.1)
 
 
+def test_probe_does_not_need_pipe_selectors_or_nonblocking_pipes(monkeypatch):
+    # Windows cannot select() on pipes or set them non-blocking; the probe must not rely on either.
+    import selectors
+    from backend.capture import _bounded_probe
+
+    def unsupported(*_args, **_kwargs):
+        raise OSError("unsupported on Windows pipes")
+    monkeypatch.setattr(selectors, "DefaultSelector", unsupported)
+    monkeypatch.setattr(os, "set_blocking", unsupported)
+    assert _bounded_probe([sys.executable, "-c", "import sys; sys.stdout.write('ok'*1000)"]) == b"ok" * 1000
+    with pytest.raises(TruncatedCapture, match="decoded completely"):
+        _bounded_probe([sys.executable, "-c", "import sys; sys.stderr.write('bad')"])
+
+
 def test_real_decode_failure_and_bad_snapshot_are_rejected(tmp_path):
     store = CaptureStore(tmp_path / "captures")
     with pytest.raises(TruncatedCapture):
