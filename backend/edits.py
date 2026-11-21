@@ -94,14 +94,37 @@ class CarbonUnknown(_Out):
 
 class CarbonEditOutput(_Out):
     status: Literal["compiled", "rejected", "needs_clarification"]
-    reason: str | None = Field(default=None, max_length=600,
-                               description="Why the request was rejected, or the clarifying question to ask")
+    reason: str = Field(max_length=600, description="Required. For rejected: why. For needs_clarification: the"
+                        " single clarifying question. For compiled: one sentence summarizing the edit.")
     operations: list[CarbonOperation] = Field(default_factory=list, max_length=8)
     laneUse: CarbonLaneUse | None = None
     preservedAnchorIds: list[str] = Field(default_factory=list)
     unknownGeometry: list[CarbonUnknown] = Field(default_factory=list, max_length=12)
     imageInstructions: str | None = Field(default=None, max_length=2000)
     worldPrompt: str | None = Field(default=None, max_length=1200)
+
+
+_WIRE_DROP = {"maxLength", "minLength", "maxItems", "minItems", "description", "title", "default",
+              "minimum", "maximum"}
+
+
+def wire_schema(value, in_properties: bool = False):
+    """Schema sent to the provider. Length/range bounds make the served grammar too large
+    ("too many states"), so they are dropped here and enforced by full Pydantic validation
+    of the response instead. Property names are never dropped."""
+    if isinstance(value, dict):
+        return {k: wire_schema(v, k == "properties") for k, v in value.items() if in_properties or k not in _WIRE_DROP}
+    if isinstance(value, list):
+        return [wire_schema(v) for v in value]
+    return value
+
+
+class CarbonWireOutput(CarbonEditOutput):
+    """Same validation as CarbonEditOutput; advertises the simplified wire schema."""
+
+    @classmethod
+    def model_json_schema(cls, *args, **kwargs):
+        return wire_schema(CarbonEditOutput.model_json_schema())
 
 
 class EditBundle(BaseModel):
@@ -250,7 +273,7 @@ Rules:
   (hidden curb lines, occluded lane ends, true widths) in unknownGeometry instead of guessing.
 - Never state metric widths/distances, safety outcomes, or route feasibility. This is a visual proposal.
 - If the request is ambiguous, contradictory, or outside the preset, return status "needs_clarification"
-  (with a single clarifying question) or "rejected" (with the reason) and no operations.
+  or "rejected" with no operations. "reason" is always required: the clarifying question or the rejection reason.
 - imageInstructions: concrete edit instructions for an image model that must keep the camera viewpoint,
   buildings and crossings unchanged. worldPrompt: a short first-person description of the edited street.
 Return JSON only, matching the schema."""
@@ -298,7 +321,7 @@ async def compile_edit(gateway: ModelGateway, store: ArtifactStore, *, batch: Ob
                           source_id=batch.captureId, purpose=purpose)
     requested = utcnow()
     result = await gateway.generate(Service.CARBON, stage="compilation", input_value=input_value,
-                                    context=context, response_model=CarbonEditOutput)
+                                    context=context, response_model=CarbonWireOutput)
     call = from_result(gateway, Service.CARBON, result, prompt_id=PROMPT_ID, domain_hashes=domain_hashes,
                        requested_at=requested, completed_at=utcnow())
     try:

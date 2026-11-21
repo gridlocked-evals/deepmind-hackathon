@@ -50,7 +50,7 @@ CURB = [[0.56, 0.62], [0.94, 0.62], [0.97, 0.97], [0.61, 0.97]]
 
 def carbon_ok(**changes) -> dict:
     out = {
-        "status": "compiled", "reason": None,
+        "status": "compiled", "reason": "Curb lane becomes a planter-protected bike lane.",
         "operations": [
             {"op": "modify", "target": "parking_lane", "becomes": "bike_lane", "points": CURB,
              "anchorIds": ["anc_fixture-curb"], "evidenceObservationIds": ["ob_fixture-van"],

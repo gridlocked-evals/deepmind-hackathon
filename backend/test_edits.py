@@ -1,4 +1,5 @@
 import asyncio
+import json
 
 import pytest
 
@@ -45,6 +46,8 @@ def test_compiled_edit_has_real_carbon_trace_and_stage_artifacts(tmp_path):
     assert EditBundle.model_validate(store.get("edits", edit.id)) == bundle
     sent = provider.requests[0][1]
     assert sent["response_format"]["mime_type"] == "application/json"
+    schema = json.dumps(sent["response_format"]["schema"])
+    assert "maxLength" not in schema and "maxItems" not in schema and '"description"' in schema  # property kept
     assert "anc_fixture-curb" in sent["input"][0]["text"] and sent["input"][1]["type"] == "image"
     # Hydrogen observations are not rewritten by the edit.
     assert batch().anchors[0].semanticClass == "parking_lane"
