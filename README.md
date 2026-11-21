@@ -8,6 +8,27 @@ Interactive NYC city map with the full public DOT camera directory across all fi
 
 Quick start after installing dependencies: run `npm run dev:api` and `npm run dev` in separate terminals. No model credentials are needed.
 
+## Built at the hackathon (Nov 21, 2026)
+
+The event rules say the demo may show only work built during the hackathon. This list is that boundary, taken from the merged PRs.
+
+**Built during the event**
+
+| Piece | Code | PRs |
+|---|---|---|
+| Model gateway, usage ledger, budgets, capability checks | `backend/gateway/` | #25, #39, #40 |
+| Genie session runtime, streaming, frame recording, explicit stop | `backend/worlds/` | #26, #40, #53 |
+| Bounded camera capture with immutable episode manifests | `backend/capture.py`, `backend/capture_api.py` | #35, #36, #49 |
+| Hydrogen street-evidence extraction | `backend/observation*.py` | #58 |
+| Carbon street edits, Nano Banana references, Decisions gate, gate → Genie binding | `backend/edits.py`, `references.py`, `gates.py` | #35, #52, #55 |
+| Evaluation core: temporal judge, locked eval set, breakpoints, Carbon repair, adversary scoring | `backend/evaluation/` | #27, #43, #44, #54 |
+| Citywide camera directory and street-route playback | `src/` | #34 |
+| Shared Element 119 contracts | `docs/CONTRACTS.md`, `contracts/` | #35 |
+
+**To confirm (@Paradox560):** the starting React/Vite shell, the Vestry traffic scene, the 3D vehicle rendering and the camera/HLS proxy were all committed at once at the start of the event. If any of them were written before the event, they are reused work: list them here as reused and keep them out of the demo.
+
+**Not ours:** Gemini 4, Decisions API, Nano Banana and Genie models (Google); NYC DOT and 511NY camera feeds and map data (see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)).
+
 ---
 
 # DeepMind Hackathon: Gemini 4 NYC Hackathon Research
