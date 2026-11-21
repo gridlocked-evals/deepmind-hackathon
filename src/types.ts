@@ -43,6 +43,7 @@ export interface ActorState {
   heading: number;
   speed: number;
   braking: boolean;
+  disabled?: boolean;
 }
 export interface SimulationFrame {
   time: number;
@@ -60,7 +61,7 @@ export interface ScenarioBundle {
   duration: number;
   playbackMode?: 'loop' | 'once';
   geometryKind?: 'authored' | 'street-route';
-  motionSource?: 'authored' | 'street-preview' | 'driving-route' | 'location-preview';
+  motionSource?: 'authored' | 'street-preview' | 'driving-route' | 'location-preview' | 'event-replay';
   geometry: {
     roads: Vec2[][];
     sidewalks: Vec2[][];

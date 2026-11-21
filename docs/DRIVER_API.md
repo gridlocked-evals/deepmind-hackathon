@@ -186,9 +186,12 @@ schema versions rather than interpreting their pause-and-sprint timing as contin
 The export carries no credentials or provider data beyond the model ID, request ID
 and decision.
 
-The trace lives only in browser memory. **Return to replay**, starting a new
-drive, changing scenario or route, and reloading the page all discard it. To
-keep it, download it before doing any of these.
+The compact download refers to the latest run and clears when returning to
+replay or changing scene. Scenario Lab also retains the last four completed or
+interrupted runs in this tab, including this action trace under `driverTrace`
+in its extended export. Download before reloading the page. The extended
+[scenario export](SCENARIO_INJECTION.md#trace-comparison-and-replay) includes
+event state and recorded frames for playback; the compact format alone does not.
 
 ## Local setup and provenance
 
@@ -201,6 +204,10 @@ The endpoint uses `Service.DECISIONS`, `stage="simulator_driver"`, the existing 
 choice support, and `CallContext(purpose="development")`. Its episode ID
 is `sim-driver:<run_id>` and prompt ID is `sim-driver-decisions-v2:step-<step>`. It does not
 forge source/capture IDs or consume the protected demo reserve as camera evidence.
+The Decisions choice response contains no generated text or thinking tokens.
+Historical Hydrogen scenario checks and their low-thinking policy are recorded
+in [scenario verification](SCENARIO_VERIFICATION.md); they do not describe the
+current Decisions driver.
 Keep the development server on loopback; this endpoint follows the local pipeline
 API's unauthenticated setup and is not a public multi-user service.
 

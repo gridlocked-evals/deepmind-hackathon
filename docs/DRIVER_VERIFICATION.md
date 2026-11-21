@@ -35,6 +35,26 @@ even when transport cancellation was disabled. A stalled request stopped at abou
 three seconds with a visible error and an error trace. Both viewports had no
 uncaught browser errors. These browser checks used fixtures, not live model calls.
 
+### Integration with crash scenarios
+
+Before opening the PR, current main `5da39ee` added Scenario Lab. Its event
+injection, fixed 0.1-second physics ticks, baseline comparison, recorded frames,
+and replay remain connected to the continuous driver. Manual events requested
+during inference are applied before the next observation snapshot. Extended
+traces now use `gridlocked-driver-trace.v2` with Decisions policy metadata and
+`appliedSimulationTime`; historical extended v1 recordings still import for replay.
+Late responses cannot mutate finalized traces. The integrated frontend suite
+passes 119 tests; the full backend suite passes 523 tests. Contract checks and
+the production build pass. Replay coverage includes a 60-second, 601-frame run.
+
+The merged build passed the desktop/mobile browser fixtures again. A manual event
+queued at 1.0 seconds during a pending request applied once at the next snapshot,
+2.0 seconds. The next model observation included the obstacle; its delayed brake
+response applied at 2.6 seconds. Finalized extended exports were unchanged after
+a late response. Scenario v2 export, replay and re-import made no new provider
+calls, and model controls were disabled during replay. Both viewports had no
+uncaught browser errors; the continuous-motion, Stop and expiry checks also passed.
+
 ## Historical Hydrogen run
 
 The browser called the existing Hydrogen gateway through `POST /api/driver/decision`. The server used its existing backend-only credential and durable usage ledger. No mock decision or substitute replay was used for the controlled ego.

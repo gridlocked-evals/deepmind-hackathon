@@ -9,6 +9,7 @@ import { EvidencePanel } from './evidence/EvidencePanel';
 import { useGeminiDriver } from './agent/useGeminiDriver';
 import { DriverPanel } from './agent/DriverPanel';
 import { MAX_DRIVER_STEPS, MAX_DRIVE_SECONDS } from './agent/types';
+import { preset, withEventActors } from './scenarios/events';
 import NavigationPanel, { cameraLocation } from './components/NavigationPanel';
 import { fetchStreetRoute } from './navigation/routing';
 import { createIntersectionScenario, createRouteScenario } from './navigation/routeScenario';
@@ -38,6 +39,8 @@ export default function App() {
   const [cameraPage, setCameraPage] = useState(0);
   const [railTab, setRailTab] = useState<'cameras' | 'route' | 'driver'>('cameras');
   const [scenario, setScenario] = useState<ScenarioBundle>(demoScenario);
+  const [scenarioPlan, setScenarioPlan] = useState(() => preset());
+  const renderedScenario = useMemo(() => scenario.motionSource === 'event-replay' ? scenario : withEventActors(scenario, scenarioPlan), [scenario, scenarioPlan]);
   const [pickedLocation, setPickedLocation] = useState<NavigationPoint | null>(null);
   const [navigationStart, setNavigationStart] = useState<NavigationPoint | null>(null);
   const [navigationEnd, setNavigationEnd] = useState<NavigationPoint | null>(null);
@@ -62,8 +65,8 @@ export default function App() {
   const [mapReady, setMapReady] = useState(false);
   const [mapError, setMapError] = useState('');
   const [viewport, setViewport] = useState<MapViewport>({ width: window.innerWidth, height: window.innerHeight, cameraPoint: null });
-  const playback = usePlayback(scenario);
-  const driver = useGeminiDriver(scenario);
+  const playback = usePlayback(renderedScenario);
+  const driver = useGeminiDriver(renderedScenario, scenarioPlan);
   const selectedCamera = cameras.find(c => c.id === selectedCameraId) ?? null;
   const optionsRef = useRef<RenderOptions>({ actorsVisible, routesVisible, selectedActorId });
   optionsRef.current = { actorsVisible, routesVisible, selectedActorId };
@@ -73,7 +76,7 @@ export default function App() {
   const runtime = useMemo(() => ({ frameRef: { get current() { return displayedFrame.current.current; } }, optionsRef }), []);
   const displayTime = driver.hasRun ? driver.time : playback.time;
   const timelineDuration = driver.hasRun ? MAX_DRIVE_SECONDS : scenario.duration;
-  const actor = scenario.actors.find(a => a.id === selectedActorId) ?? scenario.actors[0];
+  const actor = renderedScenario.actors.find(a => a.id === selectedActorId) ?? renderedScenario.actors[0];
   const actorState = runtime.frameRef.current.actors.find(a => a.id === actor.id);
   const filteredCameras = useMemo(() => cameras.filter(c => (sourceFilter === 'all' || c.kind === sourceFilter)
     && (boroughFilter === 'all' || c.borough === boroughFilter)
@@ -166,14 +169,14 @@ export default function App() {
     setViewMode(mode);
     if (window.innerWidth < 760) setSidebarOpen(false);
   }, [scenario]);
-  const startDriver = useCallback(() => {
+  const startDriver = useCallback((mode: 'baseline' | 'event' = 'event') => {
     playback.setPlaying(false);
     setSelectedActorId(scenario.actors.find(item => item.role === 'ego')!.id);
     setActorsVisible(true); setRoutesVisible(true); setFeedCollapsed(true);
     setPickedLocation(null); setPickingMode('inspect'); setRailTab('driver');
     setViewMode('follow'); setViewRevision(value => value + 1);
     if (window.innerWidth < 760) setSidebarOpen(false);
-    driver.start();
+    driver.start(mode);
   }, [driver.start, playback.setPlaying, scenario]);
   const returnToReplay = () => { driver.reset(); playback.seek(0); playback.setPlaying(false); };
   const exitFollow = useCallback(() => setViewMode(mode => mode === 'follow' ? 'intersection' : mode), []);
@@ -253,7 +256,7 @@ export default function App() {
   const cardTop = Math.max(150, Math.min((viewport.cameraPoint?.y ?? viewport.height * 0.4) - 100, viewport.height - 495));
 
   return <main ref={workspaceRef} className={`workspace ${sidebarOpen ? 'sidebar-is-open' : ''} ${feedsVisible ? 'feeds-are-visible' : ''}`}>
-    <CityMap scenario={scenario} focusLocation={focusLocation} focusRevision={focusRevision} navigationStart={trafficDemoActive ? null : navigationStart} navigationEnd={trafficDemoActive ? null : navigationEnd} plannedRoute={trafficDemoActive ? null : plannedRoute} pickingMode={pickingMode} onLocationSelect={selectLocation} runtime={runtime} viewMode={viewMode} viewRevision={viewRevision} selectedCamera={selectedCamera} cameras={railTab === 'cameras' ? filteredCameras : cameras} sidebarOpen={sidebarOpen} feedsVisible={feedsVisible && docked && !feedCollapsed} onCameraSelect={chooseCamera} onActorSelect={setSelectedActorId} onFollowExit={exitFollow} onViewport={onViewport} onReady={onMapReady} onError={onMapError} />
+    <CityMap scenario={renderedScenario} focusLocation={focusLocation} focusRevision={focusRevision} navigationStart={trafficDemoActive ? null : navigationStart} navigationEnd={trafficDemoActive ? null : navigationEnd} plannedRoute={trafficDemoActive ? null : plannedRoute} pickingMode={pickingMode} onLocationSelect={selectLocation} runtime={runtime} viewMode={viewMode} viewRevision={viewRevision} selectedCamera={selectedCamera} cameras={railTab === 'cameras' ? filteredCameras : cameras} sidebarOpen={sidebarOpen} feedsVisible={feedsVisible && docked && !feedCollapsed} onCameraSelect={chooseCamera} onActorSelect={setSelectedActorId} onFollowExit={exitFollow} onViewport={onViewport} onReady={onMapReady} onError={onMapError} />
 
     <header className="topbar">
       <button className="icon-button sidebar-toggle" onClick={() => setSidebarOpen(v => !v)} aria-label={sidebarOpen ? 'Close workspace tools' : 'Open workspace tools'} title="Workspace tools"><Menu size={19} /></button>
@@ -275,10 +278,10 @@ export default function App() {
         <div className="camera-list" key={`${sourceFilter}-${boroughFilter}-${currentPage}`}>{visibleCameras.map(camera => <CameraRow key={camera.id} camera={camera} selected={camera.id === selectedCameraId} onSelect={() => chooseCamera(camera.id)} />)}{filteredCameras.length === 0 && <div className="empty-sources"><Camera size={25} /><p>{search ? 'No matching cameras.' : 'No cameras available in this filter.'}</p><span>{search ? 'Try another street or borough.' : sourceFilter === 'hls' ? 'No configured video feeds here. Try All or Images.' : registryStatus === 'connected' ? 'Try All or choose another borough.' : 'The DOT directory may be offline. Try All or Video.'}</span></div>}</div>
         {pageCount > 1 && <div className="camera-pagination"><button className="icon-button" disabled={currentPage === 0} onClick={() => setCameraPage(currentPage - 1)} aria-label="Previous camera page"><ChevronLeft size={17} /></button><span>{currentPage * 40 + 1}–{Math.min((currentPage + 1) * 40, filteredCameras.length)} of {filteredCameras.length}</span><button className="icon-button" disabled={currentPage === pageCount - 1} onClick={() => setCameraPage(currentPage + 1)} aria-label="Next camera page"><ChevronRight size={17} /></button></div>}
         <div className="rail-bottom"><div className="registry-note"><Radio size={13} /><span>{registryStatus === 'connected' ? 'Public camera directory connected' : registryStatus === 'loading' ? 'Loading NYC camera directory…' : registryStatus === 'stale' ? 'Directory partially available · saved cameras retained' : 'Directory offline · saved sources only'}</span></div><button className="explore-button" onClick={() => { setRailTab('route'); if (selectedCamera && !navigationStart) setEndpoint('start', cameraLocation(selectedCamera)); }}><Route size={16} />Plan a drive from here</button><div className="rail-credit">NYC DOT <span>·</span> 511NY / NYSDOT</div></div>
-      </> : railTab === 'driver' ? <DriverPanel driver={driver} onStart={startDriver} /> : <NavigationPanel start={navigationStart} end={navigationEnd} cameras={cameras} pickingMode={pickingMode} route={plannedRoute} status={routeStatus} error={routeError} onStart={point => setEndpoint('start', point)} onEnd={point => setEndpoint('destination', point)} onPick={mode => { driver.stop(); setPickingMode(pickingMode === mode ? 'inspect' : mode); setViewMode('city'); setPickedLocation(null); if (window.innerWidth < 760) setSidebarOpen(false); }} onPlan={() => void planRoute()} onRun={() => { if (plannedRoute && navigationStart) runScenario(createRouteScenario(plannedRoute, navigationStart, selectedCameraId)); }} onClear={() => { invalidateRoute(); setNavigationStart(null); setNavigationEnd(null); setPickingMode('inspect'); }} />}
+      </> : railTab === 'driver' ? <DriverPanel driver={driver} onStart={startDriver} plan={scenarioPlan} onPlanChange={setScenarioPlan} onReplay={runScenario} /> : <NavigationPanel start={navigationStart} end={navigationEnd} cameras={cameras} pickingMode={pickingMode} route={plannedRoute} status={routeStatus} error={routeError} onStart={point => setEndpoint('start', point)} onEnd={point => setEndpoint('destination', point)} onPick={mode => { driver.stop(); setPickingMode(pickingMode === mode ? 'inspect' : mode); setViewMode('city'); setPickedLocation(null); if (window.innerWidth < 760) setSidebarOpen(false); }} onPlan={() => void planRoute()} onRun={() => { if (plannedRoute && navigationStart) runScenario(createRouteScenario(plannedRoute, navigationStart, selectedCameraId)); }} onClear={() => { invalidateRoute(); setNavigationStart(null); setNavigationEnd(null); setPickingMode('inspect'); }} />}
     </aside></>}
 
-    <div className="scene-heading"><h2>{viewMode === 'city' ? 'New York, in motion.' : scenario.label}</h2><p>{viewMode === 'city' ? 'Find a camera. Choose a street. Take the wheel.' : driver.hasRun ? `Gemini at the wheel · ${driver.status === 'thinking' ? 'deciding the next move' : driver.status === 'driving' ? 'following the route' : driver.status}` : scenario.geometryKind === 'street-route' ? scenario.motionSource === 'location-preview' ? 'Location preview · choose a destination to drive' : scenario.motionSource === 'street-preview' ? 'Local preview · direction unverified' : 'Driving route · simulated vehicle motion' : `${demoScenario.actors.length} simulated vehicles · signals · 60-second loop`}</p>{viewMode === 'city' && <button className="text-action" onClick={() => { setRailTab('route'); setSidebarOpen(true); }}>Plan a route <ArrowUpRight size={15} /></button>}</div>
+    <div className="scene-heading"><h2>{viewMode === 'city' ? 'New York, in motion.' : scenario.label}</h2><p>{viewMode === 'city' ? 'Find a camera. Choose a street. Take the wheel.' : driver.hasRun ? `Gemini at the wheel · ${driver.status === 'thinking' ? 'deciding the next move' : driver.status === 'driving' ? 'following the route' : driver.status}` : scenario.motionSource === 'event-replay' ? 'Recorded synthetic run · playback only' : scenario.geometryKind === 'street-route' ? scenario.motionSource === 'location-preview' ? 'Location preview · choose a destination to drive' : scenario.motionSource === 'street-preview' ? 'Local preview · direction unverified' : 'Driving route · simulated vehicle motion' : `${demoScenario.actors.length} simulated vehicles · signals · 60-second loop`}</p>{viewMode === 'city' && <button className="text-action" onClick={() => { setRailTab('route'); setSidebarOpen(true); }}>Plan a route <ArrowUpRight size={15} /></button>}</div>
 
     {pickingMode !== 'inspect' && <div className="map-pick-instruction" role="status"><Crosshair size={17} /><span>Click a street or camera to set your {pickingMode === 'start' ? 'starting point' : 'destination'}.</span><button onClick={() => setPickingMode('inspect')} aria-label="Cancel map selection"><X size={16} /></button></div>}
     {pickedLocation && pickingMode === 'inspect' && <section className="location-card" aria-label="Selected location"><div className="location-card-title"><MapPin size={17} /><div><h3>{pickedLocation.label}</h3></div><button className="icon-button" onClick={() => setPickedLocation(null)} aria-label="Close selected location"><X size={16} /></button></div><div className="location-card-actions"><button className="explore-button" onClick={() => startHere(pickedLocation)}><Play size={14} />Start here</button><button onClick={() => { setEndpoint('start', pickedLocation); setSidebarOpen(true); setPickedLocation(null); }}>Set start</button><button onClick={() => { setEndpoint('destination', pickedLocation); setSidebarOpen(true); setPickedLocation(null); }}>Set destination</button></div><p>{pickedLocation.streetPath ? 'Local street preview. Plan a route for driving directions.' : 'Start a location preview, then choose a destination to drive.'}</p></section>}
@@ -295,7 +298,7 @@ export default function App() {
     <section className={`playback-bar ${driver.hasRun ? 'driver-playback' : ''}`} aria-label="Simulation playback controls">
       <div className="playback-identity"><span className="demo-tag">{driver.hasRun ? <Bot size={17} /> : scenario.id === demoScenario.id ? 'DEMO' : 'SIM'}</span><div><strong>{driver.hasRun ? 'Gemini at the wheel' : scenario.geometryKind === 'street-route' ? 'Selected street journey' : 'Vestry traffic demo'}</strong><span>{driver.hasRun ? `${driver.status === 'thinking' ? 'Waiting for a decision' : driver.status === 'driving' ? 'Driving the route' : driver.status} · ${driver.decisionLog.length}/${MAX_DRIVER_STEPS} decisions` : scenario.playbackMode === 'once' ? 'Stops at destination' : '25 vehicles · 60-second loop'}</span></div></div>
       <div className="transport-controls"><button className="icon-button reset-button" onClick={() => { if (driver.hasRun) returnToReplay(); else playback.seek(0); }} aria-label={driver.hasRun ? 'Return to replay' : 'Reset simulation'} title={driver.hasRun ? 'Return to replay' : 'Reset simulation'}><RotateCcw size={17} /></button>{driver.hasRun ? <button className="play-button" onClick={driver.stop} disabled={!driver.active} aria-label="Stop Gemini drive"><CircleStop size={19} /></button> : <button className="play-button" onClick={() => playback.setPlaying(v => !v)} aria-label={playback.playing ? 'Pause simulation' : 'Play simulation'}>{playback.playing ? <Pause size={17} fill="currentColor" /> : <Play size={17} fill="currentColor" />}</button>}{!driver.hasRun && <button className="playback-speed" onClick={() => playback.setSpeed(playback.speed === 0.5 ? 1 : playback.speed === 1 ? 2 : 0.5)} aria-label={`Playback speed ${playback.speed} times, click to change`}>{playback.speed.toFixed(1)}×</button>}</div>
-      <div className="timeline"><input type="range" min="0" max={timelineDuration} step="0.1" value={displayTime} disabled={driver.hasRun} onChange={event => playback.seek(Number(event.target.value))} aria-label="Simulation timeline" style={{ '--progress': `${displayTime / timelineDuration * 100}%` } as React.CSSProperties} /><div className="timeline-labels"><span>{formatTime(displayTime)}</span><span>{driver.hasRun ? 'MODEL CONTROL' : formatTime(scenario.duration)}</span></div></div>
+      <div className="timeline"><input type="range" min="0" max={timelineDuration} step="0.1" value={displayTime} disabled={driver.hasRun} onChange={event => playback.seek(Number(event.target.value))} aria-label="Simulation timeline" style={{ '--progress': `${displayTime / Math.max(.1, timelineDuration) * 100}%` } as React.CSSProperties} /><div className="timeline-labels"><span>{formatTime(displayTime)}</span><span>{driver.hasRun ? 'MODEL CONTROL' : formatTime(scenario.duration)}</span></div></div>
       {driver.hasRun ? <button className="timeline-view-button" onClick={() => { setRailTab('driver'); setSidebarOpen(true); }} aria-label="View Gemini decisions"><Bot size={18} /></button> : <button className="timeline-view-button" onClick={() => chooseView(viewMode === 'city' ? 'intersection' : 'city')} title={viewMode === 'city' ? 'Go to current simulation' : 'City overview'} aria-label={viewMode === 'city' ? 'Go to current simulation' : 'City overview'}>{viewMode === 'city' ? <Focus size={18} /> : <Globe2 size={18} />}</button>}
     </section>
 

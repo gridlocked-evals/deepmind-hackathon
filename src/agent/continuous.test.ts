@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { demoScenario } from '../scene/DemoScenarioProvider';
+import { createEvents, preset, requestEvent, withEventActors } from '../scenarios/events';
+import type { ScenarioPlan } from '../scenarios/events';
 import { runContinuousDriver } from './continuous';
 import type { DriverClock } from './continuous';
 import { createDriverSimulation } from './physics';
@@ -10,6 +12,7 @@ import type { DriverObservation, DriverResponse } from './types';
 async function flush() { for (let i = 0; i < 8; i++) await Promise.resolve(); }
 
 class Clock implements DriverClock {
+  constructor(private frameMilliseconds = 20) {}
   time = 0;
   id = 0;
   frames = new Map<number, (now: number) => void>();
@@ -24,7 +27,7 @@ class Clock implements DriverClock {
   async advance(milliseconds: number) {
     const until = this.time + milliseconds;
     while (this.time < until) {
-      this.time = Math.min(until, this.time + 20);
+      this.time = Math.min(until, this.time + this.frameMilliseconds);
       for (const [id, timer] of [...this.timers]) {
         if (timer.at <= this.time && this.timers.delete(id)) timer.callback();
       }
@@ -49,12 +52,13 @@ function response(step: number): DriverResponse {
     decision: { action: 'accelerate', target_speed_mps: 8, confidence: 0.9, reason: 'Proceed.' } };
 }
 
-function harness(state = initial(), responseDelay?: (step: number) => number) {
-  const clock = new Clock(), controller = new AbortController();
+function harness(state = initial(), responseDelay?: (step: number) => number, frameMilliseconds = 20) {
+  const clock = new Clock(frameMilliseconds), controller = new AbortController();
   const requests: { step: number; observation: DriverObservation; signal: AbortSignal; deliver: (value: DriverResponse) => void }[] = [];
   const decisions: { observation: DriverObservation; applied: DriverSimulation }[] = [];
   let current = state;
   const result = runContinuousDriver({ initial: state, signal: controller.signal, clock,
+    readState: () => current,
     requestDecision: (step, observation, signal) => new Promise(resolve => {
       requests.push({ step, observation, signal, deliver: resolve });
       if (responseDelay) clock.timeout(() => resolve(response(step)), responseDelay(step));
@@ -63,10 +67,46 @@ function harness(state = initial(), responseDelay?: (step: number) => number) {
     onFrame: (_, next) => { current = next; },
     onPublish: next => { current = next; },
   }).then(completion => ({ completion, error: null }), error => ({ completion: null, error }));
-  return { clock, controller, requests, decisions, result, state: () => current };
+  return { clock, controller, requests, decisions, result, state: () => current,
+    inject: (id: string) => { current = { ...current, events: requestEvent(current.events!, id, current.time) }; } };
+}
+
+function eventState(plan: ScenarioPlan) {
+  return { ...createDriverSimulation(withEventActors(initial().scenario, plan)), events: createEvents(plan, 'event') };
 }
 
 describe('continuous Decisions driver', () => {
+  it('keeps manual injections queued during inference and applies them before the next observation', async () => {
+    const plan = preset(); plan.events[0].trigger = { kind: 'manual' };
+    const run = harness(eventState(plan)); await flush();
+    run.requests[0].deliver(response(0)); await flush();
+    await run.clock.advance(1200);
+    expect(run.requests).toHaveLength(2);
+    run.inject('hazard-1');
+    await run.clock.advance(400);
+    expect(run.state().events!.pending['hazard-1']).toBe(1.2);
+    expect(run.state().events!.applied).toHaveLength(0);
+    run.requests[1].deliver(response(1)); await flush();
+    await run.clock.advance(400);
+    expect(run.requests).toHaveLength(3);
+    expect(run.requests[1].observation.lead_gap_m).toBeNull();
+    expect(run.requests[2].observation.lead_gap_m).toBeLessThan(35);
+    expect(run.state().events!.applied[0].appliedAt).toBe(2);
+    expect(run.state().events!.log.filter(row => row.kind === 'applied')).toHaveLength(1);
+    run.controller.abort(); await run.result;
+  });
+
+  it('keeps event application time and geometry deterministic across animation cadences', async () => {
+    const plan = preset(); plan.events[0].trigger = { kind: 'frame', frame: 7 };
+    const fast = harness(eventState(plan), () => 0, 10), slow = harness(eventState(plan), () => 0, 50);
+    await flush();
+    await fast.clock.advance(9000); await slow.clock.advance(9000);
+    expect(fast.state().events!.applied).toEqual(slow.state().events!.applied);
+    expect(fast.state().events!.applied[0].appliedFrame).toBe(7);
+    expect(fast.state().events!.applied[0].appliedAt).toBe(.7);
+    expect(fast.state().events!.log).toEqual(slow.state().events!.log);
+    fast.controller.abort(); slow.controller.abort(); await fast.result; await slow.result;
+  });
   it('keeps moving during the next request and applies its response at the current state', async () => {
     const run = harness(); await flush();
     await run.clock.advance(400);

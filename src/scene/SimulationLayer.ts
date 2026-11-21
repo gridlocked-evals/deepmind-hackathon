@@ -294,7 +294,7 @@ export function createSimulationLayer(scenario: ScenarioBundle, runtime: SceneRu
           if (state) partMatrix.copy(stateMatrix(state, definition)).multiply(part.matrix);
           else partMatrix.makeScale(0, 0, 0);
           mesh.setMatrixAt(index, partMatrix);
-          if (part.body) mesh.setColorAt(index, color.set(definition.id === options.selectedActorId ? '#78c6d8' : definition.color));
+          if (part.body) mesh.setColorAt(index, color.set(state?.disabled ? '#c64b32' : definition.id === options.selectedActorId ? '#78c6d8' : definition.color));
         });
         mesh.instanceMatrix.needsUpdate = true;
         if (part.body && mesh.instanceColor) mesh.instanceColor.needsUpdate = true;

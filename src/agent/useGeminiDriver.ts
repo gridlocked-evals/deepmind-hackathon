@@ -3,20 +3,24 @@ import { mediaUrl } from '../media/cameras';
 import type { ModelGatewayStatus } from '../models/types';
 import { sampleScenario } from '../scene/DemoScenarioProvider';
 import type { ScenarioBundle } from '../types';
-import { createDriverSimulation, driverEligibility, driverFrame } from './physics';
+import { createDriverSimulation, driverEligibility, driverFrame, validateEventRun } from './physics';
 import type { DriverSimulation } from './physics';
 import { DriverRunGate, validateDecisionResponse } from './session';
 import { runContinuousDriver } from './continuous';
 import { createTrace, DriverRequestError, finalizeHold, finishTrace, recordTick, startHold, traceError } from './trace';
 import type { DriverTrace, HoldRecorder, TraceTerminal } from './trace';
 import type { DecisionEntry, DriverAvailability, DriverStatus, GeminiDriver } from './types';
+import { createEvents, requestEvent } from '../scenarios/events';
+import type { ScenarioPlan } from '../scenarios/events';
+import { beginDecision, createTrace as createScenarioTrace, finishTrace as finishScenarioTrace, recordFrame } from '../scenarios/trace';
+import type { RunTrace, Terminal, TraceStep } from '../scenarios/trace';
 
 function initialSimulation(scenario: ScenarioBundle) {
   return driverEligibility(scenario) === null ? createDriverSimulation(scenario) : null;
 }
 
 /** Decisions update a continuously animated controller; gateway retry limits still apply. */
-export function useGeminiDriver(scenario: ScenarioBundle): GeminiDriver {
+export function useGeminiDriver(scenario: ScenarioBundle, plan: ScenarioPlan): GeminiDriver {
   const gate = useRef(new DriverRunGate());
   const simulation = useRef<DriverSimulation | null>(null);
   const frameRef = useRef(sampleScenario(scenario, 0));
@@ -32,10 +36,24 @@ export function useGeminiDriver(scenario: ScenarioBundle): GeminiDriver {
   const [error, setError] = useState<string | null>(null);
   const [completionReason, setCompletionReason] = useState<GeminiDriver['completionReason']>(null);
   const [availabilityAttempt, setAvailabilityAttempt] = useState(0);
+  const traceRef = useRef<RunTrace | null>(null);
+  const pendingDecision = useRef<{ entry: TraceStep; requestedAt: number } | null>(null);
+  const [traces, setTraces] = useState<RunTrace[]>([]);
+  const [, refreshEvents] = useState(0);
   const [modelAvailability, setModelAvailability] = useState<DriverAvailability>({ state: 'checking', modelId: null, reason: null });
 
   const publish = useCallback((state: DriverSimulation) => {
     setTime(state.time); setSpeedMps(state.speed); setRemainingM(Math.max(0, state.path.length - state.progress));
+  }, []);
+
+  const finish = useCallback((reason: Terminal, message: string | null = null) => {
+    const scenarioTrace = traceRef.current;
+    if (!scenarioTrace || scenarioTrace.terminal.reason !== 'running' || !simulation.current) return;
+    if (pendingDecision.current) pendingDecision.current.entry.wallLatencyMs = performance.now() - pendingDecision.current.requestedAt;
+    finishScenarioTrace(scenarioTrace, simulation.current, reason, message);
+    if (trace.current) scenarioTrace.driverTrace = structuredClone(trace.current);
+    const saved = structuredClone(scenarioTrace);
+    setTraces(items => [...items.filter(item => item.runId !== saved.runId).slice(-3), saved]);
   }, []);
 
   const halt = useCallback((terminal: TraceTerminal) => {
@@ -43,21 +61,26 @@ export function useGeminiDriver(scenario: ScenarioBundle): GeminiDriver {
     activeRef.current = false;
     gate.current.cancel();
     // Record the partial hold before the terminal state, so an export right after Stop already includes it.
-    if (wasActive) { finalizeCurrentHold.current?.(); finishTrace(trace.current, terminal); setStatus('stopped'); if (simulation.current) publish(simulation.current); }
-  }, [publish]);
+    if (wasActive) { finalizeCurrentHold.current?.(); finishTrace(trace.current, terminal); finish('interrupted'); setStatus('stopped'); if (simulation.current) publish(simulation.current); }
+  }, [publish, finish]);
   const stop = useCallback(() => halt({ state: 'stopped_by_user' }), [halt]);
 
   const reset = useCallback(() => {
     activeRef.current = false;
     gate.current.cancel();
+    finalizeCurrentHold.current?.();
     finalizeCurrentHold.current = null;
+    finishTrace(trace.current, { state: 'interrupted' });
+    finish('reset');
+    traceRef.current = null;
+    pendingDecision.current = null;
     trace.current = null;
     simulation.current = initialSimulation(scenario);
     frameRef.current = simulation.current ? driverFrame(simulation.current) : sampleScenario(scenario, 0);
     setTime(0); setSpeedMps(simulation.current?.speed ?? 0);
     setRemainingM(simulation.current ? simulation.current.path.length - simulation.current.progress : 0);
     setStatus('idle'); setHasRun(false); setError(null); setDecisionLog([]); setCompletionReason(null);
-  }, [scenario]);
+  }, [scenario, finish]);
 
   useLayoutEffect(() => {
     reset();
@@ -92,15 +115,26 @@ export function useGeminiDriver(scenario: ScenarioBundle): GeminiDriver {
     return () => { disposed = true; controller.abort(); window.clearTimeout(timeout); };
   }, [availabilityAttempt]);
 
-  const start = useCallback(() => {
+  const inject = useCallback((id: string) => {
+    if (!activeRef.current || !simulation.current?.events) return;
+    simulation.current = { ...simulation.current, events: requestEvent(simulation.current.events, id, simulation.current.time) };
+    if (traceRef.current) recordFrame(traceRef.current, simulation.current);
+    refreshEvents(value => value + 1);
+  }, []);
+
+  const start = useCallback((mode: 'baseline' | 'event' = 'event') => {
     if (activeRef.current || document.hidden || modelAvailability.state !== 'available' || driverEligibility(scenario)) return;
-    const initial = initialSimulation(scenario);
+    let initial = initialSimulation(scenario);
     if (!initial) return;
+    initial = { ...initial, events: createEvents(plan, mode) };
+    try { validateEventRun(initial); } catch (failure) { setError((failure as Error).message); setStatus('error'); return; }
     const lease = gate.current.begin(crypto.randomUUID());
     activeRef.current = true;
     simulation.current = initial;
     finalizeCurrentHold.current = null;
     const runTrace = trace.current = createTrace(lease.runId, initial);
+    const scenarioTrace = traceRef.current = createScenarioTrace(initial, lease.runId);
+    pendingDecision.current = null;
     frameRef.current = driverFrame(initial);
     publish(initial);
     setHasRun(true); setError(null); setDecisionLog([]); setCompletionReason(null); setStatus('thinking');
@@ -109,20 +143,44 @@ export function useGeminiDriver(scenario: ScenarioBundle): GeminiDriver {
     void runContinuousDriver({
       initial,
       signal: lease.controller.signal,
+      readState: () => simulation.current ?? initial,
+      onRequest: (step, observation, state) => {
+        if (!gate.current.isCurrent(lease)) return;
+        const entry = beginDecision(scenarioTrace, state, step, observation);
+        pendingDecision.current = { entry, requestedAt: performance.now() };
+      },
       requestDecision: async (step, observation, signal) => {
-        const response = await fetch(mediaUrl('/api/driver/decision'), {
-          method: 'POST', headers: { 'Content-Type': 'application/json' }, signal,
-          body: JSON.stringify({ run_id: lease.runId, step, observation }),
-        });
-        const payload: unknown = await response.json();
-        if (!response.ok) {
-          const detail = (payload as { detail?: { message?: unknown } })?.detail;
-          throw new DriverRequestError(typeof detail?.message === 'string' ? detail.message.slice(0, 280) : 'The model gateway could not return a driving decision.');
+        const pending = pendingDecision.current;
+        try {
+          const response = await fetch(mediaUrl('/api/driver/decision'), {
+            method: 'POST', headers: { 'Content-Type': 'application/json' }, signal,
+            body: JSON.stringify({ run_id: lease.runId, step, observation }),
+          });
+          const payload: unknown = await response.json();
+          if (!response.ok) {
+            const detail = (payload as { detail?: { message?: unknown; code?: unknown; request_id?: unknown } })?.detail;
+            if (pending && gate.current.isCurrent(lease) && !signal.aborted) pending.entry.failure = {
+              code: typeof detail?.code === 'string' && /^[a-z_]{1,40}$/.test(detail.code) ? detail.code : 'request_failed',
+              requestId: typeof detail?.request_id === 'string' && /^[0-9a-f-]{36}$/i.test(detail.request_id) ? detail.request_id : null,
+            };
+            throw new DriverRequestError(typeof detail?.message === 'string' ? detail.message.slice(0, 280) : 'The model gateway could not return a driving decision.');
+          }
+          return validateDecisionResponse(payload, lease.runId, step);
+        } finally {
+          if (pending && gate.current.isCurrent(lease) && !signal.aborted && scenarioTrace.terminal.reason === 'running') {
+            pending.entry.wallLatencyMs = performance.now() - pending.requestedAt;
+          }
         }
-        return validateDecisionResponse(payload, lease.runId, step);
       },
       onDecision: (response, observation, state) => {
         if (!gate.current.isCurrent(lease)) return;
+        const pending = pendingDecision.current;
+        if (pending?.entry.step === response.step) {
+          pending.entry.response = response;
+          pending.entry.appliedSimulationTime = state.time;
+          pending.entry.wallLatencyMs = performance.now() - pending.requestedAt;
+          pendingDecision.current = null;
+        }
         // Pending inference belongs to the previous command. Replacement starts a new applied interval.
         finalizeCurrentHold.current?.();
         const applied = hold = startHold(state);
@@ -137,6 +195,7 @@ export function useGeminiDriver(scenario: ScenarioBundle): GeminiDriver {
         if (!gate.current.isCurrent(lease)) return;
         simulation.current = state;
         if (hold) recordTick(hold, before, state);
+        recordFrame(scenarioTrace, state);
         frameRef.current = driverFrame(state);
       },
       onPublish: state => { if (gate.current.isCurrent(lease)) publish(state); },
@@ -145,6 +204,7 @@ export function useGeminiDriver(scenario: ScenarioBundle): GeminiDriver {
       finalizeCurrentHold.current?.();
       finalizeCurrentHold.current = null;
       finishTrace(runTrace, { state: reason === 'route-complete' ? 'route_complete' : reason === 'time-limit' ? 'time_limit' : 'decision_limit' });
+      finish(reason);
       setCompletionReason(reason);
       setStatus('complete');
       activeRef.current = false;
@@ -156,17 +216,19 @@ export function useGeminiDriver(scenario: ScenarioBundle): GeminiDriver {
       activeRef.current = false;
       const message = traceError(failure);
       finishTrace(runTrace, { state: 'error', error: message });
+      finish('error', message);
       setError(message);
       setStatus('error');
       gate.current.cancel();
     });
-  }, [modelAvailability.state, publish, scenario]);
+  }, [modelAvailability.state, publish, scenario, plan, finish]);
 
   const unavailableReason = driverEligibility(scenario);
   const active = status === 'thinking' || status === 'driving';
   return { frameRef, time, status, active, hasRun, speedMps, remainingM, decisionLog, error, modelAvailability,
     canStart: !active && modelAvailability.state === 'available' && !unavailableReason,
-    unavailableReason, completionReason, start, stop, reset,
+    unavailableReason, completionReason, start, stop, reset, inject, traces, trace: traceRef.current ?? traces.at(-1) ?? null,
+    replaying: scenario.motionSource === 'event-replay',
     exportTrace: () => trace.current?.terminal ? trace.current : null,
     refreshAvailability: () => setAvailabilityAttempt(value => value + 1) };
 }
