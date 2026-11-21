@@ -6,7 +6,7 @@ HERE=$(cd "$(dirname "$0")" && pwd); W=${COSMOS3_ROOT:-$PWD/cosmos3-spike}; PY=$
 exec > $R/pipeline.log 2>&1
 echo "RUN_DIR $R"; T0=$(date +%s.%N)
 nvidia-smi --query-gpu=index,memory.used,memory.total,utilization.gpu --format=csv > $R/gpu_before.csv
-bash $HERE/serve.sh $GPU $PORT
+bash $HERE/serve.sh $GPU $PORT || { echo SERVE_FAILED; exit 1; }
 SPID=$(cat $L/serve_gpu$GPU.pid); echo "SERVER_PID $SPID"
 # wait up to 60 min for ready
 for i in $(seq 1 ${COSMOS3_READY_TIMEOUT_S:-3600}); do
