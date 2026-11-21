@@ -1,4 +1,4 @@
-"""Public camera API for the Gotham Forge interface.
+"""Public camera API for the Gridlocked interface.
 
 Run: python -m uvicorn backend.main:app --host 127.0.0.1 --port 8000
 """
@@ -23,6 +23,7 @@ from .config import load_environment
 from .feeds import HLS_SOURCES, REGISTRY_URL, public_cameras, utc_now
 from .proxy import proxy_media, resolve_token
 from .gateway import GatewayConfig, ModelGateway
+from .driver import DriverController, router as driver_router
 from .worlds.api import router as world_router
 from .worlds.runtime import WorldManager
 
@@ -38,7 +39,7 @@ async def lifespan(app: FastAPI):
     async with httpx.AsyncClient(
         timeout=httpx.Timeout(10, connect=5, pool=3), follow_redirects=False,
         limits=httpx.Limits(max_connections=12, max_keepalive_connections=8),
-        headers={"User-Agent": "GothamForge/0.1 public-camera-viewer"},
+        headers={"User-Agent": "Gridlocked/0.1 public-camera-viewer"},
     ) as client:
         app.state.http = client
         app.state.captures = make_store()
@@ -50,6 +51,7 @@ async def lifespan(app: FastAPI):
             async with httpx.AsyncClient(follow_redirects=False,
                 limits=httpx.Limits(max_connections=config.max_concurrency + 1)) as model_http:
                 app.state.models = ModelGateway(config, model_http)
+                app.state.driver = DriverController(app.state.models)
                 app.state.worlds = WorldManager(app.state.models, gates=app.state.artifacts)
                 recovery = asyncio.create_task(app.state.worlds.watch_abandoned())
                 try:
@@ -62,13 +64,14 @@ async def lifespan(app: FastAPI):
             await app.state.recorders.stop_all()
 
 
-app = FastAPI(title="Gotham Forge", version="0.1.0", lifespan=lifespan)
+app = FastAPI(title="Gridlocked", version="0.1.0", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware, allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
     allow_methods=["GET", "POST", "DELETE"], allow_headers=["Range", "Authorization", "Content-Type"],
     expose_headers=["Content-Range", "Accept-Ranges", "Content-Length"],
 )
 app.include_router(world_router)
+app.include_router(driver_router)
 app.include_router(observation_router)
 
 

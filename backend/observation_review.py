@@ -75,44 +75,55 @@ def score_review(store: ArtifactStore, report: dict, review: ManualReview) -> di
             raise ArtifactError('Annotation time or event is not supported by the cited original frames.', status=422)
         if not (report['time']['startS'] <= expected.time.startS <= expected.time.endS <= report['time']['endS']):
             raise ArtifactError('Annotation lies outside the reviewed prefix interval.', status=422)
-        candidates = [r for r in report['facts'] if r['kind']==expected.kind
-                      and r['semanticClass']==expected.semanticClass and intersects(r['time'], expected.time.model_dump())
-                      and iou(r['region'], expected.region.model_dump()) > 0]
-        best = max(candidates, key=lambda r: iou(r['region'], expected.region.model_dump()), default=None)
-        outcome = 'human_unknown' if expected.present == 'unknown' else 'missed'
+        region = expected.region.model_dump()
+        candidates = [r for r in report['facts'] if r['kind'] == expected.kind
+                      and r['semanticClass'] == expected.semanticClass
+                      and intersects(r['time'], expected.time.model_dump())
+                      and iou(r['region'], region) > 0]
+        accepted = [r for r in candidates if r['disposition'] == 'accepted']
+        # An absence annotation must consider every matching accepted claim;
+        # a closer abstention cannot conceal false positives.
+        matches = accepted if expected.present == 'no' and accepted else candidates
+        best = max(matches, key=lambda r: iou(r['region'], region), default=None)
+        fact_ids = [r['id'] for r in accepted] if expected.present == 'no' and accepted else ([best['id']] if best else [])
         processed = [window for window in report['windows'] if window['status'] in {'ok', 'abstained'}
             and window['startS'] <= expected.time.startS <= expected.time.endS <= window['endS']
             and set(expected.frameIds) <= set(window['frameIds'])]
+        presence = 'human_unknown' if expected.present == 'unknown' else 'missed'
         if expected.present != 'unknown' and not processed:
-            outcome = 'model_failed_or_unprocessed'
+            presence = 'model_failed_or_unprocessed'
         elif expected.present == 'no':
-            accepted = [row for row in candidates if row['disposition'] == 'accepted']
-            best = max(accepted, key=lambda row: iou(row['region'], expected.region.model_dump()), default=best)
             if best and best['disposition'] != 'accepted':
-                outcome = 'model_abstained'
+                presence = 'model_abstained'
             elif best and expected.kind == 'count':
-                if iou(best['region'], expected.region.model_dump()) < .95:
-                    outcome = 'count_region_mismatch_unscored'
+                if iou(best['region'], region) < .95:
+                    presence = 'count_region_mismatch_unscored'
                 elif best['count']['lower'] == 0:
-                    outcome = 'correct_absence' if best['count']['upper'] == 0 else 'model_abstained'
+                    presence = 'correct_absence' if best['count']['upper'] == 0 else 'model_abstained'
                 else:
-                    outcome = 'false_positive'
+                    presence = 'false_positive'
             elif best:
-                outcome = 'false_positive'
+                presence = 'false_positive'
             else:
-                outcome = 'correct_absence' if any(window['status'] == 'ok' for window in processed) else 'model_abstained'
-        elif expected.present == 'yes' and expected.kind == 'count' and expected.count.lower is None:
+                presence = 'correct_absence'
+        elif expected.present == 'yes' and best:
+            if best['disposition'] != 'accepted':
+                presence = 'model_abstained'
+            elif iou(best['region'], region) < .5:
+                presence = 'region_error'
+            else:
+                presence = 'matched'
+        outcome = presence
+        if expected.present == 'yes' and expected.kind == 'count' and expected.count.lower is None:
+            # Presence alone supplies no ground truth for the quantity. Keep its
+            # separate result without counting an unspecified count as a match.
             outcome = 'human_unknown'
         elif expected.present == 'yes' and expected.kind == 'signal' and expected.state in {None, 'unknown'}:
             outcome = 'human_unknown'
-        elif expected.present == 'yes' and best:
-            if best['disposition'] != 'accepted':
-                outcome = 'model_abstained'
-            elif iou(best['region'], expected.region.model_dump()) < .5:
-                outcome = 'region_error'
-            elif expected.kind == 'count' and expected.count.lower is not None:
+        elif presence == 'matched':
+            if expected.kind == 'count':
                 got = best['count']
-                if iou(best['region'], expected.region.model_dump()) < .95:
+                if iou(best['region'], region) < .95:
                     outcome = 'count_region_mismatch_unscored'
                 elif got['lower'] is None:
                     outcome = 'model_abstained'
@@ -123,16 +134,15 @@ def score_review(store: ArtifactStore, report: dict, review: ManualReview) -> di
                     outcome = 'count_interval_overlap'
             elif expected.state is not None and expected.state != best['state']:
                 outcome = 'state_error'
-            else:
-                outcome = 'matched'
         comparisons.append({'expected': expected.model_dump(), 'factId': best['id'] if best else None,
-                            'outcome': outcome, 'regionIoU': iou(best['region'], expected.region.model_dump()) if best else None})
+                            'factIds': fact_ids, 'outcome': outcome, 'presenceOutcome': presence,
+                            'regionIoU': iou(best['region'], region) if best else None})
     result = {'id': new_id('review'), 'createdAt': utcnow().isoformat(),
               'schemaVersion': 'street-evidence-review.v1', 'annotation': review.model_dump(mode='json'), 'comparisons': comparisons,
               'extractionMetrics': report['metrics'], 'unmatchedAcceptedFacts': [r['id'] for r in report['facts']
-                  if r['disposition']=='accepted' and not any(c['factId']==r['id'] for c in comparisons)],
-              'counts': {name: sum(c['outcome']==name for c in comparisons) for name in sorted({c['outcome'] for c in comparisons})},
-              'notice': 'Unannotated facts are unreviewed, not automatically false positives. Interval overlap is not exact count accuracy.'}
+                  if r['disposition'] == 'accepted' and not any(r['id'] in c['factIds'] for c in comparisons)],
+              'counts': {name: sum(c['outcome'] == name for c in comparisons) for name in sorted({c['outcome'] for c in comparisons})},
+              'notice': 'Unannotated facts are unreviewed, not automatically false positives. Interval overlap is not exact count accuracy. Presence matches do not score counts without human bounds.'}
     unscored = {'human_unknown', 'count_region_mismatch_unscored', 'model_failed_or_unprocessed'}
     result['coverage'] = {'annotations': len(comparisons),
         'scoredComparisons': sum(item['outcome'] not in unscored for item in comparisons),
@@ -213,7 +223,7 @@ def main(argv=None) -> int:
                 with (args.export_dir / name).open('x', encoding='utf-8') as handle:
                     handle.write(content)
             print(json.dumps({'extractionId': report['id'], 'extractionSha256': sha256(canonical(report)),
-                              'status': 'pending_human_annotations', 'exportDirectory': str(args.export_dir)}))
+                              'status': 'optional_not_reviewed', 'exportDirectory': str(args.export_dir)}))
         return 0
     except (ArtifactError, OSError, ValueError, ValidationError) as exc:
         print(json.dumps({'error': str(exc) if isinstance(exc, ArtifactError) else 'Invalid review input or inaccessible review files.'}))

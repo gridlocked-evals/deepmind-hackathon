@@ -72,7 +72,7 @@ def test_snapshot_has_real_gateway_trace_exact_pixels_and_reviewable_provenance(
     captures, store, manifest = setup(tmp_path)
     provider = Provider()
     report = asyncio.run(perform(tmp_path,captures,store,manifest,provider))
-    assert report['status']=='completed' and report['manualReview']=='pending_human_annotations'
+    assert report['status']=='completed' and report['manualReview']=='optional_not_reviewed'
     row = report['facts'][0]
     evidence = row['evidence'][0]
     assert evidence['captureId']==manifest['id'] and evidence['sourceId']=='dot-test'
@@ -231,8 +231,8 @@ def test_video_indexes_exact_frames_and_never_reads_suffix_into_model(tmp_path,v
 def test_event_ownership_and_uncertainty_do_not_double_count():
     from backend.observation_contracts import HydrogenOutput
     manifest={'id':'cap_test-0001','cameraId':'camera-test','files':{'prefix':{'sha256':'sha256:'+'a'*64}}}
-    frames=[{'id':f'frame_test-000{i}','frameIndex':i,'mediaTimeS':t,'frameSha256':'sha256:'+'b'*64} for i,t in enumerate([4.,5.,6.,7.])]
-    images=[{'sha256':'sha256:'+'b'*64,'roi':{'kind':'box','x':0,'y':0,'w':1,'h':1}}]*4
+    frames=[{'id':f'frame_test-000{i}','frameIndex':i,'mediaTimeS':t,'frameSha256':f'sha256:{i:064x}'} for i,t in enumerate([4.,5.,6.,7.])]
+    images=[{'sha256':f['frameSha256'],'roi':{'kind':'box','x':0,'y':0,'w':1,'h':1}} for f in frames]
     meta={'frames':frames}
     def output(start,end,indices):
         return HydrogenOutput(captureId=manifest['id'],sourceId=manifest['cameraId'],prefixSha256=manifest['files']['prefix']['sha256'],
@@ -261,6 +261,34 @@ def test_reinspection_marks_parent_event_duplicate_instead_of_counting_again(tmp
     child=asyncio.run(perform(tmp_path,captures,store,manifest,provider,parent=parent,reinspection=ask,end=3))
     assert child['metrics']['duplicates']==1 and child['metrics']['acceptedFacts']==0
     assert child['facts'][0]['duplicateOf'] in {row['id'] for row in parent['facts']}
+
+
+@pytest.mark.parametrize('indices, repeated_crop, accepted', [
+    ([0, 1], False, False), ([0, 2], False, True), ([0], False, False), ([0, 2], True, False)])
+def test_events_require_distinct_pixels_in_the_frames_they_cite(indices, repeated_crop, accepted):
+    from backend.observation_contracts import HydrogenOutput
+    manifest = {'id':'cap_test-0001', 'cameraId':'camera-test',
+                'files':{'prefix':{'sha256':'sha256:'+'a'*64}}}
+    frames = [{'id':f'frame_test-000{i}', 'frameIndex':i, 'mediaTimeS':float(i),
+               'frameSha256':'sha256:'+digest*64} for i, digest in enumerate(['b', 'b', 'c'])]
+    images = [{'sha256':frame['frameSha256'], 'roi':{'kind':'box', 'x':0, 'y':0, 'w':1, 'h':1}}
+              for frame in frames]
+    if repeated_crop:
+        images = [{'sha256':'sha256:'+'d'*64, 'roi':{'kind':'box', 'x':.2, 'y':.2, 'w':.3, 'h':.3}}
+                  for _ in frames]
+    # Motion elsewhere in a window cannot support an event whose own evidence
+    # consists of one image or repeated copies of that image.
+    motion = len({frame['frameSha256'] for frame in frames}) >= 2
+    output = HydrogenOutput(captureId=manifest['id'], sourceId=manifest['cameraId'],
+        prefixSha256=manifest['files']['prefix']['sha256'], facts=[fact({'frames':frames},
+            kind='event', state='crossing', provenance='derived', semanticClass='pedestrian',
+            time={'startS':float(min(indices)), 'endS':float(max(indices))}, frameIndices=indices)])
+    if accepted:
+        rows = accept_facts(output, manifest, windows(0, 3)[0], frames, images, motion, [])
+        assert rows[0]['disposition'] == 'accepted'
+    else:
+        with pytest.raises(ValueError, match='Temporal claims require distinct continuous-media observations'):
+            accept_facts(output, manifest, windows(0, 3)[0], frames, images, motion, [])
 
 
 def test_manual_review_reports_errors_and_does_not_hide_model_abstention(tmp_path):
@@ -298,7 +326,7 @@ def test_api_requires_operator_auth_and_keeps_original_pixels_next_to_facts(tmp_
         frame=report['windows'][0]['frameIds'][0]
         assert client.get(path+'/frames/'+frame,headers=auth).content==png(size=(200,100))
         assert client.get(path+'/failure-report',headers=auth).json()['humanAccuracy'] is None
-        assert client.get(path+'/reviews',headers=auth).json()['status']=='pending_human_annotations'
+        assert client.get(path+'/reviews',headers=auth).json()['status']=='optional_not_reviewed'
         body=manual_review(report).model_dump(mode='json')
         assert client.post(path+'/annotations',json=body).status_code==401
         submitted=client.post(path+'/annotations',json=body,headers=auth)
@@ -320,13 +348,21 @@ def test_cancellation_retains_trace_failure_and_pinned_originals(tmp_path):
                 rates_valid_through=date(2030,1,1)),http,api_key='test-observation-key')
             task=asyncio.create_task(extract(gateway,store,captures,ExtractRequest(captureId=manifest['id'],cameraId=manifest['cameraId'])))
             await asyncio.wait_for(started.wait(),2)
-            task.cancel()
-            with pytest.raises(asyncio.CancelledError):
+            task.cancel('private cancellation detail')
+            with pytest.raises(asyncio.CancelledError) as cancelled:
                 await task
+            assert cancelled.value.args == ('private cancellation detail',)
             report=store.list('extractions')[0]
             assert report['status']=='cancelled' and report['metrics']['failures']==1
-            assert report['windows'][0]['gatewayRequestId']
-            assert report['windows'][0]['modelCall']['requestId'].startswith('gateway:')
+            request_id = cancelled.value.request_id
+            attempt = report['windows'][0]
+            assert attempt['gatewayRequestId'] == request_id
+            assert attempt['modelCall']['requestId'] == f'gateway:{request_id}'
+            ledger = gateway.ledger.get(request_id)
+            assert ledger['outcome'] == 'cancelled' and ledger['usage'] is None
+            assert 'sha256:' + ledger['input_hash'] in attempt['modelCall']['inputHashes']
+            assert all(attempt['modelCall'][field] is None for field in ('inputTokens', 'outputTokens', 'costUsd'))
+            assert 'private cancellation detail' not in json.dumps(report)
             assert report['id'] in captures.pins(manifest['id'])
     asyncio.run(run())
 
@@ -457,4 +493,116 @@ def test_invalid_domain_output_and_abstention_never_qualify_but_success_does(tmp
             context=json.loads(gateway.ledger.attempts()[0]['context'])
             assert context['episode_id']==manifest['id'] and context['source_id']==manifest['cameraId']
             assert context['attempt_id']==accepted['windows'][0]['attemptId']
+    asyncio.run(run())
+
+
+
+
+@pytest.mark.parametrize('abstention_first', [False, True])
+def test_negative_review_checks_all_accepted_candidates_before_abstentions(tmp_path, abstention_first):
+    captures,store,manifest=setup(tmp_path)
+    def rows(meta):
+        accepted=[fact(meta,kind='signal',semanticClass='signal',state='red',region={**BOX,'w':.25}),
+                  fact(meta,kind='signal',semanticClass='signal',state='green',region={**BOX,'w':.2})]
+        abstention=fact(meta,kind='signal',semanticClass='signal',visibility='unobservable')
+        return [abstention,*accepted] if abstention_first else [*accepted,abstention]
+    report=asyncio.run(perform(tmp_path,captures,store,manifest,Provider([rows])))
+    review=ManualReview(**{**annotation_template(report),'reviewer':'synthetic-regression-fixture','reviewedOriginalPixels':True,'annotations':[
+        {'kind':'signal','semanticClass':'signal','time':{'startS':0,'endS':0},'region':BOX,'frameIds':report['windows'][0]['frameIds'],'present':'no'}]})
+    result=score_review(store,report,review)
+    comparison=result['comparisons'][0]
+    accepted_ids={row['id'] for row in report['facts'] if row['disposition']=='accepted'}
+    assert comparison['outcome']=='false_positive'
+    assert comparison['factId'] in accepted_ids and set(comparison['factIds'])==accepted_ids
+    assert result['unmatchedAcceptedFacts']==[]
+
+
+@pytest.mark.parametrize('abstained,expected', [(True,'model_abstained'),(False,'correct_absence')])
+def test_negative_review_keeps_abstention_distinct_from_absence(tmp_path, abstained, expected):
+    captures,store,manifest=setup(tmp_path)
+    provider=Provider([lambda meta:[fact(meta,kind='signal',semanticClass='signal',visibility='unobservable')]
+                       if abstained else []])
+    report=asyncio.run(perform(tmp_path,captures,store,manifest,provider))
+    review=ManualReview(**{**annotation_template(report),'reviewer':'synthetic-regression-fixture','reviewedOriginalPixels':True,'annotations':[
+        {'kind':'signal','semanticClass':'signal','time':{'startS':0,'endS':0},'region':BOX,'frameIds':report['windows'][0]['frameIds'],'present':'no'}]})
+    assert score_review(store,report,review)['comparisons'][0]['outcome']==expected
+
+
+@pytest.mark.parametrize('human_count,expected', [({},'human_unknown'),
+    ({'lower':1,'upper':1},'count_interval_overlap'),({'lower':4,'upper':4},'count_error')])
+def test_count_review_requires_human_quantity_and_preserves_presence(tmp_path, human_count, expected):
+    captures,store,manifest=setup(tmp_path)
+    provider=Provider([lambda meta:[fact(meta,kind='count',semanticClass='vehicle',count={'lower':1,'upper':2})]])
+    report=asyncio.run(perform(tmp_path,captures,store,manifest,provider))
+    review=ManualReview(**{**annotation_template(report),'reviewer':'synthetic-regression-fixture','reviewedOriginalPixels':True,'annotations':[
+        {'kind':'count','semanticClass':'vehicle','time':{'startS':0,'endS':0},'region':BOX,
+         'frameIds':report['windows'][0]['frameIds'],'present':'yes','count':human_count}]})
+    comparison=score_review(store,report,review)['comparisons'][0]
+    assert comparison['outcome']==expected
+    assert comparison['presenceOutcome']=='matched'
+
+
+@pytest.mark.parametrize('model_case,presence', [('missing','missed'),
+    ('unknown','model_abstained'),('partial_overlap','region_error')])
+def test_count_review_without_human_quantity_keeps_presence_errors(tmp_path, model_case, presence):
+    captures,store,manifest=setup(tmp_path)
+    def rows(meta):
+        if model_case=='missing':
+            return []
+        return [fact(meta,kind='count',semanticClass='vehicle',
+            count={} if model_case=='unknown' else {'lower':1,'upper':2},
+            region={**BOX,'w':.1} if model_case=='partial_overlap' else BOX)]
+    report=asyncio.run(perform(tmp_path,captures,store,manifest,Provider([rows])))
+    review=ManualReview(**{**annotation_template(report),'reviewer':'synthetic-regression-fixture','reviewedOriginalPixels':True,'annotations':[
+        {'kind':'count','semanticClass':'vehicle','time':{'startS':0,'endS':0},'region':BOX,'frameIds':report['windows'][0]['frameIds'],'present':'yes'}]})
+    result=score_review(store,report,review)
+    assert result['counts']=={'human_unknown':1}
+    assert result['comparisons'][0]['presenceOutcome']==presence
+
+
+@pytest.mark.parametrize('completed_windows', [0, 1])
+def test_cancel_before_admission_never_borrows_a_previous_window_trace(tmp_path, video, completed_windows):
+    captures, store, _ = setup(tmp_path)
+    manifest = video_capture(captures, video)
+    provider = Provider()
+
+    async def run():
+        waiting = asyncio.Event()
+        async with httpx.AsyncClient(transport=httpx.MockTransport(provider.handler)) as http:
+            gateway = ModelGateway(GatewayConfig(data_dir=tmp_path/'ledger', max_attempts=1,
+                rates_valid_through=date(2030, 1, 1)), http, api_key='test-observation-key')
+            acquire = gateway.slots.acquire
+            admissions = 0
+
+            async def blocked_admission():
+                nonlocal admissions
+                if admissions == completed_windows:
+                    waiting.set()
+                    await asyncio.Semaphore(0).acquire()
+                admissions += 1
+                return await acquire()
+
+            gateway.slots.acquire = blocked_admission
+            task = asyncio.create_task(extract(gateway, store, captures,
+                ExtractRequest(captureId=manifest['id'], cameraId=manifest['cameraId'])))
+            await asyncio.wait_for(waiting.wait(), 5)
+            completed = [record for record in store.list('extraction_attempts') if record['status'] == 'ok']
+            task.cancel('private cancellation detail')
+            with pytest.raises(asyncio.CancelledError) as cancelled:
+                await task
+            assert cancelled.value.args == ('private cancellation detail',)
+            assert getattr(cancelled.value, 'request_id', None) is None
+            report = store.list('extractions')[0]
+            assert report['status'] == 'cancelled'
+            assert report['windows'][:-1] == completed
+            assert len(report['batchIds']) == completed_windows
+            assert len(provider.requests) == len(gateway.ledger.attempts()) == completed_windows
+            attempt = report['windows'][-1]
+            assert attempt['gatewayRequestId'] is None
+            assert all(attempt['modelCall'][field] is None
+                       for field in ('requestId', 'inputTokens', 'outputTokens', 'costUsd'))
+            for previous in completed:
+                assert 'sha256:' + previous['inputHash'] not in attempt['modelCall']['inputHashes']
+            assert 'private cancellation detail' not in json.dumps(report)
+
     asyncio.run(run())

@@ -87,7 +87,7 @@ async def reviews(job_id: str, request: Request):
         rows = [verified_review(value, report) for value in store.list('reviews')
                 if value.get('annotation', {}).get('extractionId') == job_id]
         return {'extractionId': job_id, 'reviews': rows,
-                'status': 'reviewed_annotations_available' if rows else 'pending_human_annotations',
+                'status': 'reviewed_annotations_available' if rows else 'optional_not_reviewed',
                 'notice': 'Repeated reviews are separate records; their annotations are not pooled as independent samples.'}
     except ArtifactError as exc:
         return _fail(exc)

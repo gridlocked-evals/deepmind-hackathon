@@ -170,6 +170,8 @@ async def proxy_media(request: Request, camera_id: str, url: str) -> Response:
                 # re-delivered on every await and would spin this loop; the catch handles a direct
                 # Task.cancel(), which a shield does not stop and which is delivered once.
                 close = asyncio.ensure_future(response.aclose())
+                # Observe the close's outcome on every exit path, so a failed close is never "never retrieved".
+                close.add_done_callback(lambda task: task.cancelled() or task.exception())
                 loop = asyncio.get_running_loop()
                 deadline = loop.time() + UPSTREAM_CLOSE_SECONDS
                 cancelled = None
@@ -182,7 +184,6 @@ async def proxy_media(request: Request, camera_id: str, url: str) -> Response:
                 if not close.done():
                     # Hard deadline: unlike wait_for, never wait for the close to honour cancellation.
                     close.cancel()
-                    close.add_done_callback(lambda task: task.cancelled() or task.exception())
                 if cancelled is not None:
                     raise cancelled
                 if close.done() and not close.cancelled():

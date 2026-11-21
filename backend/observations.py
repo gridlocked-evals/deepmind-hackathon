@@ -81,7 +81,9 @@ def accept_facts(output: HydrogenOutput, manifest: dict, window: dict, frames: l
             raise ValueError("Evidence time is not bounded by cited frames")
         if fact.kind == 'count' and (len(times) != 1 or abs(fact.time.startS-times[0]) > 1e-6 or abs(fact.time.endS-times[0]) > 1e-6):
             raise ValueError("Visible counts must describe one exact frame")
-        if fact.kind == 'event' and (not motion or len(times) < 2 or min(times) == max(times)):
+        if fact.kind == 'event' and (not motion or len(times) < 2 or min(times) == max(times)
+                or len({f['frameSha256'] for f, _ in cited}) < 2
+                or len({image['sha256'] for _, image in cited}) < 2):
             raise ValueError("Temporal claims require distinct continuous-media observations")
         row = fact.model_dump(mode='json')
         row['id'] = new_id('ob')
@@ -179,7 +181,7 @@ async def extract(gateway: ModelGateway, store: ArtifactStore, captures: Capture
         'parentId': parent['id'] if parent else None, 'focus': reinspection.focus if reinspection else None,
         'clocks': manifest['clocks'], 'sourceLabels': manifest['labels'], 'createdAt': utcnow().isoformat(),
         'windows': [], 'facts': [], 'batchIds': [], 'status': 'failed', 'failures': [],
-        'manualReview': 'pending_human_annotations', 'promptId': PROMPT_ID}
+        'manualReview': 'optional_not_reviewed', 'promptId': PROMPT_ID}
     report['modelPolicy'] = {'thinking_level': 'low', 'max_output_tokens': gateway.config.output_tokens_per_call}
     try:
         index = await asyncio.to_thread(index_prefix, path, manifest)
@@ -253,11 +255,11 @@ async def extract(gateway: ModelGateway, store: ArtifactStore, captures: Capture
                     if result:
                         record['modelCall']['outcome'] = 'invalid_output'
                 report['failures'].append({'attemptId': attempt_id, 'error': record['error']})
-            except asyncio.CancelledError:
+            except asyncio.CancelledError as exc:
                 record['error'] = {'code': 'cancelled', 'message': 'Caller cancelled extraction; no new capture was taken.'}
-                recent = next((r for r in gateway.ledger.attempts(limit=100)
-                    if json.loads(r['context']).get('attempt_id') == attempt_id and r['stage']=='observation'), None)
-                error = GatewayError(ErrorCode.CANCELLED, request_id=recent['request_id'] if recent else None)
+                # A prior window belongs to the same extraction but is not this
+                # cancelled attempt. Before admission there is no request ID.
+                error = GatewayError(ErrorCode.CANCELLED, request_id=getattr(exc, 'request_id', None))
                 record.update(modelCall=from_error(gateway, Service.HYDROGEN, error, prompt_id=PROMPT_ID,
                     domain_hashes=hashes, requested_at=requested_at, completed_at=utcnow()).model_dump(mode='json'),
                     gatewayRequestId=error.request_id)

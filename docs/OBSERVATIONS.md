@@ -41,7 +41,7 @@ The extraction report contains:
 - Explicit unknowns, abstentions, uncertain boundary events and duplicate events.
 - One durable attempt record per window, provider and gateway request IDs,
   model configuration/input hashes, latency and available usage/cost estimates.
-- Failed and cancelled attempts, unprocessed windows and a pending-human-review
+- Failed and cancelled attempts, unprocessed windows and an `optional_not_reviewed`
   label. Budget/auth/quota failures stop later windows instead of retrying them.
 
 Every model frame reference must be among the frames actually supplied. Every
@@ -55,8 +55,10 @@ signals must use `unknown`. There is no state for physical disappearance: leavin
 the image or becoming occluded does not establish that an actor ceased to exist.
 Snapshot, repeated-still, stale-source and low-cadence jobs cannot publish events.
 
-Temporal events require at least two distinct continuous-media frames. Their
-entire uncertainty interval must fit one half-open owned interval (the final
+Temporal events require at least two cited continuous-media frames with distinct
+original and model-image hashes; motion in uncited frames or outside a repeated
+crop cannot establish an event. Their entire uncertainty interval must fit one
+half-open owned interval (the final
 interval includes its end). Boundary-crossing uncertainty is retained for review,
 not counted as another event. Matching overlapping event intervals and regions
 are conservatively deduplicated. This is an image-space heuristic, not an actor
@@ -136,8 +138,9 @@ Offline export and import use saved artifacts and make no model requests:
 
 Export refuses to overwrite existing files. A packet includes original-frame
 metadata, self-contained HTML, an empty annotation template and a failure report.
-The tooling is not a human annotation result: clip labels remain pending as recorded
-in [the verification record](OBSERVATIONS_VERIFICATION.md).
+Human review is optional and does not block extraction or downstream use. The
+maintainer waived the remaining manual clip review; no human labels or accuracy
+results are implied by that waiver. See [the verification record](OBSERVATIONS_VERIFICATION.md).
 
 ## Explicit live verification
 
