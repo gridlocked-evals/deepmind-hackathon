@@ -124,6 +124,7 @@ export default function App() {
     setPickingMode('inspect'); setRailTab('route');
   }, [invalidateRoute]);
   const driveWithEvidence = useCallback((conditions: EvidenceConditions) => {
+    journey.reset();
     driver.stop();
     setEvidenceDrive(conditions);
     closeEvidence(); setSidebarOpen(true);
@@ -131,7 +132,7 @@ export default function App() {
     const camera = cameras.find(item => item.id === conditions.cameraId);
     if (evidenceApplies(scenario, conditions)) setRailTab('driver');
     else if (camera) setEndpoint('start', cameraLocation(camera));
-  }, [driver.stop, closeEvidence, scenario, cameras, setEndpoint]);
+  }, [journey.reset, driver.stop, closeEvidence, scenario, cameras, setEndpoint]);
   const selectLocation = useCallback((point: NavigationPoint) => {
     if (pickingMode !== 'inspect') {
       setEndpoint(pickingMode, point);
