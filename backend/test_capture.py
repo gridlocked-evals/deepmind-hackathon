@@ -370,6 +370,43 @@ def test_rejected_create_does_not_evict_unpinned_episodes(tmp_path):
     assert sorted(m["id"] for m in store.list()) == sorted([pinned, unpinned])
 
 
+@pytest.mark.parametrize("damage", ["json", "hash"])
+def test_retained_invalid_manifest_is_not_reclaimable_capture_capacity(store, damage):
+    rec, _, _ = record(40)
+    old = store.create_hls_episode(rec, seconds_ago=20, duration_s=10)["id"]
+    manifest = store.root / old / "manifest.json"
+    original = manifest.read_text()
+    manifest.chmod(0o644)
+    manifest.write_text("!" + original[1:] if damage == "json" else original.replace(CAMERA, OTHER))
+    assert store.pins(old) == []
+    with pytest.raises(CaptureError):
+        store.get(old)
+    before = store.usage_bytes()
+    store.budget_bytes = before + 100  # Either capture fits alone, but both do not.
+    with pytest.raises(CaptureError, match="budget"):
+        store.create_hls_episode(rec, seconds_ago=20, duration_s=10)
+    assert store.usage_bytes() == before
+    assert [path.name for path in store.root.iterdir()] == [old]
+    assert manifest.read_text() != original
+
+
+def test_rejected_capture_preserves_valid_episode_when_damaged_retention_fills_budget(store):
+    rec, _, _ = record(40)
+    damaged = store.create_hls_episode(rec, seconds_ago=20, duration_s=10)["id"]
+    store.clock.now += timedelta(seconds=1)
+    valid = store.create_hls_episode(rec, seconds_ago=20, duration_s=10)["id"]
+    manifest = store.root / damaged / "manifest.json"
+    original = manifest.read_text()
+    manifest.chmod(0o644)
+    manifest.write_text(original.replace(CAMERA, OTHER))
+    store.budget_bytes = store.usage_bytes() - 1
+    store.clock.now += timedelta(seconds=1)
+    with pytest.raises(CaptureError, match="budget"):
+        store.create_hls_episode(rec, seconds_ago=20, duration_s=10)
+    assert sorted(path.name for path in store.root.iterdir()) == sorted([damaged, valid])
+    assert store.get(valid, verify=True)["id"] == valid
+
+
 def test_capture_rejected_without_successful_probe(tmp_path):
     store = CaptureStore(root=tmp_path / "c", probe=lambda p: None)
     rec, _, _ = record(20)
