@@ -14,13 +14,15 @@ import { createEvents, requestEvent } from '../scenarios/events';
 import type { ScenarioPlan } from '../scenarios/events';
 import { beginDecision, createTrace as createScenarioTrace, finishTrace as finishScenarioTrace, recordFrame } from '../scenarios/trace';
 import type { RunTrace, Terminal, TraceStep } from '../scenarios/trace';
+import { ADVERSARY_OFF, adversaryBarrier, attackRecords, runMetrics } from '../scenarios/adversary';
+import type { AdversarySettings } from '../scenarios/adversary';
 
 function initialSimulation(scenario: ScenarioBundle) {
   return driverEligibility(scenario) === null ? createDriverSimulation(scenario) : null;
 }
 
 /** Decisions update a continuously animated controller; gateway retry limits still apply. */
-export function useGeminiDriver(scenario: ScenarioBundle, plan: ScenarioPlan): GeminiDriver {
+export function useGeminiDriver(scenario: ScenarioBundle, plan: ScenarioPlan, adversary: AdversarySettings = ADVERSARY_OFF): GeminiDriver {
   const gate = useRef(new DriverRunGate());
   const simulation = useRef<DriverSimulation | null>(null);
   const frameRef = useRef(sampleScenario(scenario, 0));
@@ -51,6 +53,7 @@ export function useGeminiDriver(scenario: ScenarioBundle, plan: ScenarioPlan): G
     if (!scenarioTrace || scenarioTrace.terminal.reason !== 'running' || !simulation.current) return;
     if (pendingDecision.current) pendingDecision.current.entry.wallLatencyMs = performance.now() - pendingDecision.current.requestedAt;
     finishScenarioTrace(scenarioTrace, simulation.current, reason, message);
+    if (scenarioTrace.adversary) Object.assign(scenarioTrace.adversary, { attacks: attackRecords(scenarioTrace), run: runMetrics(scenarioTrace) });
     if (trace.current) scenarioTrace.driverTrace = structuredClone(trace.current);
     const saved = structuredClone(scenarioTrace);
     setTraces(items => [...items.filter(item => item.runId !== saved.runId).slice(-3), saved]);
@@ -126,7 +129,7 @@ export function useGeminiDriver(scenario: ScenarioBundle, plan: ScenarioPlan): G
     if (activeRef.current || document.hidden || modelAvailability.state !== 'available' || driverEligibility(scenario)) return;
     let initial = initialSimulation(scenario);
     if (!initial) return;
-    initial = { ...initial, events: createEvents(plan, mode) };
+    initial = { ...initial, events: createEvents(plan, mode), ...(adversary.guardsIgnoreHazards ? { guardsIgnoreHazards: true } : {}) };
     try { validateEventRun(initial); } catch (failure) { setError((failure as Error).message); setStatus('error'); return; }
     const lease = gate.current.begin(crypto.randomUUID());
     activeRef.current = true;
@@ -140,7 +143,14 @@ export function useGeminiDriver(scenario: ScenarioBundle, plan: ScenarioPlan): G
     setHasRun(true); setError(null); setDecisionLog([]); setCompletionReason(null); setStatus('thinking');
 
     let hold: HoldRecorder | null = null;
+    const barrier = mode === 'event' ? adversaryBarrier(adversary, scenarioTrace, {
+      runId: lease.runId, signal: lease.controller.signal, url: mediaUrl('/api/adversary/attack'),
+      isCurrent: () => gate.current.isCurrent(lease),
+      read: () => simulation.current ?? initial,
+      write: state => { simulation.current = state; recordFrame(scenarioTrace, state); frameRef.current = driverFrame(state); refreshEvents(value => value + 1); },
+    }) : undefined;
     void runContinuousDriver({
+      barrier,
       initial,
       signal: lease.controller.signal,
       readState: () => simulation.current ?? initial,
@@ -221,7 +231,7 @@ export function useGeminiDriver(scenario: ScenarioBundle, plan: ScenarioPlan): G
       setStatus('error');
       gate.current.cancel();
     });
-  }, [modelAvailability.state, publish, scenario, plan, finish]);
+  }, [modelAvailability.state, publish, scenario, plan, finish, adversary]);
 
   const unavailableReason = driverEligibility(scenario);
   const active = status === 'thinking' || status === 'driving';
