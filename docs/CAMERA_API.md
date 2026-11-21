@@ -12,7 +12,7 @@ All application routes below use `GET`.
 | --- | --- |
 | `/api/health` | API readiness: `status`, `service`, and UTC `timestamp`. Does not probe camera availability. |
 | `/api/vision/cameras` | `{ cameras, metadata }` for five configured 511NY HLS sources. The retained `vision` path does not imply inference. |
-| `/api/cameras` | `{ cameras, metadata }` for validated Manhattan DOT snapshots. Directory failure is represented in metadata, with HTTP 200. |
+| `/api/cameras` | `{ cameras, metadata }` for validated NYC DOT snapshots from all five boroughs. Directory failure is represented in metadata, with HTTP 200. |
 | `/api/feeds/{camera_id}/index.m3u8` | Rewritten HLS master playlist for an allowlisted camera. |
 | `/api/feeds/{camera_id}/resource/{token}` | Rewritten child playlist or streamed media identified by a server-issued token. Supports a single valid byte range. |
 
@@ -48,7 +48,7 @@ Both directories use the frontend [CameraSource](../src/types.ts) shape. Coordin
 }
 ```
 
-`kind` is `hls` or `snapshot`. `sourceUrl` links to the official viewer; `playbackUrl` supplies the actual media. Snapshot records also include `thumbnailUrl`. `resolution`, `description`, `thumbnailUrl`, and `fetchedAt` are optional in the shared type; `providerCameraId` is an additional HLS API field.
+`kind` is `hls` or `snapshot`. `sourceUrl` links to the official viewer; `playbackUrl` supplies the actual media. Snapshot records also include `thumbnailUrl`. `borough`, `resolution`, `description`, `thumbnailUrl`, and `fetchedAt` are optional in the shared type; `providerCameraId` is an additional HLS API field.
 
 `capturedAt` is currently always `null`: neither directory establishes a source capture clock. HLS `fetchedAt` records the last successful proxy media fetch; snapshot `fetchedAt` records directory retrieval. Neither is the time pictured in the footage. The browser's “Image loaded … ET” label records a successful image load and uses `America/New_York`.
 
@@ -65,7 +65,7 @@ The live directory's `metadata.mode` is `configured`, with `registryUrl`, `captu
 
 The DOT directory has a one-hour in-memory cache and a serialized refresh. Metadata includes `mode: connected | stale | unavailable`, `fetchedAt`, and `cached`. Failed refreshes return the prior records as `stale`, preserving their original successful timestamps. Without prior data, the response contains an empty list and `mode: unavailable`. Provider-reported online snapshots start as `unverified`; offline entries start as `unavailable`. Images themselves load directly from NYC DOT in the browser.
 
-DOT records are limited to Manhattan and latitude `40.68–40.89`, longitude `−74.04–−73.90`. Invalid IDs or coordinates are discarded. Image URLs must use HTTPS on `webcams.nyctmc.org`; otherwise the standard image URL is constructed from the validated camera ID. The fetched directory is capped at 8 MiB.
+DOT records include Manhattan, Brooklyn, Queens, Bronx, and Staten Island, including cameras reported offline. Each record carries the provider’s `borough`. A broad NYC envelope (latitude `40.45–40.95`, longitude `−74.30–−73.65`) rejects invalid coordinates without clipping outer-borough cameras; duplicate and invalid IDs are discarded. Metadata includes `coverage`, `total`, and `boroughCounts`. These counts describe the public DOT directory, not every privately operated camera in New York. Image URLs must use HTTPS on `webcams.nyctmc.org`; otherwise the standard image URL is constructed from the validated camera ID. The fetched directory is capped at 8 MiB.
 
 ## HLS proxy behavior and limits
 
@@ -107,7 +107,7 @@ Development CORS permits `http://localhost:5173` and `http://127.0.0.1:5173`, GE
 
 [useCameraSources](../src/media/cameras.ts) starts with the five-source catalog, fetches both directories in parallel, and merges valid records by ID. Requests time out after 12 seconds. Refreshes occur every 60 seconds while visible and when the page becomes visible, without overlapping refresh cycles. The configured HLS catalog remains selectable when the API is unreachable.
 
-The hook's `loading | connected | stale | offline` status describes directory access, not stream health. Both requests failing yields `offline`; a failed live-directory request or stale DOT response yields `stale`. A successful live directory can therefore remain `connected` even if DOT has no available records.
+The hook’s `loading | connected | stale | offline` status describes directory access, not stream health. Both directories failing or reporting unavailable yields `offline`. Either directory failing, reporting unavailable, or returning stale data yields `stale`; `connected` requires both directories to be available and current. On refresh failure, previously loaded cameras remain browsable with stale availability. A successful directory replaces its own prior records, allowing removed cameras to disappear after a healthy refresh.
 
 `LiveFeed` mounts one selected source. It uses native HLS when supported, otherwise lazy-loads hls.js. Playback is muted and inline. It tries the same-origin proxy first, then the known direct provider URL once; direct playback depends on provider CORS. A 12-second connection/buffering watchdog advances this fallback. hls.js allows one media-error recovery per source attempt; manifest retries are disabled, while level and fragment loading each allow one retry.
 
@@ -122,4 +122,4 @@ Snapshots refresh every five seconds while visible, skip refresh while a request
 3. Add the matching row to `SOURCES` in [src/media/cameras.ts](../src/media/cameras.ts). Its tuple order is **ID, street, longitude, latitude, stream path, resolution**. This generates both offline catalog and direct-fallback entries. Keep availability initially `unverified` and capture time `null`.
 4. Extend [backend tests](../backend/test_cameras.py) for identity/coordinates and any new playlist behavior. Run `npm run test:api` and `npm run build`, then verify actual browser playback, source switching, hidden-tab behavior, and feeds off. Confirm old decoder requests stop.
 
-DOT snapshots are discovered through the directory adapter, so ordinary new Manhattan DOT entries require no manual catalog change. Adding a camera does not create or calibrate a simulation for that location.
+DOT snapshots are discovered through the directory adapter, so ordinary new NYC DOT entries require no manual catalog change. Adding a camera does not create or calibrate a simulation for that location.

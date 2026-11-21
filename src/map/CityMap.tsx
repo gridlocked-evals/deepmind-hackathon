@@ -4,6 +4,8 @@ import type { GeoJSONSource, Map as MapInstance, StyleSpecification } from 'mapl
 import 'maplibre-gl/dist/maplibre-gl.css';
 import mapWorkerUrl from 'maplibre-gl/dist/maplibre-gl-worker.mjs?worker&url';
 import { createSimulationLayer } from '../scene/SimulationLayer';
+import type { NavigationPoint, PlannedRoute } from '../navigation/types';
+import type { Feature, FeatureCollection } from 'geojson';
 import type { CameraSource, LngLat, MapViewport, ScenarioBundle, SceneRuntime, ViewMode } from '../types';
 import { fallbackStyle, gothamStyle, MAP_STYLE_URL } from './mapStyle';
 import './CityMap.css';
@@ -20,6 +22,13 @@ export interface CityMapProps {
   sidebarOpen: boolean;
   feedsVisible: boolean;
   viewRevision?: number;
+  navigationStart?: NavigationPoint | null;
+  navigationEnd?: NavigationPoint | null;
+  plannedRoute?: PlannedRoute | null;
+  pickingMode?: 'inspect' | 'start' | 'destination';
+  focusLocation?: NavigationPoint | null;
+  focusRevision?: number;
+  onLocationSelect?(point: NavigationPoint): void;
   onCameraSelect(cameraId: string): void;
   onActorSelect(actorId: string): void;
   onFollowExit(): void;
@@ -30,7 +39,8 @@ export interface CityMapProps {
 
 const EMPTY_POINTS = { type: 'FeatureCollection' as const, features: [] };
 const CAMERA_LAYERS = ['camera-hit', 'selected-camera-hit'];
-const CITY_CAMERA = { center: [-74.0038, 40.7307] as LngLat, zoom: 14.2, pitch: 58, bearing: -27 };
+const CITY_CAMERA = { center: [-73.98, 40.705] as LngLat, zoom: 10, pitch: 0, bearing: 0 };
+const NYC_BOUNDS: [LngLat, LngLat] = [[-74.26, 40.49], [-73.70, 40.92]];
 const reducedMotion = () => window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 const toBearing = (heading: number) => 90 - heading * 180 / Math.PI;
 
@@ -44,8 +54,9 @@ function geographicPoint(origin: LngLat, x: number, y: number): LngLat {
 function framePadding(map: MapInstance, props: CityMapProps) {
   const container = map.getContainer();
   const bounds = container.getBoundingClientRect();
-  const width = bounds.width;
-  const height = bounds.height;
+  // During a ResizeObserver turn the DOM and the map transform can differ briefly.
+  const width = Math.max(1, Math.min(bounds.width, map.getCanvas().clientWidth || bounds.width));
+  const height = Math.max(1, Math.min(bounds.height, map.getCanvas().clientHeight || bounds.height));
   const workspace = container.closest('.workspace');
   const rail = workspace?.querySelector('.source-rail')?.getBoundingClientRect();
   const playback = workspace?.querySelector('.playback-bar')?.getBoundingClientRect();
@@ -57,7 +68,7 @@ function framePadding(map: MapInstance, props: CityMapProps) {
   const bottom = Math.max(playback ? bounds.bottom - playback.top + 14 : 88,
     dock ? bounds.bottom - dock.top + 14 : 0);
   return {
-    left: props.sidebarOpen && width > 760 && rail ? Math.max(0, rail.right - bounds.left) : 0,
+    left: props.sidebarOpen && width > 760 && rail ? Math.min(width * 0.45, Math.max(0, rail.right - bounds.left)) : 0,
     right: width > 760 ? 28 : 0,
     top: Math.min(top, height * 0.34),
     bottom: Math.min(bottom, height * 0.48),
@@ -87,15 +98,25 @@ function cameraData(cameras: CameraSource[]) {
 }
 
 function addCameraLayers(map: MapInstance) {
-  map.addSource('gotham-cameras', { type: 'geojson', data: EMPTY_POINTS });
+  map.addSource('gotham-cameras', { type: 'geojson', data: EMPTY_POINTS, cluster: true, clusterRadius: 44, clusterMaxZoom: 14 });
   map.addSource('gotham-selected-camera', { type: 'geojson', data: EMPTY_POINTS });
   map.addLayer({
+    id: 'camera-clusters', type: 'circle', source: 'gotham-cameras', filter: ['has', 'point_count'],
+    paint: { 'circle-radius': ['step', ['get', 'point_count'], 20, 25, 25, 100, 31],
+      'circle-color': '#193f43', 'circle-stroke-color': '#79d7c5', 'circle-stroke-width': 1.5 },
+  });
+  map.addLayer({
+    id: 'camera-cluster-count', type: 'symbol', source: 'gotham-cameras', filter: ['has', 'point_count'],
+    layout: { 'text-field': ['get', 'point_count_abbreviated'], 'text-font': ['Noto Sans Regular'], 'text-size': 13 },
+    paint: { 'text-color': '#d6fff2' },
+  });
+  map.addLayer({
     id: 'camera-glow', type: 'circle', source: 'gotham-cameras',
-    filter: ['==', ['get', 'kind'], 'hls'],
+    filter: ['all', ['!', ['has', 'point_count']], ['==', ['get', 'kind'], 'hls']],
     paint: { 'circle-radius': 17, 'circle-color': '#7df5d3', 'circle-opacity': 0.12, 'circle-blur': 0.7 },
   });
   map.addLayer({
-    id: 'camera-points', type: 'circle', source: 'gotham-cameras',
+    id: 'camera-points', type: 'circle', source: 'gotham-cameras', filter: ['!', ['has', 'point_count']],
     paint: {
       'circle-radius': ['case', ['==', ['get', 'kind'], 'hls'], 5.5, ['interpolate', ['linear'], ['zoom'], 11, 2, 16, 4]],
       'circle-color': ['case', ['==', ['get', 'kind'], 'hls'], '#85eed2', '#213846'],
@@ -105,12 +126,12 @@ function addCameraLayers(map: MapInstance) {
     },
   });
   map.addLayer({
-    id: 'camera-labels', type: 'symbol', source: 'gotham-cameras', minzoom: 15,
-    filter: ['==', ['get', 'kind'], 'hls'],
+    id: 'camera-labels', type: 'symbol', source: 'gotham-cameras', minzoom: 16,
+    filter: ['!', ['has', 'point_count']],
     layout: { 'text-field': ['get', 'name'], 'text-font': ['Noto Sans Regular'], 'text-size': 11, 'text-anchor': 'top', 'text-offset': [0, 1.3], 'text-max-width': 17 },
     paint: { 'text-color': '#9cb9c5', 'text-halo-color': '#07121b', 'text-halo-width': 2 },
   });
-  map.addLayer({ id: 'camera-hit', type: 'circle', source: 'gotham-cameras', paint: { 'circle-radius': 15, 'circle-opacity': 0 } });
+  map.addLayer({ id: 'camera-hit', type: 'circle', source: 'gotham-cameras', filter: ['!', ['has', 'point_count']], paint: { 'circle-radius': 15, 'circle-opacity': 0 } });
   map.addLayer({
     id: 'selected-camera-halo', type: 'circle', source: 'gotham-selected-camera',
     paint: { 'circle-radius': 25, 'circle-color': '#7df5d3', 'circle-opacity': 0.075, 'circle-stroke-width': 1, 'circle-stroke-color': '#8adbc8', 'circle-stroke-opacity': 0.45 },
@@ -122,7 +143,94 @@ function addCameraLayers(map: MapInstance) {
   map.addLayer({ id: 'selected-camera-hit', type: 'circle', source: 'gotham-selected-camera', paint: { 'circle-radius': 25, 'circle-opacity': 0 } });
 }
 
+/** Pick the road geometry actually visible under the pointer, never an invented grid. */
+function streetAt(map: MapInstance, pointer: maplibregl.Point): NavigationPoint | null {
+  if (map.getZoom() < 13) return null;
+  const layers = map.getStyle().layers.filter(layer =>
+    layer.type === 'line' && /road|bridge|tunnel/.test(layer.id) && !/rail|path|ferry/.test(layer.id)).map(layer => layer.id);
+  if (!layers.length) return null;
+  const features: Pick<maplibregl.GeoJSONFeature, 'geometry' | 'properties'>[] = map.queryRenderedFeatures([[pointer.x - 24, pointer.y - 24], [pointer.x + 24, pointer.y + 24]], { layers });
+  const roadFeatureCount = features.length;
+  // OpenMapTiles keeps names in a separate source layer; road paint often has none.
+  const namedLayers = map.getStyle().layers.filter(layer => layer.type === 'symbol'
+    && 'source-layer' in layer && layer['source-layer'] === 'transportation_name');
+  for (const source of new Set(namedLayers.map(layer => 'source' in layer ? layer.source : '').filter(Boolean))) {
+    features.push(...map.querySourceFeatures(source, { sourceLayer: 'transportation_name' }));
+  }
+  type Candidate = { distance: number; coordinates: LngLat; path: LngLat[]; label: string; painted: boolean };
+  const candidates: Candidate[] = [];
+  for (const [featureIndex, feature] of features.entries()) {
+    if (/path|footway|pedestrian|cycleway|steps|rail/.test(String(feature.properties?.class ?? ''))) continue;
+    const lines = feature.geometry.type === 'LineString' ? [feature.geometry.coordinates]
+      : feature.geometry.type === 'MultiLineString' ? feature.geometry.coordinates : [];
+    for (const line of lines) {
+      for (let i = 1; i < line.length; i++) {
+        const a = line[i - 1] as LngLat, b = line[i] as LngLat;
+        const pa = map.project(a), pb = map.project(b);
+        const dx = pb.x - pa.x, dy = pb.y - pa.y;
+        const fraction = Math.max(0, Math.min(1, ((pointer.x - pa.x) * dx + (pointer.y - pa.y) * dy) / (dx * dx + dy * dy || 1)));
+        const distance = Math.hypot(pointer.x - pa.x - dx * fraction, pointer.y - pa.y - dy * fraction);
+        if (distance > 24) continue;
+        // Use geographic interpolation to keep the selected point on the source polyline.
+        const coordinates: LngLat = [a[0] + (b[0] - a[0]) * fraction, a[1] + (b[1] - a[1]) * fraction];
+        const reverse = feature.properties?.oneway === -1 || feature.properties?.oneway === '-1';
+        const path = [coordinates, ...(reverse ? line.slice(0, i).reverse() : line.slice(i)) as LngLat[]]
+          .filter((point, index, points) => index === 0 || point[0] !== points[index - 1][0] || point[1] !== points[index - 1][1]);
+        const name = feature.properties?.['name:en'] || feature.properties?.name || feature.properties?.ref;
+        candidates.push({ distance, coordinates, path, label: typeof name === 'string' ? name : 'Selected street', painted: featureIndex < roadFeatureCount });
+      }
+    }
+  }
+  candidates.sort((a, b) => a.distance - b.distance || b.path.length - a.path.length);
+  const closest = candidates.find(candidate => candidate.painted);
+  if (!closest) return null;
+  const metresBetween = (candidate: Candidate) => Math.hypot((candidate.coordinates[0] - closest.coordinates[0]) * 84_000,
+    (candidate.coordinates[1] - closest.coordinates[1]) * 111_000);
+  const named = candidates.find(candidate => candidate.label !== 'Selected street' && metresBetween(candidate) < 6);
+  const label = named?.label ?? closest.label;
+  const crossing = candidates.find(candidate => candidate.label !== label && candidate.label !== 'Selected street'
+    && candidate.distance < 10 && closest.distance < 10 && metresBetween(candidate) < 12);
+  return { coordinates: closest.coordinates, label: crossing ? `${label} & ${crossing.label}` : label,
+    streetPath: closest.path.length > 1 ? closest.path : undefined };
+}
+
+function navigationData(props: CityMapProps): FeatureCollection {
+  const features: Feature[] = [];
+  if (props.plannedRoute?.coordinates.length) features.push({ type: 'Feature', properties: { kind: 'route' },
+    geometry: { type: 'LineString', coordinates: props.plannedRoute.coordinates } });
+  const points = [[props.navigationStart, 'start', 'A'], [props.navigationEnd, 'destination', 'B'],
+    [props.focusLocation, 'selected', '']] as const;
+  for (const [point, kind, marker] of points) {
+    if (!point) continue;
+    if (kind === 'selected' && [props.navigationStart, props.navigationEnd].some(endpoint => endpoint
+      && endpoint.coordinates[0] === point.coordinates[0] && endpoint.coordinates[1] === point.coordinates[1])) continue;
+    features.push({ type: 'Feature', properties: { kind, marker, label: point.label },
+      geometry: { type: 'Point', coordinates: point.coordinates } });
+  }
+  return { type: 'FeatureCollection', features };
+}
+
+function addNavigationLayers(map: MapInstance) {
+  map.addSource('gotham-navigation', { type: 'geojson', data: EMPTY_POINTS });
+  map.addLayer({ id: 'navigation-route-outline', type: 'line', source: 'gotham-navigation',
+    filter: ['==', ['get', 'kind'], 'route'], layout: { 'line-cap': 'round', 'line-join': 'round' },
+    paint: { 'line-width': 8, 'line-color': '#052f32', 'line-opacity': 0.9 } });
+  map.addLayer({ id: 'navigation-route', type: 'line', source: 'gotham-navigation',
+    filter: ['==', ['get', 'kind'], 'route'], layout: { 'line-cap': 'round', 'line-join': 'round' },
+    paint: { 'line-width': 4, 'line-color': '#80e7cb', 'line-opacity': 0.9 } });
+  map.addLayer({ id: 'navigation-endpoints', type: 'circle', source: 'gotham-navigation',
+    filter: ['!=', ['get', 'kind'], 'route'],
+    paint: { 'circle-radius': ['case', ['==', ['get', 'kind'], 'selected'], 7, 13],
+      'circle-color': ['case', ['==', ['get', 'kind'], 'destination'], '#f4c583', '#9df1d4'],
+      'circle-stroke-color': '#0a2229', 'circle-stroke-width': 3 } });
+  map.addLayer({ id: 'navigation-endpoint-letters', type: 'symbol', source: 'gotham-navigation',
+    filter: ['!=', ['get', 'kind'], 'route'],
+    layout: { 'text-field': ['get', 'marker'], 'text-font': ['Noto Sans Regular'], 'text-size': 12, 'text-allow-overlap': true },
+    paint: { 'text-color': '#08232b' } });
+}
+
 export default function CityMap(props: CityMapProps) {
+  const routesVisible = props.runtime.optionsRef.current.routesVisible;
   const element = useRef<HTMLDivElement>(null);
   const mapRef = useRef<MapInstance | null>(null);
   const latest = useRef(props);
@@ -162,7 +270,7 @@ export default function CityMap(props: CityMapProps) {
         container: element.current,
         style: fallbackStyle(),
         ...CITY_CAMERA,
-        minZoom: 10,
+        minZoom: 8.5,
         maxZoom: 21.6,
         maxPitch: 80,
         renderWorldCopies: false,
@@ -202,6 +310,7 @@ export default function CityMap(props: CityMapProps) {
     const updateSources = () => {
       (map.getSource('gotham-cameras') as GeoJSONSource | undefined)?.setData(cameraData(latest.current.cameras));
       (map.getSource('gotham-selected-camera') as GeoJSONSource | undefined)?.setData(cameraData(latest.current.selectedCamera ? [latest.current.selectedCamera] : []));
+      (map.getSource('gotham-navigation') as GeoJSONSource | undefined)?.setData(navigationData(latest.current));
     };
     map.on('style.load', () => {
       if (disposed) return;
@@ -211,6 +320,10 @@ export default function CityMap(props: CityMapProps) {
       installedScenario.current = `${latest.current.scenario.id}:${latest.current.scenario.version}`;
       map.addLayer(layer);
       addCameraLayers(map);
+      addNavigationLayers(map);
+      for (const id of ['navigation-route', 'navigation-route-outline']) {
+        map.setLayoutProperty(id, 'visibility', latest.current.runtime.optionsRef.current.routesVisible && latest.current.viewMode === 'city' ? 'visible' : 'none');
+      }
       for (const layer of map.getStyle().layers) {
         if ('source' in layer && (layer.source === 'gotham-cameras' || layer.source === 'gotham-selected-camera')) {
           map.setLayoutProperty(layer.id, 'visibility', latest.current.viewMode === 'city' ? 'visible' : 'none');
@@ -231,14 +344,48 @@ export default function CityMap(props: CityMapProps) {
       const feature = features.find(item => item.layer.id === 'selected-camera-hit') ?? features[0];
       return typeof feature?.properties?.id === 'string' ? feature.properties.id : null;
     };
+    const clusterAt = (point: maplibregl.Point) => map.getLayer('camera-clusters')
+      ? map.queryRenderedFeatures(point, { layers: ['camera-clusters'] })[0] : undefined;
     map.on('click', event => {
-      const actorId = layerRef.current?.pickActor(event.point);
+      const cluster = clusterAt(event.point);
+      if (cluster && cluster.geometry.type === 'Point') {
+        const source = map.getSource('gotham-cameras') as GeoJSONSource;
+        const coordinates = cluster.geometry.coordinates as LngLat;
+        void source.getClusterExpansionZoom(Number(cluster.properties.cluster_id)).then(zoom => {
+          if (!disposed && map.getSource('gotham-cameras') === source) {
+            map.easeTo({ center: coordinates, zoom, duration: reducedMotion() ? 0 : 350 });
+          }
+        }).catch(() => {}); // A directory/style refresh can invalidate an in-flight cluster.
+        return;
+      }
+      const picking = latest.current.pickingMode && latest.current.pickingMode !== 'inspect';
+      const actorId = !picking && layerRef.current?.pickActor(event.point);
       if (actorId) { latest.current.onActorSelect(actorId); return; }
       const cameraId = cameraAt(event.point);
-      if (cameraId) latest.current.onCameraSelect(cameraId);
+      if (cameraId) {
+        const source = latest.current.cameras.find(camera => camera.id === cameraId);
+        if (picking && source) {
+          const street = streetAt(map, map.project(source.coordinates));
+          latest.current.onLocationSelect?.({ ...street, coordinates: street?.coordinates ?? source.coordinates, label: source.name });
+        } else {
+          latest.current.onCameraSelect(cameraId);
+          if (source) {
+            const street = streetAt(map, map.project(source.coordinates));
+            if (street) latest.current.onLocationSelect?.({ ...street, label: source.name });
+          }
+        }
+        return;
+      }
+      const street = streetAt(map, event.point);
+      if (street) latest.current.onLocationSelect?.(street);
+      else if (picking) latest.current.onLocationSelect?.({
+        coordinates: [event.lngLat.lng, event.lngLat.lat],
+        label: `Map point · ${event.lngLat.lat.toFixed(4)}, ${event.lngLat.lng.toFixed(4)}`,
+      });
     });
     map.on('mousemove', event => {
-      map.getCanvas().style.cursor = cameraAt(event.point) || layerRef.current?.pickActor(event.point) ? 'pointer' : '';
+      map.getCanvas().style.cursor = latest.current.pickingMode && latest.current.pickingMode !== 'inspect' ? 'crosshair'
+        : cameraAt(event.point) || clusterAt(event.point) || layerRef.current?.pickActor(event.point) ? 'pointer' : '';
     });
     const leave = () => { map.getCanvas().style.cursor = ''; };
     map.getCanvas().addEventListener('mouseleave', leave);
@@ -416,7 +563,10 @@ export default function CityMap(props: CityMapProps) {
   useEffect(() => {
     const map = mapRef.current;
     const scenarioKey = `${props.scenario.id}:${props.scenario.version}`;
-    if (!ready || !map || installedScenario.current === scenarioKey) return;
+    // isStyleLoaded() also becomes false while ordinary map tiles are loading.
+    // Our camera layer proves the style installation has completed; style.load
+    // installs the latest scenario if a style replacement is actually underway.
+    if (!ready || !map || !map.getLayer('camera-glow') || installedScenario.current === scenarioKey) return;
     if (layerRef.current && map.getLayer(layerRef.current.id)) map.removeLayer(layerRef.current.id);
     const layer = createSimulationLayer(props.scenario, props.runtime);
     layerRef.current = layer;
@@ -447,9 +597,12 @@ export default function CityMap(props: CityMapProps) {
     }
     manuallyReleasedFollow.current = false;
     if (props.viewMode === 'city') {
-      map.flyTo({ ...CITY_CAMERA, padding, duration, essential: false });
+      map.fitBounds(NYC_BOUNDS, { padding, absolutePadding: true, duration, pitch: 0, bearing: 0, maxZoom: 11.5, essential: false });
     } else if (props.viewMode === 'intersection') {
-      map.flyTo({ center: props.scenario.origin, zoom: 18.8, pitch: 61, bearing: -35, padding, duration, essential: false });
+      const firstActor = props.runtime.frameRef.current.actors[0];
+      map.flyTo({ center: props.scenario.origin, zoom: 18.8, pitch: 61,
+        bearing: props.scenario.geometryKind === 'street-route' && firstActor ? toBearing(firstActor.heading) - 35 : -35,
+        padding, duration, essential: false });
     } else {
       const frame = props.runtime.frameRef.current;
       const actor = frame.actors.find(item => item.id === props.runtime.optionsRef.current.selectedActorId) ?? frame.actors[0];
@@ -473,10 +626,42 @@ export default function CityMap(props: CityMapProps) {
     const map = mapRef.current;
     const camera = props.selectedCamera;
     if (ready && map && camera && previousCamera.current !== camera.id && props.viewMode === 'city') {
-      map.flyTo({ center: camera.coordinates, zoom: 16.3, pitch: 62, bearing: -27, padding: framePadding(map, props), duration: reducedMotion() ? 0 : 1050 });
+      map.flyTo({ center: camera.coordinates, zoom: 16.3, pitch: 25, bearing: 0, padding: framePadding(map, props), duration: reducedMotion() ? 0 : 1050 });
     }
     previousCamera.current = camera?.id;
   }, [ready, props.selectedCamera?.id]);
+
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!ready || !map) return;
+    (map.getSource('gotham-navigation') as GeoJSONSource | undefined)?.setData(navigationData(props));
+  }, [ready, props.navigationStart, props.navigationEnd, props.plannedRoute, props.focusLocation]);
+
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!ready || !map) return;
+    for (const id of ['navigation-route', 'navigation-route-outline']) {
+      if (map.getLayer(id)) map.setLayoutProperty(id, 'visibility', routesVisible && props.viewMode === 'city' ? 'visible' : 'none');
+    }
+  }, [ready, routesVisible, props.viewMode]);
+
+  useEffect(() => {
+    const map = mapRef.current;
+    const point = props.focusLocation;
+    if (!ready || !map || !point) return;
+    map.flyTo({ center: point.coordinates, zoom: Math.max(map.getZoom(), 16.5), pitch: 25,
+      padding: framePadding(map, props), duration: reducedMotion() ? 0 : 650 });
+  }, [ready, props.focusRevision]);
+
+  useEffect(() => {
+    const map = mapRef.current;
+    const coordinates = props.plannedRoute?.coordinates;
+    if (!ready || !map || !coordinates?.length || props.viewMode !== 'city') return;
+    const bounds = new maplibregl.LngLatBounds(coordinates[0], coordinates[0]);
+    for (const point of coordinates) bounds.extend(point);
+    map.fitBounds(bounds, { padding: framePadding(map, props), absolutePadding: true, maxZoom: 17, pitch: 0, bearing: 0,
+      duration: reducedMotion() ? 0 : 750 });
+  }, [ready, props.plannedRoute]);
 
   return (
     <div className={`city-map-root${props.feedsVisible ? ' city-map-root--docked' : ''}`}>
