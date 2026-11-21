@@ -1,9 +1,9 @@
 # Timestamped Hydrogen street evidence (#5)
 
-This implementation uses the capture and shared contracts merged in PR #35,
-with main through `e16b09f` merged into the isolated #5 worktree. It uses the
-existing model gateway, capture store and artifact store. It does not replace
-the unfinished #10 branch or require another Genie session.
+This implementation uses the canonical `element119.v1` contracts, capture store,
+shared model gateway and artifact store. Extraction and review do not require
+a Genie session. The former separate `ObservationService` and `evidence_media`
+implementation have been retired so the downstream pipeline consumes one schema.
 
 ## Inputs and limits
 
@@ -41,7 +41,7 @@ The extraction report contains:
 - Explicit unknowns, abstentions, uncertain boundary events and duplicate events.
 - One durable attempt record per window, provider and gateway request IDs,
   model configuration/input hashes, latency and available usage/cost estimates.
-- Failed and cancelled attempts, unprocessed windows and a pending-human-review
+- Failed and cancelled attempts, unprocessed windows and an `optional_not_reviewed`
   label. Budget/auth/quota failures stop later windows instead of retrying them.
 
 Every model frame reference must be among the frames actually supplied. Every
@@ -72,6 +72,13 @@ evidence links. Core observation IDs join directly to sidecar rows; anchor IDs
 use the same suffix with `anc_` instead of `ob_`. Existing Carbon edit code can
 consume the core batch without a shared-contract migration.
 
+Transport success alone does not qualify an observation for submission. The
+gateway records qualification only after domain checks and durable batch/sidecar
+storage, binding both records to their content hash. Fully abstained batches
+remain bound and inspectable without qualifying as accepted evidence. Capture IDs
+are stable episode identities; each window has its own attempt ID for cancellation
+and failure accounting.
+
 ## Reinspection
 
 An extraction permits at most two targeted reinspection attempts. The slot is
@@ -99,12 +106,41 @@ All new routes require the existing backend `WORLD_API_TOKEN` as
 | `GET /api/observations/extractions/{id}/frames/{frameId}` | Original bytes; frames outside the job are refused. |
 | `GET /api/observations/extractions/{id}/annotation-template` | Empty, hash-bound human annotation template. |
 | `POST /api/observations/extractions/{id}/annotations` | Save human annotations and count/region/state/event comparisons. |
+| `GET /api/observations/extractions/{id}/failure-report` | Failed, abstained and unprocessed windows without an invented accuracy score. |
+| `GET /api/observations/extractions/{id}/reviews` | Separate historical review records; never pool repeated labels as independent samples. |
+| `GET /api/observations/extractions/{id}/reviews/{reviewId}` | Verify a review's content hash and binding to this exact extraction. |
 
 The review comparison preserves misses, model abstentions and count intervals
 that disagree with human labels. Region IoU is reported. Event intervals must
 overlap; non-overlap is a miss. Unannotated model facts remain unreviewed, not
 automatically false positives. No human labels or accuracy scores are generated
 by the model. The original review and every scored comparison are immutable.
+
+Templates contain no labels and start with `reviewedOriginalPixels: false`. A
+reviewer must explicitly attest that they inspected the original frames, supply
+their name and `frameIds` for each annotation, and retain `extractionSha256` from
+the template. `reviewMode` distinguishes independent raw-pixel review from review
+assisted by the model table. The HTML shows original pixels first and keeps model
+facts in a collapsed section. Count intervals are scored only for matching frames
+and nearly identical regions (IoU at least 0.95); mismatched regions and human
+unknowns remain explicitly unscored. Snapshot events and uncited frames are rejected.
+
+Offline export and import use saved artifacts and make no model requests:
+
+```sh
+.venv/bin/python -m backend.observation_review --artifact-dir var/pipeline \
+  --extraction extract_EXACT_ID --export-dir var/manual-review/new-packet
+# Personally inspect review.html and original-frames.json, then save completed
+# annotations under a new filename. The template remains empty until edited.
+.venv/bin/python -m backend.observation_review --artifact-dir var/pipeline \
+  --extraction extract_EXACT_ID --annotations var/manual-review/completed.json
+```
+
+Export refuses to overwrite existing files. A packet includes original-frame
+metadata, self-contained HTML, an empty annotation template and a failure report.
+Human review is optional and does not block extraction or downstream use. The
+maintainer waived the remaining manual clip review; no human labels or accuracy
+results are implied by that waiver. See [the verification record](OBSERVATIONS_VERIFICATION.md).
 
 ## Explicit live verification
 

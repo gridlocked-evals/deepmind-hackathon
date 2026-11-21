@@ -112,3 +112,23 @@ tests; live crop reinspection and a broad camera/cadence benchmark were not run.
 The event deduplication is a conservative spatial/temporal heuristic, not actor
 tracking. PR #35 and the capture pin/eviction fixes in PR #49 have merged into
 main and are integrated into this worktree; that dependency is resolved.
+
+## Offline review tooling follow-up
+
+The integration adds explicit original-pixel attestation, cited original frame
+IDs, a hash of the complete extraction report, and independent/model-assisted
+review modes. Saved reviews have their own content hashes. Raw-pixel-first HTML
+and the offline review CLI export empty templates and retain failed, abstained
+and unprocessed windows. Count labels for different regions remain unscored.
+Reinspection marks matching parent events as duplicates rather than accepting
+them again. Domain-invalid outputs and fully abstained batches do not qualify
+as accepted model evidence in the shared gateway ledger.
+
+This follow-up used scripted providers and synthetic media tests only. It made
+no new paid model calls and created no human annotations. The partial snapshot
+feedback and pending clip labels described above are unchanged; tooling does not
+complete the remaining manual-review acceptance work.
+
+## Maintainer scope clarification — November 21
+
+Human clip review is optional and is not required for issue #5 completion. The maintainer confirmed that image processing is complete. Historical annotation gaps above remain an accurate description of what was measured, but no longer block acceptance. Existing live snapshot/clip traces, prefix validation, explicit unknowns, failure accounting and original-pixel access support closure under this clarified scope. No human labels or additional paid verification runs are implied.

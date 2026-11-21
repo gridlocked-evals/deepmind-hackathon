@@ -156,3 +156,32 @@ def test_artifacts_are_immutable(tmp_path):
     store.claim("bindings", "claim_abcd", {"x": 1})
     with pytest.raises(ArtifactError):
         store.claim("bindings", "claim_abcd", {"x": 1})
+
+
+def test_carbon_keeps_camera_lineage_and_only_qualifies_accepted_artifacts(tmp_path):
+    provider = FakeProvider()
+    provider.carbon = [carbon_ok(), carbon_ok(preservedAnchorIds=[])]
+    store = ArtifactStore(tmp_path / 'pipeline')
+
+    async def go():
+        async with client(provider) as http:
+            gw = gateway(tmp_path, http)
+            frame = stored_frame(store)
+            observations = batch()
+            store.put('observation_evidence', observations.id, {
+                'sourceId': '511ny-32998', 'captureId': observations.captureId,
+                'prefixSha256': frame['captureMediaSha256'],
+            })
+            for expected in ('compiled', 'rejected'):
+                bundle = await compile_edit(gw, store, batch=observations, preset_name='protected_bike_lane',
+                    mayor_request='Turn the curb lane into a protected bike lane.', frame=frame,
+                    capture_media_sha256=frame['captureMediaSha256'])
+                assert bundle.streetEdit.status == expected
+                assert bundle.sourceId == '511ny-32998'
+                row = gw.ledger.get(bundle.gatewayRequestId)
+                context = json.loads(row['context'])
+                assert context['source_id'] == '511ny-32998'
+                assert context['episode_id'] == observations.captureId
+                assert context['original_media_sha256'] == ['a' * 64]
+                assert bool(row['qualifying']) is (expected == 'compiled')
+    asyncio.run(go())

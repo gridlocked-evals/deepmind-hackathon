@@ -11,6 +11,11 @@ Protocol references checked November 21, 2026: [Genie lifecycle and controls](ht
 [model constraints](https://aistudio.google.com/docs/models/genie-4), and
 [pricing](https://aistudio.google.com/docs/pricing#genie-4).
 
+Genie is optional and disabled by default. Set `GENIE_ENABLED=true` deliberately
+before using a paid development command or creating a session; existing model
+budgets must also admit the request. The disabled runtime allocates no session and
+dispatches no provider call. Camera capture and observations remain independent.
+
 ## Development verification
 
 No paid calls:

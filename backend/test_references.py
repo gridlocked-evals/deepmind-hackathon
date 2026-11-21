@@ -72,7 +72,7 @@ def test_malformed_and_failed_outputs_are_recorded_not_substituted(tmp_path):
     square, failed, ok = run(tmp_path, provider, three)
     assert square.status == "malformed" and square.referenceImage is None and "16:9" in square.error["error"]
     assert square.modelCall["outcome"] == "ok" and square.modelCall["costUsd"] is not None
-    assert failed.status == "failed" and failed.modelCall["outcome"] == "error" and failed.error["code"]
+    assert failed.status == "failed" and failed.modelCall["outcome"] == "blocked" and failed.error["code"] == "invalid_input"
     assert ok.status == "generated" and [square.attempt, failed.attempt, ok.attempt] == [1, 2, 3]
     with pytest.raises(ReferenceError) as exhausted:
         run(tmp_path, provider, lambda gw: generate_reference(gw, store, bundle, style="photoreal"))

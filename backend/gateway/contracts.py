@@ -37,6 +37,9 @@ STAGES = {
     "world": Service.GENIE,
 }
 Identifier = Annotated[str, Field(pattern=r"^[A-Za-z0-9_.:-]{1,128}$")]
+PROVIDER_STATUSES = frozenset({"INVALID_ARGUMENT", "NOT_FOUND", "PERMISSION_DENIED", "UNAUTHENTICATED",
+    "RESOURCE_EXHAUSTED", "FAILED_PRECONDITION", "INTERNAL", "UNAVAILABLE", "DEADLINE_EXCEEDED",
+    "OUT_OF_RANGE", "UNIMPLEMENTED", "CANCELLED", "UNKNOWN", "invalid_request"})
 
 
 class CallContext(BaseModel):
@@ -47,6 +50,8 @@ class CallContext(BaseModel):
     prompt_id: Identifier
     source_id: Identifier | None = None
     capture_id: Identifier | None = None
+    attempt_id: Identifier | None = None
+    original_media_sha256: tuple[Annotated[str, Field(pattern=r"^[a-f0-9]{64}$")], ...] = ()
     purpose: Literal["development", "smoke", "submission", "demo"] = "development"
 
 
@@ -73,6 +78,7 @@ class ErrorCode(StrEnum):
     TRANSPORT = "transport_error"
     UPSTREAM = "upstream_error"
     INVALID_OUTPUT = "invalid_output"
+    INCOMPLETE_OUTPUT = "incomplete_output"
     BUDGET = "budget_exceeded"
     CONCURRENCY = "concurrency_limit"
     TERMINATION = "termination_unconfirmed"
@@ -81,7 +87,7 @@ class ErrorCode(StrEnum):
 
 
 MESSAGES = {
-    ErrorCode.NOT_CONFIGURED: "Set GEMINI_API_KEY or GOOGLE_API_KEY on the backend.",
+    ErrorCode.NOT_CONFIGURED: "Set the backend key selected by GEMINI_KEY_PROFILE: GEMINI_API_KEY or WORKSHOP_API_KEY.",
     ErrorCode.DISABLED: "Model calls are disabled in the gateway configuration.",
     ErrorCode.INVALID_INPUT: "The request does not satisfy the gateway contract.",
     ErrorCode.AUTH: "The project credential cannot access this service.",
@@ -90,6 +96,7 @@ MESSAGES = {
     ErrorCode.TRANSPORT: "The provider connection failed; usage may be unknown.",
     ErrorCode.UPSTREAM: "The provider rejected or failed the request.",
     ErrorCode.INVALID_OUTPUT: "The provider response failed validation.",
+    ErrorCode.INCOMPLETE_OUTPUT: "The provider exhausted its output allowance without completing the response.",
     ErrorCode.BUDGET: "A configured usage budget or request allowance was exceeded.",
     ErrorCode.CONCURRENCY: "The configured number of concurrent calls is already in flight.",
     ErrorCode.TERMINATION: "Genie termination is unconfirmed. Resolve the recorded interaction before creating another.",
@@ -102,17 +109,22 @@ class GatewayError(Exception):
     """Only fixed messages cross the API/log boundary, never upstream error bodies."""
 
     def __init__(self, code: ErrorCode, *, retryable: bool = False,
-                 request_id: str | None = None, retry_after: float = 0, status: int | None = None):
+                 request_id: str | None = None, retry_after: float = 0,
+                 http_status: int | None = None, provider_status: str | None = None, status: int | None = None):
         self.code = code
         self.retryable = retryable
         self.request_id = request_id
         self.retry_after = retry_after
-        self.status = status
+        http_status = http_status if http_status is not None else status
+        self.http_status = http_status if type(http_status) is int and 100 <= http_status <= 599 else None
+        self.status = self.http_status  # World cleanup inspects explicit rejected creates.
+        self.provider_status = provider_status if isinstance(provider_status, str) and provider_status in PROVIDER_STATUSES else None
         super().__init__(MESSAGES[code])
 
     def public(self) -> dict:
         return {"code": self.code.value, "message": str(self),
-                "retryable": self.retryable, "request_id": self.request_id}
+                "retryable": self.retryable, "request_id": self.request_id,
+                "http_status": self.http_status, "provider_status": self.provider_status}
 
 
 def canonical(value: Any) -> bytes:
@@ -134,6 +146,7 @@ class PreparedCall:
     input_token_bound: int
     output_token_bound: int
     response_model: type[BaseModel] | None = None
+    qualify: bool = True
 
     @property
     def input_hash(self) -> str:

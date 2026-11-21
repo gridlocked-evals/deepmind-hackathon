@@ -19,6 +19,7 @@ from .capture_api import Recorders, make_store, router as capture_router
 from .pipeline_api import make_artifacts, router as pipeline_router
 from .observation_api import router as observation_router
 from .contracts import json_schema
+from .config import load_environment
 from .feeds import HLS_SOURCES, REGISTRY_URL, public_cameras, utc_now
 from .proxy import proxy_media, resolve_token
 from .gateway import GatewayConfig, ModelGateway
@@ -34,6 +35,7 @@ ROOT = Path(__file__).resolve().parent.parent
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    load_environment()
     async with httpx.AsyncClient(
         timeout=httpx.Timeout(10, connect=5, pool=3), follow_redirects=False,
         limits=httpx.Limits(max_connections=12, max_keepalive_connections=8),

@@ -1,0 +1,67 @@
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
+import { Camera, FileText, LockKeyhole, Pause, Play, RefreshCw, ScanEye, Video, X } from 'lucide-react';
+import type { CameraSource } from '../types';
+import { apiUrl, errorText } from './api';
+import type { FrameEvidence } from './api';
+import { EvidenceController, validInterval } from './controller';
+import { CapturedMedia } from './CapturedMedia';
+import { PipelinePanel } from './PipelinePanel';
+import { ObservationReview } from './ObservationReview';
+import './evidence.css';
+export const formatEvidenceTime = (value: number) => `${Math.floor(value / 60).toString().padStart(2, '0')}:${(value % 60).toFixed(3).padStart(6, '0')}`;
+export function EvidencePanel({ camera, open, onClose }: { camera: CameraSource | null; open: boolean; onClose: () => void }) {
+  const controller = useMemo(() => new EvidenceController(), []), state = useSyncExternalStore(controller.subscribe, controller.getSnapshot);
+  const heading = useRef<HTMLHeadingElement>(null);
+  const [token, setToken] = useState(''), [showOriginal, setShowOriginal] = useState(false), [review, setReview] = useState<FrameEvidence | null>(null);
+  useEffect(() => { controller.select(camera); }, [controller, camera?.id]);
+  useEffect(() => {
+    if (!open || !camera || camera.kind !== 'hls') { controller.cancelHistory(); return; }
+    const refresh = () => { if (!document.hidden) void controller.refresh(); }; refresh();
+    const timer = window.setInterval(() => { if (controller.getSnapshot().history?.recording) refresh(); }, 2500);
+    document.addEventListener('visibilitychange', refresh);
+    return () => { clearInterval(timer); document.removeEventListener('visibilitychange', refresh); controller.cancelHistory(); };
+  }, [controller, camera?.id, camera?.kind, open]);
+  useEffect(() => { if (open) heading.current?.focus(); }, [open]);
+  useEffect(() => { setShowOriginal(false); }, [state.capture?.capture.id, camera?.id]);
+  useEffect(() => { setReview(null); }, [state.capture?.capture.id, camera?.id, state.extraction?.id]);
+  if (!open) return null;
+  const current = state.sourceId === camera?.id, history = current ? state.history : null, saved = current ? state.capture : null, capture = saved?.capture;
+  const extraction = current ? state.extraction : null, busy = current ? state.busy : null, bounds = history?.history.segmentBoundariesS ?? [];
+  const ready = current && validInterval(history, state.selection), duration = state.selection ? state.selection[1] - state.selection[0] : 0;
+  const phase = history?.recording ? history.availability === 'recording' ? 'Recording' : 'Waiting for source' : bounds.length ? 'Recording stopped · history retained' : 'Not recording';
+  return <aside className="evidence-panel" id="camera-evidence-panel" aria-labelledby="camera-evidence-heading">
+    <header className="evidence-panel-header"><div><h2 id="camera-evidence-heading" tabIndex={-1} ref={heading}>Evidence to possibility</h2><p>Capture, inspect, propose, then review.</p></div><button className="evidence-icon-button" onClick={onClose} aria-label="Close evidence panel"><X size={19} /></button></header>
+    <div className="evidence-panel-body">
+      {!camera ? <div className="evidence-empty"><p>Select a real camera to begin.</p><span>Choose a public roadway source from the camera list or map.</span></div> : <>
+        <div className="evidence-source"><span className="evidence-source-icon">{camera.kind === 'hls' ? <Video size={21} /> : <Camera size={21} />}</span><div><h3>{camera.name}</h3><p>{camera.id} · {camera.kind === 'hls' ? 'Video' : 'Snapshot'} · source exposure delay unknown</p></div></div>
+        <details className="evidence-operator" open={!token}><summary><LockKeyhole size={14} />Operator access {token ? '· token entered' : '· required for model stages'}</summary><label className="evidence-field">Operator token<input type="password" value={token} onChange={event => setToken(event.target.value)} autoComplete="off" spellCheck={false} placeholder="Backend WORLD_API_TOKEN" /></label><p className="evidence-caption">Set WORLD_API_TOKEN (32+ characters) in the backend .env and enter the same value here. This is separate from Gemini and Workshop API keys, which stay on the server. The operator token is kept only in this page’s memory.</p>{token && <button className="evidence-button subtle" onClick={() => setToken('')}>Clear operator token</button>}</details>
+        {state.error && current && <div className="evidence-error" role="alert"><div><strong>Action could not complete</strong><p>{state.error.message}</p>{(state.error.code || state.error.attemptId) && <details className="evidence-error-details"><summary>Request details</summary><code>{state.error.code} {state.error.attemptId}</code></details>}</div><button className="evidence-icon-button" aria-label="Dismiss error" onClick={() => controller.dismissError()}><X size={15} /></button></div>}
+        <section className="evidence-section"><div className="evidence-section-heading"><h3>Save source evidence</h3>{camera.kind === 'hls' && <span className={`evidence-state ${history?.recording ? 'recording' : ''}`}>{phase}</span>}</div>
+          {camera.kind === 'hls' ? <>
+            <p className="evidence-description">Record this source, then save a bounded clip from actual buffered segments. Stop recording to choose stable boundaries. No earlier history is invented.</p>
+            <div className="evidence-actions"><button className="evidence-button secondary" disabled={!!busy || !!history?.recording} onClick={() => void controller.start()}><Play size={14} />{busy === 'starting' ? 'Starting…' : 'Start recording'}</button><button className="evidence-button secondary" disabled={!!busy || !history?.recording} onClick={() => void controller.stop()}><Pause size={14} />{busy === 'stopping' ? 'Stopping…' : 'Stop'}</button><button className="evidence-button subtle" aria-label="Refresh recording history" disabled={state.historyLoading || !!busy} onClick={() => void controller.refresh()}><RefreshCw size={14} />Refresh</button></div>
+            {history?.lastError && <p className="evidence-inline-error">{history.lastError}</p>}
+            {bounds.length > 1 && state.selection ? <div className="evidence-interval"><div className="evidence-interval-top"><span>{history?.bufferedSeconds.toFixed(3)} s recorded</span><button onClick={() => controller.chooseLatest()} disabled={!!busy}>Latest available clip</button></div><div className="evidence-time-fields"><label>Start in buffer<select value={state.selection[0]} disabled={!!busy} onChange={event => controller.choose(Number(event.target.value), state.selection![1])}>{bounds.slice(0, -1).map(time => <option key={time} value={time}>{formatEvidenceTime(time)}</option>)}</select></label><span>→</span><label>End in buffer<select value={state.selection[1]} disabled={!!busy} onChange={event => controller.choose(state.selection![0], Number(event.target.value))}>{bounds.slice(1).map(time => <option key={time} value={time}>{formatEvidenceTime(time)}</option>)}</select></label></div><p className="evidence-caption">{duration.toFixed(3)} s selected · maximum 120 s · offsets from the oldest buffered segment. Changing history revisions reset the selection; a shifted selection is rejected at save.</p><button className="evidence-button primary wide" disabled={!ready || !!busy} onClick={() => void controller.seal()}>{busy === 'sealing' ? 'Auditing and saving…' : 'Save selected clip'}</button></div> : <p className="evidence-empty">{history?.recording ? 'Waiting for complete source segments. Keep this panel open to refresh history.' : 'Start recording to collect real media. The ring buffer is bounded.'}</p>}
+          </> : <><p className="evidence-description">Save one original image from this camera. A snapshot cannot establish motion, flow or crossing events.</p><button className="evidence-button primary wide" disabled={!!busy} onClick={() => void controller.snapshot()}><Camera size={15} />{busy === 'snapshot' ? 'Saving original image…' : 'Save snapshot'}</button></>}
+        </section>
+        {saved && capture && <section className="evidence-section"><div className="evidence-section-heading"><h3>Retained original</h3><span className="evidence-state">Saved · observed</span></div><div className="evidence-capture-summary"><strong>{capture.sourceKind === 'snapshot' ? 'One source image' : `${capture.durationS.toFixed(3)} s source prefix`}</strong><p>{capture.frameCount ?? 'Unknown'} original frames · {(saved.manifest.files.prefix.bytes / 1024).toFixed(0)} KiB</p><p className="evidence-caption">Retrieved {new Date(capture.retrievalEndedAt).toLocaleString()}. Exposure clock: {capture.captureClock.replaceAll('_', ' ')}. Retrieval time is not exposure time.</p></div>
+          {!!saved.manifest.labels?.length && <p className="evidence-notice evidence-caption">Source labels: {saved.manifest.labels.join(', ')}</p>}
+          <button className="evidence-button secondary wide" onClick={() => setShowOriginal(value => !value)}>{showOriginal ? 'Hide original media' : 'Review original media'}</button>
+          {showOriginal && <CapturedMedia key={capture.id} capture={capture} review={null} />}
+          <details className="evidence-provenance"><summary><FileText size={14} />Source identity and immutable manifest</summary><dl><dt>Capture</dt><dd>{capture.id}</dd><dt>Original prefix SHA-256</dt><dd>{capture.mediaSha256}</dd><dt>Manifest SHA-256</dt><dd>{saved.manifest.manifestSha256}</dd></dl><a href={apiUrl(`/api/captures/${encodeURIComponent(capture.id)}`)} target="_blank" rel="noreferrer">Open saved manifest</a></details>
+          {!!capture.unknowns.length && <details className="evidence-unknowns"><summary>Source unknowns ({capture.unknowns.length})</summary><ul>{capture.unknowns.map((unknown, index) => <li key={index}>{unknown.field}: {unknown.reason}</li>)}</ul></details>}
+        </section>}
+        {capture && <section className="evidence-section"><div className="evidence-section-heading"><h3>1. Inspect source evidence</h3><span className="evidence-paid-label">Hydrogen · paid</span></div><p className="evidence-description">Extract bounded observations from this saved prefix. Video may require multiple model windows; each attempt and any unprocessed coverage remain visible. Retrying uses the same capture.</p><button className="evidence-button primary wide" disabled={!!busy || token.trim().length < 32} onClick={() => void controller.extract(token)}><ScanEye size={15} />{busy === 'extracting' ? 'Extracting observations…' : extraction ? 'Extract again from saved capture · paid' : 'Extract observations · paid calls'}</button>
+          {extraction && <div className="evidence-observations"><div className="evidence-result-summary"><strong>Extraction {extraction.status} · {extraction.metrics?.acceptedFacts ?? 0} accepted facts</strong><span>{extraction.id}</span><p className="evidence-caption">{extraction.metrics?.attempts ?? extraction.windows.length} attempted windows · {extraction.metrics?.unprocessedWindows ?? 'unknown'} unprocessed · {extraction.metrics?.abstentions ?? 0} abstentions · {extraction.metrics?.uncertainBoundaryEvents ?? 0} boundary uncertainties</p></div>
+            {extraction.failures.map((failure, index) => <div className="evidence-error" key={index}><div><strong>Retained failed attempt</strong><p>{errorText(failure.error)}</p><details className="evidence-error-details"><summary>Attempt details</summary><code>{failure.attemptId ?? 'No model attempt recorded'}{typeof failure.error !== 'string' && ` · ${failure.error.code ?? ''}`}</code></details></div></div>)}
+            {extraction.facts.length === 0 && <p className="evidence-empty">No accepted scene evidence is inferred from an empty result. Review failures and unknowns before retrying.</p>}
+            <ul>{extraction.facts.map(fact => <li key={fact.id}><div className="evidence-observation-heading"><span>{fact.kind} · {fact.disposition.replaceAll('_', ' ')}</span><small>{Math.round(fact.confidence * 100)}% model confidence</small></div><p>{fact.label}</p><p className="evidence-caption">{fact.provenance} · visibility {fact.visibility} · {fact.state}</p><div className="evidence-references">{fact.evidence.map((ref, index) => <button key={`${ref.frameId}-${index}`} onClick={() => setReview(ref)} aria-label={`Review original frame ${ref.frameIndex} at ${ref.mediaTimeS.toFixed(3)} seconds`}>{formatEvidenceTime(ref.mediaTimeS)} · frame {ref.frameIndex}</button>)}</div></li>)}</ul>
+            <details className="evidence-unknowns"><summary>Window traces and unknowns</summary>{extraction.windows.map((window, index) => <div key={index}><p>{window.startS.toFixed(3)}–{window.endS.toFixed(3)} s · {window.status}</p><p className="evidence-caption">{window.modelCall?.modelId ?? 'No model recorded'} · {window.modelCall?.requestId ?? 'No request ID'} · {window.modelCall?.outcome ?? 'unknown outcome'}</p><ul>{window.unknowns?.map((unknown, i) => <li key={i}>{unknown.field}: {unknown.reason}</li>)}</ul></div>)}</details>
+            <ObservationReview key={extraction.id} report={extraction} token={token} reference={review} />
+          </div>}
+        </section>}
+        {saved && current && <PipelinePanel key={`${camera.id}:${capture?.id}`} state={state} controller={controller} token={token} />}
+      </>}
+    </div>
+  </aside>;
+}

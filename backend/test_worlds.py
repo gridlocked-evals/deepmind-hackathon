@@ -84,8 +84,8 @@ async def harness(tmp_path, *, stream=None, fail=None, limits=None, config_chang
             stream.closed = True
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-        config = GatewayConfig(data_dir=tmp_path, cleanup_seconds=.2, rates_valid_through=date(2030, 1, 1),
-                               **(config_changes or {}))
+        config = GatewayConfig(**{"data_dir": tmp_path, "genie_enabled": True, "cleanup_seconds": .2,
+                                  "rates_valid_through": date(2030, 1, 1), **(config_changes or {})})
         gateway = ModelGateway(config, client, api_key=KEY, genie_connector=connect)
         manager = WorldManager(gateway, limits or WorldLimits(idle_seconds=2))
         try:
@@ -159,6 +159,41 @@ def test_takeover_releases_defender_and_keeps_steering_separate(tmp_path):
             assert not session.held and session.key_owner == "human"
             assert all("blue bus" not in json.dumps(item) for item in list(session.queues["defender"]._queue))
             await session.stop()
+            await finish(session)
+    asyncio.run(run())
+
+
+def test_browser_receives_running_and_control_status_even_during_frame_bursts(tmp_path):
+    async def run():
+        async with harness(tmp_path, stream=Stream(frames=False)) as (manager, stream, _):
+            session = development(manager)
+            await session.attach('human', session.tokens['human'])
+            await asyncio.wait_for(session.ready.wait(), 1)
+            queue = session.queues['human']
+            initial = [queue.get_nowait() for _ in range(queue.qsize())]
+            assert [item['state'] for item in initial if item['kind'] == 'status'] == ['connecting', 'running']
+            assert not any(item['kind'] == 'frame' for item in initial)
+            # A slow browser must retain the latest running snapshot even if
+            # display frames fill its three-item queue before it reads again.
+            session._publish_status()
+            for _ in range(8):
+                await stream.frame()
+            for _ in range(100):
+                if session.recording.frame_index == 7:
+                    break
+                await asyncio.sleep(.001)
+            burst = [queue.get_nowait() for _ in range(queue.qsize())]
+            assert any(item['kind'] == 'status' and item['state'] == 'running' for item in burst)
+            assert len(burst) <= 3 and session.recording.frame_index == 7
+            await session.command({'kind': 'takeover', 'owner': 'defender'}, 'human')
+            ownership = [queue.get_nowait() for _ in range(queue.qsize())]
+            assert any(item.get('key_owner') == 'defender' for item in ownership)
+            await session.stop('operator_stop')
+            stopping = [queue.get_nowait() for _ in range(queue.qsize())]
+            assert any(item.get('state') == 'stopping' and item.get('stop_reason') == 'operator_stop' for item in stopping)
+            assert KEY not in json.dumps(initial + burst + ownership + stopping)
+            assert SCOPED not in json.dumps(initial + burst + ownership + stopping)
+            assert not any('connect_tokens' in item or 'tokens' in item for item in initial + burst + ownership + stopping)
             await finish(session)
     asyncio.run(run())
 
@@ -342,6 +377,11 @@ def test_browser_relay_capabilities_origin_disconnect_and_secret_boundary(tmp_pa
             socket.send_json({"role": "human", "token": token})
             assert socket.receive_json()["kind"] == "status"
             frame = socket.receive_json()
+            states = []
+            while frame["kind"] == "status":
+                states.append(frame["state"])
+                frame = socket.receive_json()
+            assert "running" in states
             assert frame["kind"] == "frame" and frame["frame_index"] == 0
             socket.send_json({"kind": "key", "owner": "human", "key": "key_w", "hold_ms": 100})
         client.portal.call(session.finished.wait)
@@ -404,6 +444,19 @@ def test_caller_cancellation_during_cleanup_keeps_receiver_and_cancels(tmp_path)
             assert session.state == "stopped" and session.error == "cancelled"
             assert requests[-1].url.path.endswith("/cancel")
             assert not manager.gateway.ledger.budget_status()["unresolved_world_requests"]
+    asyncio.run(run())
+
+
+def test_optional_genie_rejects_before_session_recording_or_transport(tmp_path):
+    async def run():
+        async with harness(tmp_path, config_changes={"genie_enabled": False}) as (manager, stream, requests):
+            with pytest.raises(GatewayError) as caught:
+                development(manager)
+            assert caught.value.code == ErrorCode.DISABLED
+            assert not manager.sessions
+            assert not requests
+            assert manager.gateway.ledger.budget_status()["charged_usd"] == 0
+            assert not list(tmp_path.glob("worlds/*/summary.json"))
     asyncio.run(run())
 
 

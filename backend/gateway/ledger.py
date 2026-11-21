@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 import json
+from datetime import datetime
+from decimal import Decimal
 import os
 from pathlib import Path
 import sqlite3
@@ -10,7 +12,7 @@ import time
 from uuid import uuid4
 
 from .config import GatewayConfig, dollars
-from .contracts import ErrorCode, GatewayError, PreparedCall, Usage, canonical, digest
+from .contracts import MODELS, CallContext, ErrorCode, GatewayError, PreparedCall, Service, Usage, canonical, digest
 
 
 class Ledger:
@@ -35,7 +37,59 @@ class Ledger:
                 );
                 CREATE INDEX IF NOT EXISTS attempt_service ON attempts(service, created_at);
                 CREATE TABLE IF NOT EXISTS blocks (reason TEXT PRIMARY KEY, request_id TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS accepted_artifacts (
+                    request_id TEXT PRIMARY KEY, artifact_id TEXT NOT NULL,
+                    artifact_sha256 TEXT NOT NULL, binding_hash TEXT NOT NULL
+                );
             """)
+        self._import_legacy()
+
+    def _import_legacy(self):
+        """Carry conservative historical reservations forward exactly once.
+
+        The old database is read-only and remains intact. Historical successes
+        retain their original config hash, so they do not verify new settings.
+        """
+        path = self.config.legacy_ledger_path
+        if path is None or not path.exists():
+            return
+        stage_map = {"hydrogen": "observation", "carbon": "compilation", "nano_banana": "reference",
+                     "decisions": "image_gate", "genie": "world"}
+        source = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)
+        try:
+            rows = source.execute("SELECT id,service,tokens,usd,data FROM attempts").fetchall()
+        finally:
+            source.close()
+        with self.connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            for identifier, service, tokens, usd, data in rows:
+                if service not in stage_map or type(tokens) is not int or tokens < 0:
+                    raise GatewayError(ErrorCode.STORAGE)
+                amount = Decimal(str(usd))
+                if not amount.is_finite() or amount < 0:
+                    raise GatewayError(ErrorCode.STORAGE)
+                record = json.loads(data)
+                context = CallContext(episode_id="legacy-import", prompt_id=record["promptId"],
+                    source_id=record.get("sourceId"), capture_id=record.get("captureId"),
+                    original_media_sha256=tuple(record.get("originalMediaSha256", [])))
+                started = datetime.fromisoformat(record["startedAt"].replace("Z", "+00:00")).timestamp()
+                finished = (datetime.fromisoformat(record["completedAt"].replace("Z", "+00:00")).timestamp()
+                            if record.get("completedAt") else None)
+                outcome = ("success" if record.get("outcome") == "success" else
+                           record.get("errorCode") or "pending")
+                # IDs and original evidence stay in the original ledger; only
+                # the stable accounting/termination metadata crosses here.
+                db.execute("""
+                    INSERT OR IGNORE INTO attempts
+                    (request_id,call_id,service,model_id,stage,context,config_hash,credential_hash,
+                     input_hash,result_hash,provider_request_id,created_at,finished_at,lease_until,
+                     outcome,dispatched,charged_microusd,charged_tokens,latency_ms)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,?,?,?)
+                """, ("legacy-" + identifier, "legacy-" + identifier, service, MODELS[Service(service)],
+                      stage_map[service], context.model_dump_json(), "legacy:" + record["configId"],
+                      record.get("credentialDigest", "legacy-unknown"), record["inputSha256"],
+                      record.get("outputSha256"), record.get("providerRequestId"), started, finished,
+                      finished or started, outcome, dollars(amount), tokens, record.get("latencyMs")))
 
     @contextmanager
     def connection(self):
@@ -103,6 +157,16 @@ class Ledger:
             if call.context.purpose != "demo":
                 ceiling -= dollars(self.config.demo_reserve_usd)
             stage = self.config.stages[call.stage]
+            if microusd > dollars(self.config.max_request_usd) or tokens > self.config.max_request_tokens:
+                raise GatewayError(ErrorCode.BUDGET)
+            if self.config.service_budgets:
+                service_budget = self.config.service_budgets[call.service]
+                service_spent, service_tokens = db.execute(
+                    "SELECT COALESCE(SUM(charged_microusd),0),COALESCE(SUM(charged_tokens),0) FROM attempts WHERE service=?",
+                    (call.service.value,),
+                ).fetchone()
+                if service_spent + microusd > dollars(service_budget.usd) or service_tokens + tokens > service_budget.tokens:
+                    raise GatewayError(ErrorCode.BUDGET)
             if spent + microusd > ceiling or stage_spent + microusd > dollars(stage.usd) or stage_tokens + tokens > stage.tokens:
                 raise GatewayError(ErrorCode.BUDGET)
             identifier = str(uuid4())
@@ -204,3 +268,26 @@ class Ledger:
                 traces[row["stage"]].append(row["request_id"])
         return {"ready": all(traces.values()), "traces": traces,
                 "missing": [role for role, ids in traces.items() if not ids]}
+
+    def accept_artifact(self, result, artifact_id: str, artifact_sha256: str, *, qualifying: bool = True) -> str:
+        with self.connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute("SELECT * FROM attempts WHERE request_id=?", (result.request_id,)).fetchone()
+            if (not row or row["outcome"] != "success" or row["stage"] not in {"observation", "compilation"}
+                    or row["service"] != {"observation": "hydrogen", "compilation": "carbon"}[row["stage"]]
+                    or row["model_id"] != result.model_id or row["input_hash"] != result.input_hash
+                    or row["result_hash"] != result.result_hash):
+                raise GatewayError(ErrorCode.INVALID_INPUT)
+            previous = db.execute("SELECT * FROM accepted_artifacts WHERE request_id=?", (result.request_id,)).fetchone()
+            if previous:
+                if (previous["artifact_id"] != artifact_id or previous["artifact_sha256"] != artifact_sha256
+                        or bool(row["qualifying"]) != qualifying):
+                    raise GatewayError(ErrorCode.INVALID_INPUT)
+                return previous["binding_hash"]
+            binding = self.artifact(canonical({"kind": "accepted_domain_artifact", "request_id": result.request_id,
+                "model_id": result.model_id, "input_hash": result.input_hash, "result_hash": result.result_hash,
+                "artifact_id": artifact_id, "artifact_sha256": artifact_sha256, "qualifying": qualifying}))
+            db.execute("INSERT INTO accepted_artifacts VALUES(?,?,?,?)",
+                       (result.request_id, artifact_id, artifact_sha256, binding))
+            db.execute("UPDATE attempts SET qualifying=? WHERE request_id=?", (int(qualifying), result.request_id))
+            return binding
