@@ -168,6 +168,7 @@ def load_suite(path: str | Path, expected_sha256: str | None = None) -> list[Att
 # --- offline per-attack scoring ---------------------------------------------------
 
 Intervention = tuple[int, int, str]  # (start_frame, end_frame, action) from the live judge (#11)
+CONTROL_ACTIONS = {"release_keys", "stop"}  # a "review" request never touches the vehicle
 
 
 def cleared_question(attack: AttackType) -> dict:
@@ -218,7 +219,8 @@ async def score_attack(record: AttackRecord, frames: list[RecordedFrame], judge:
     start = record.send_frame
     window_end = min(start + window_frames, max(by_index, default=start))
     required = seconds_to_frames(tick_s + model_p95_s + key_lag_s + margin_s)
-    cut = min((s for s, e, _ in interventions if s <= window_end and e >= start), default=None)
+    cut = min((s for s, e, action in interventions if action in CONTROL_ACTIONS and s <= window_end and e >= start),
+              default=None)
     scan_end = window_end if cut is None else max(start, cut - 1)  # frames after an intervention starts can't be judged
 
     questions = {"visible": visible_question(attack), "contact": contact_question(attack), "coherent": COHERENT_QUESTION,

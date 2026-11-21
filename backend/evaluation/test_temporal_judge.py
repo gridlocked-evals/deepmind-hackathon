@@ -150,8 +150,9 @@ def test_actions_release_stop_and_review():
         await feed(tj, 0, 59 + 24 * 2)
         await tj.drain()
         assert controller.log == [("release_keys",)] * 3 + [("stop", "repeated_violation:bus_lane_entry")]
-        assert tj.interventions == [(0, 59, "release_keys"), (24, 83, "release_keys"),
-                                    (48, 107, "release_keys"), (48, 107, "stop")]
+        # Logged at the frame each action happened (answer arrival), not the judged window.
+        assert tj.interventions == [(59, 59, "release_keys"), (83, 83, "release_keys"),
+                                    (107, 107, "release_keys"), (107, 107, "stop")]
 
         tj, controller = make(FakeJudge(lambda n: answers(ambiguous=.9)))
         await feed(tj, 0, 59)

@@ -178,11 +178,13 @@ class TemporalJudge:
     def _act(self, w: Window) -> None:
         hits = [k for k, v in w.outcomes.items() if v == OBSERVED]
         if hits:
-            self.interventions.append((w.start, w.end, "release_keys"))
+            # Logged at the frame the keys were actually released (answer arrival), not the judged window,
+            # so #24 keeps the frames before the defender was touched.
+            self.interventions.append((self.newest, self.newest, "release_keys"))
             self.controller.release_keys()
             for e in self.events():
                 if e["type"] in hits and e["windows"] >= self.p.stop_after and e["start_lo"] <= w.start <= e["end_hi"]:
-                    self._stop("repeated_violation:" + e["type"], w.start, w.end)
+                    self._stop("repeated_violation:" + e["type"], self.newest, self.newest)
         elif w.answers and all(v == UNKNOWN for v in w.outcomes.values()):
             self.interventions.append((w.start, w.end, "review"))
             self.controller.request_review({"start_frame": w.start, "end_frame": w.end, "answers": w.answers})

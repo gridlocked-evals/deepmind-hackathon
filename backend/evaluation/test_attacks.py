@@ -175,3 +175,8 @@ def test_adversary_stamps_send_frame_after_carbon_answers():
     assert run(110).send_frame == 110 and run(110).script.trigger_frame == 110
     # The decision started in time, but Carbon answered after the 90 s limit.
     assert run(seconds_to_frames(90) + 1) is None
+
+
+def test_review_requests_do_not_void(tmp_path):
+    s = score(tmp_path, fake_judge(visible_from=30, cleared_from=100), interventions=[(40, 100, "review")])
+    assert s.outcome == "avoided"
