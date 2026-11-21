@@ -107,8 +107,11 @@ def main():
                     for ch in c.iter_content(1 << 20): f.write(ch)
             result["download_s"] = round(time.time() - t1, 2)
             result["video"] = probe(mp4); result["mp4"] = mp4
-            n = result["video"].get("frames")
-            if n: result["throughput_fps"] = round(n / result["gen_wall_s"], 3)
+            video = result["video"]
+            if "error" in video or any(type(video.get(k)) is not int or video[k] <= 0
+                                       for k in ("frames", "width", "height")):
+                raise RuntimeError(f"Downloaded video failed validation: {video}")
+            result["throughput_fps"] = round(video["frames"] / result["gen_wall_s"], 3)
     except Exception as e:
         result["error"] = f"{type(e).__name__}: {e}"
     finally:
@@ -119,7 +122,7 @@ def main():
         result["gpu_mem_samples"] = len(samples)
     json.dump(result, open(os.path.join(a.out, "bench_result.json"), "w"), indent=2, default=str)
     print(json.dumps({k: v for k, v in result.items() if k != "polls"}, indent=2, default=str))
-    # nonzero unless the video was generated and downloaded, so wrappers stop instead of benching a busy server
+    # nonzero unless the video was generated, downloaded and decoded, so wrappers stop on unusable output
     return 0 if "mp4" in result and "error" not in result else 1
 
 if __name__ == "__main__":

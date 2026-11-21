@@ -1,5 +1,6 @@
 import contextlib
 import importlib.util
+import itertools
 import os
 import signal
 import json
@@ -25,6 +26,15 @@ class Resp:
 
     def json(self):
         return self.body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return False
+
+    def iter_content(self, chunk_size):
+        yield b"downloaded video bytes"
 
 
 def load_bench(monkeypatch, tmp_path, submit, status):
@@ -61,6 +71,37 @@ def test_failed_generation_exits_nonzero_and_keeps_diagnostics(monkeypatch, tmp_
 
     assert bench.main() == 1
     assert (tmp_path / "out" / "bench_result.json").exists()
+
+
+@pytest.mark.parametrize("video", [
+    {"error": "cannot decode downloaded bytes"},
+    {"frames": 0, "width": 832, "height": 480},
+    {"frames": -1, "width": 832, "height": 480},
+    {"frames": 61, "width": 0, "height": 480},
+    {"frames": 61, "width": 832, "height": -1},
+    {"frames": 61, "width": 832},
+])
+def test_completed_job_with_unusable_video_fails_and_preserves_artifact(monkeypatch, tmp_path, video):
+    bench = load_bench(monkeypatch, tmp_path, Resp({"id": "v1"}), "completed")
+    monkeypatch.setattr(bench, "probe", lambda path: video)
+    assert bench.main() == 1
+    result = json.loads((tmp_path / "out" / "bench_result.json").read_text())
+    assert result["final_job"]["status"] == "completed" and result["video"] == video
+    assert "failed validation" in result["error"] and "throughput_fps" not in result
+    assert pathlib.Path(result["mp4"]).read_bytes() == b"downloaded video bytes"
+
+
+def test_completed_job_with_decodable_video_succeeds(monkeypatch, tmp_path):
+    bench = load_bench(monkeypatch, tmp_path, Resp({"id": "v1"}), "completed")
+    video = {"frames": 61, "width": 832, "height": 480, "tool": "ffprobe"}
+    monkeypatch.setattr(bench, "probe", lambda path: video)
+    monkeypatch.setattr(bench, "sampler", lambda *args: None)
+    ticks = itertools.count()
+    monkeypatch.setattr(bench.time, "time", lambda: next(ticks))
+    assert bench.main() == 0
+    result = json.loads((tmp_path / "out" / "bench_result.json").read_text())
+    assert result["video"] == video and "error" not in result
+    assert result["throughput_fps"] > 0
 
 
 @pytest.mark.parametrize("bench_rc,expected", [(1, 1), (0, 0)])
