@@ -222,8 +222,8 @@ def test_video_indexes_exact_frames_and_never_reads_suffix_into_model(tmp_path,v
 def test_event_ownership_and_uncertainty_do_not_double_count():
     from backend.observation_contracts import HydrogenOutput
     manifest={'id':'cap_test-0001','cameraId':'camera-test','files':{'prefix':{'sha256':'sha256:'+'a'*64}}}
-    frames=[{'id':f'frame_test-000{i}','frameIndex':i,'mediaTimeS':t,'frameSha256':'sha256:'+'b'*64} for i,t in enumerate([4.,5.,6.,7.])]
-    images=[{'sha256':'sha256:'+'b'*64,'roi':{'kind':'box','x':0,'y':0,'w':1,'h':1}}]*4
+    frames=[{'id':f'frame_test-000{i}','frameIndex':i,'mediaTimeS':t,'frameSha256':f'sha256:{i:064x}'} for i,t in enumerate([4.,5.,6.,7.])]
+    images=[{'sha256':f['frameSha256'],'roi':{'kind':'box','x':0,'y':0,'w':1,'h':1}} for f in frames]
     meta={'frames':frames}
     def output(start,end,indices):
         return HydrogenOutput(captureId=manifest['id'],sourceId=manifest['cameraId'],prefixSha256=manifest['files']['prefix']['sha256'],
@@ -236,6 +236,34 @@ def test_event_ownership_and_uncertainty_do_not_double_count():
     assert duplicate[0]['disposition']=='duplicate'
     uncertain=accept_facts(output(5,7,[1,3]),manifest,w[1],frames,images,True,first)
     assert uncertain[0]['disposition']=='boundary_uncertain'
+
+
+@pytest.mark.parametrize('indices, repeated_crop, accepted', [
+    ([0, 1], False, False), ([0, 2], False, True), ([0], False, False), ([0, 2], True, False)])
+def test_events_require_distinct_pixels_in_the_frames_they_cite(indices, repeated_crop, accepted):
+    from backend.observation_contracts import HydrogenOutput
+    manifest = {'id':'cap_test-0001', 'cameraId':'camera-test',
+                'files':{'prefix':{'sha256':'sha256:'+'a'*64}}}
+    frames = [{'id':f'frame_test-000{i}', 'frameIndex':i, 'mediaTimeS':float(i),
+               'frameSha256':'sha256:'+digest*64} for i, digest in enumerate(['b', 'b', 'c'])]
+    images = [{'sha256':frame['frameSha256'], 'roi':{'kind':'box', 'x':0, 'y':0, 'w':1, 'h':1}}
+              for frame in frames]
+    if repeated_crop:
+        images = [{'sha256':'sha256:'+'d'*64, 'roi':{'kind':'box', 'x':.2, 'y':.2, 'w':.3, 'h':.3}}
+                  for _ in frames]
+    # Motion elsewhere in a window cannot support an event whose own evidence
+    # consists of one image or repeated copies of that image.
+    motion = len({frame['frameSha256'] for frame in frames}) >= 2
+    output = HydrogenOutput(captureId=manifest['id'], sourceId=manifest['cameraId'],
+        prefixSha256=manifest['files']['prefix']['sha256'], facts=[fact({'frames':frames},
+            kind='event', state='crossing', provenance='derived', semanticClass='pedestrian',
+            time={'startS':float(min(indices)), 'endS':float(max(indices))}, frameIndices=indices)])
+    if accepted:
+        rows = accept_facts(output, manifest, windows(0, 3)[0], frames, images, motion, [])
+        assert rows[0]['disposition'] == 'accepted'
+    else:
+        with pytest.raises(ValueError, match='Temporal claims require distinct continuous-media observations'):
+            accept_facts(output, manifest, windows(0, 3)[0], frames, images, motion, [])
 
 
 def test_manual_review_reports_errors_and_does_not_hide_model_abstention(tmp_path):
@@ -302,6 +330,68 @@ def test_cancellation_retains_trace_failure_and_pinned_originals(tmp_path):
             assert 'private cancellation detail' not in json.dumps(report)
             assert report['id'] in captures.pins(manifest['id'])
     asyncio.run(run())
+
+
+@pytest.mark.parametrize('abstention_first', [False, True])
+def test_negative_review_checks_all_accepted_candidates_before_abstentions(tmp_path, abstention_first):
+    captures,store,manifest=setup(tmp_path)
+    def rows(meta):
+        accepted=[fact(meta,kind='signal',semanticClass='signal',state='red',region={**BOX,'w':.25}),
+                  fact(meta,kind='signal',semanticClass='signal',state='green',region={**BOX,'w':.2})]
+        abstention=fact(meta,kind='signal',semanticClass='signal',visibility='unobservable')
+        return [abstention,*accepted] if abstention_first else [*accepted,abstention]
+    report=asyncio.run(perform(tmp_path,captures,store,manifest,Provider([rows])))
+    review=ManualReview(**{**annotation_template(report),'reviewer':'synthetic-regression-fixture','annotations':[
+        {'kind':'signal','semanticClass':'signal','time':{'startS':0,'endS':0},'region':BOX,'present':'no'}]})
+    result=score_review(store,report,review)
+    comparison=result['comparisons'][0]
+    accepted_ids={row['id'] for row in report['facts'] if row['disposition']=='accepted'}
+    assert comparison['outcome']=='false_positive'
+    assert comparison['factId'] in accepted_ids and set(comparison['factIds'])==accepted_ids
+    assert result['unmatchedAcceptedFacts']==[]
+
+
+@pytest.mark.parametrize('abstained,expected', [(True,'model_abstained'),(False,'correct_absence')])
+def test_negative_review_keeps_abstention_distinct_from_absence(tmp_path, abstained, expected):
+    captures,store,manifest=setup(tmp_path)
+    provider=Provider([lambda meta:[fact(meta,kind='signal',semanticClass='signal',visibility='unobservable')]
+                       if abstained else []])
+    report=asyncio.run(perform(tmp_path,captures,store,manifest,provider))
+    review=ManualReview(**{**annotation_template(report),'reviewer':'synthetic-regression-fixture','annotations':[
+        {'kind':'signal','semanticClass':'signal','time':{'startS':0,'endS':0},'region':BOX,'present':'no'}]})
+    assert score_review(store,report,review)['comparisons'][0]['outcome']==expected
+
+
+@pytest.mark.parametrize('human_count,expected', [({},'human_unknown'),
+    ({'lower':1,'upper':1},'count_interval_overlap'),({'lower':4,'upper':4},'count_error')])
+def test_count_review_requires_human_quantity_and_preserves_presence(tmp_path, human_count, expected):
+    captures,store,manifest=setup(tmp_path)
+    provider=Provider([lambda meta:[fact(meta,kind='count',semanticClass='vehicle',count={'lower':1,'upper':2})]])
+    report=asyncio.run(perform(tmp_path,captures,store,manifest,provider))
+    review=ManualReview(**{**annotation_template(report),'reviewer':'synthetic-regression-fixture','annotations':[
+        {'kind':'count','semanticClass':'vehicle','time':{'startS':0,'endS':0},'region':BOX,
+         'present':'yes','count':human_count}]})
+    comparison=score_review(store,report,review)['comparisons'][0]
+    assert comparison['outcome']==expected
+    assert comparison['presenceOutcome']=='matched'
+
+
+@pytest.mark.parametrize('model_case,presence', [('missing','missed'),
+    ('unknown','model_abstained'),('partial_overlap','region_error')])
+def test_count_review_without_human_quantity_keeps_presence_errors(tmp_path, model_case, presence):
+    captures,store,manifest=setup(tmp_path)
+    def rows(meta):
+        if model_case=='missing':
+            return []
+        return [fact(meta,kind='count',semanticClass='vehicle',
+            count={} if model_case=='unknown' else {'lower':1,'upper':2},
+            region={**BOX,'w':.1} if model_case=='partial_overlap' else BOX)]
+    report=asyncio.run(perform(tmp_path,captures,store,manifest,Provider([rows])))
+    review=ManualReview(**{**annotation_template(report),'reviewer':'synthetic-regression-fixture','annotations':[
+        {'kind':'count','semanticClass':'vehicle','time':{'startS':0,'endS':0},'region':BOX,'present':'yes'}]})
+    result=score_review(store,report,review)
+    assert result['counts']=={'human_unknown':1}
+    assert result['comparisons'][0]['presenceOutcome']==presence
 
 
 @pytest.mark.parametrize('completed_windows', [0, 1])
