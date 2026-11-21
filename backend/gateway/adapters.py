@@ -256,7 +256,8 @@ class GenieAdapter:
                         confirmed = cancelled.get("status") in ("completed", "cancelled", "failed")
                         terminal = cancelled.get("status")
                         usage = reported_usage(cancelled.get("usage"))
-                except (GatewayError, TimeoutError):
+                except (GatewayError, TimeoutError, asyncio.CancelledError):
+                    # A second cancellation must not hide a possibly live session.
                     pass
         if create_started and not confirmed:
             raise GatewayError(ErrorCode.TERMINATION) from None
