@@ -26,6 +26,7 @@ Open the local URL printed by Vite. It proxies `/api` to the FastAPI service on 
 
 ## Explore
 
+- **Traffic demo** in the top bar (shown as **Demo** on smaller screens) restores the original Vestry simulation: 24 traffic vehicles plus the ego SUV, authored signals, and a 60-second loop. It resets playback to 1×, makes the traffic layers visible, and frames the intersection. Click it again to restart, or choose Follow to ride with the ego vehicle. Your planned route remains available in the route planner. Citywide zoom hides small vehicles; the routed and local previews use a single ego vehicle.
 - **City** shows the public camera network across all five boroughs. Select a camera in the list or on the map. Search street names or boroughs, filter by borough and source type, and page through the full directory. Click a numbered map cluster to zoom into its cameras.
 - Zoom into a street and click it to open location actions. **Start here** previews up to 250 metres of available basemap street geometry. Local preview direction is unverified; a camera or point without nearby street geometry opens a stationary location preview.
 - **Plan a route** accepts a starting point and destination from camera search or **Pick on map**. Choose **Find driving route**, inspect distance and directions, then **Drive this route**. Routes stop at the destination; pressing Play again replays the journey.
@@ -73,6 +74,11 @@ The opt-in development command is `.\.venv\Scripts\python -m backend.worlds.spik
 it creates one bounded paid session. See its [measured verification](docs/GENIE_RUNTIME_VERIFICATION.md).
 
 ## Verify
+
+The [Hydrogen evidence extractor](docs/OBSERVATIONS.md) implements issue #5 over
+saved camera prefixes, with authenticated extraction/reinspection routes and
+an original-pixel review export. Its explicit live checks and remaining human
+annotation work are recorded in [observation verification](docs/OBSERVATIONS_VERIFICATION.md).
 
 ```sh
 npm run build

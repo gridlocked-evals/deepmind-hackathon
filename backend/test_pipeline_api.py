@@ -21,6 +21,10 @@ def test_routes_store_evidence_and_report_unconfigured_models(tmp_path, monkeypa
         assert options["genieTransport"]["width"] == 1280
         assert http.post("/api/observations", json=batch).status_code == 200
         assert http.post("/api/observations", json={**batch, "anchors": "x"}).status_code == 422
+        duplicates = {**batch, "anchors": [*batch["anchors"], batch["anchors"][0]]}
+        invalid = http.post("/api/observations", json=duplicates)
+        assert invalid.status_code == 422 and invalid.json()["error"] == "invalid observation batch"
+        assert any("duplicate" in error["msg"] for error in invalid.json()["detail"])
         bad = http.post("/api/edits", json={"observationBatchId": batch["id"], "mayorRequest": "bike lane",
                                             "permissions": {"allowed": ["bike_lane"], "forbidden": ["bike_lane"]}})
         assert bad.status_code == 422 and "contradictory" in bad.json()["error"]

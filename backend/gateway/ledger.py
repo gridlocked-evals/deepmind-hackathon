@@ -133,7 +133,15 @@ class Ledger:
 
     def dispatched(self, request_id: str):
         with self.connection() as db:
-            db.execute("UPDATE attempts SET dispatched=1 WHERE request_id=?", (request_id,))
+            db.execute("BEGIN IMMEDIATE")
+            # A paused worker may resume after another worker reclaimed its lease.
+            # Atomically fence that stale owner before any provider request is sent.
+            updated = db.execute("""
+                UPDATE attempts SET dispatched=1
+                WHERE request_id=? AND outcome='pending' AND dispatched=0 AND lease_until>?
+            """, (request_id, time.time()))
+            if updated.rowcount != 1:
+                raise GatewayError(ErrorCode.CANCELLED)
 
     def provider_id(self, request_id: str, provider_id: str):
         with self.connection() as db:

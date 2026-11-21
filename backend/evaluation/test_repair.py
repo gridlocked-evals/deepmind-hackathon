@@ -25,12 +25,12 @@ def ep(episode_id, split="dev", camera="cam1"):
                    window_id="w1", duration_s=60, split=split)
 
 
-def scored(episode, script, outcome, actions=()):
-    record = AttackRecord(script=script, session_id=episode.episode_id, send_frame=script.trigger_frame,
+def scored(episode, script, outcome, actions=(), *, comparison_id="replicate-1", session_id=None):
+    record = AttackRecord(script=script, session_id=session_id or episode.episode_id, send_frame=script.trigger_frame,
                           source="adaptive" if episode.split == "dev" else "frozen")
     score = AttackScore(record=record, outcome=outcome, first_visible_frame=60, contact_frame=80 if outcome == "failed" else None,
                         lead_frames=20, required_lead_frames=36, sample_every=6, window_end=300)
-    return ScoredEpisode(episode=episode, score=score, defender_actions=actions)
+    return ScoredEpisode(episode=episode, comparison_id=comparison_id, score=score, defender_actions=actions)
 
 
 DEV = ep("d1")
@@ -87,8 +87,8 @@ def test_unseen_hazard_and_send_timing_stay_out_of_packet():
     script = AttackScript(attack_type=PED, steering_text=DEV_TEXT, trigger_frame=24)
     record = AttackRecord(script=script, session_id="d1", send_frame=24, source="adaptive")
     unseen = dict(record=record, required_lead_frames=36, sample_every=6, window_end=264)  # 264 = send + window
-    never = ScoredEpisode(episode=DEV, score=AttackScore(**unseen, outcome="void", void_reason="never_rendered"))
-    paired = ScoredEpisode(episode=DEV, score=AttackScore(**unseen, outcome="unresolved",
+    never = ScoredEpisode(episode=DEV, comparison_id="never-rendered", score=AttackScore(**unseen, outcome="void", void_reason="never_rendered"))
+    paired = ScoredEpisode(episode=DEV, comparison_id="paired-void", score=AttackScore(**unseen, outcome="unresolved",
                                                           paired_void_reason="never_rendered"))
     packet = build_packet([never, paired], TEST_SUITE)  # also runs check_packet
     for row in packet:
@@ -194,6 +194,44 @@ def test_dev_before_after_must_be_paired(tmp_path):
     run = session.open_holdout(*locked(tmp_path))
     with pytest.raises(ValueError, match="dev before/after"):  # an after-set with the failure dropped
         seal(tmp_path, session, run, dev_after=[])
+
+
+def test_seal_pairs_replicates_across_distinct_runtime_sessions(tmp_path):
+    session = session_for(tmp_path / "manifest.json")
+    run = session.open_holdout(*locked(tmp_path))
+
+    def rows(episode, scripts, variant):
+        return [scored(episode, script, "failed" if variant == "before" else "avoided",
+                       comparison_id=replicate, session_id=f"{variant}-{episode.episode_id}-{replicate}")
+                for replicate in ("replicate-1", "replicate-2") for script in scripts]
+
+    dev_before, dev_after = (rows(DEV, [DEV_FAIL.score.record.script], variant) for variant in ("before", "after"))
+    holdout_before, holdout_after = (rows(TEST, TEST_SUITE, variant) for variant in ("before", "after"))
+    trial = seal(tmp_path, session, run, dev_before=dev_before, dev_after=list(reversed(dev_after)),
+                 holdout_before=holdout_before, holdout_after=list(reversed(holdout_after)))
+    assert trial.dev_before["overall"]["n"] == trial.dev_after["overall"]["n"] == 2
+    assert trial.holdout_before["overall"]["n"] == trial.holdout_after["overall"]["n"] == 4
+    assert trial.holdout_delta["overall"] == 1
+    assert {i.score.record.session_id for i in holdout_before}.isdisjoint(
+        i.score.record.session_id for i in holdout_after)
+
+
+def test_seal_rejects_replaced_and_duplicated_replicates(tmp_path):
+    session = session_for(tmp_path / "manifest.json")
+    run = session.open_holdout(*locked(tmp_path))
+    replaced = [i.model_copy(update={"comparison_id": "different-replicate"}) for i in HOLDOUT_AFTER]
+    with pytest.raises(ValueError, match="same.*comparison"):
+        seal(tmp_path, session, run, holdout_after=replaced)
+    with pytest.raises(ValueError, match="unique"):
+        seal(tmp_path, session, run, holdout_before=HOLDOUT_BEFORE * 2, holdout_after=HOLDOUT_AFTER * 2)
+    assert not session.sealed
+
+
+def test_comparison_id_is_explicit_not_inferred_from_runtime_session():
+    data = DEV_FAIL.model_dump()
+    del data["comparison_id"]
+    with pytest.raises(ValueError, match="comparison_id"):
+        ScoredEpisode.model_validate(data)
 
 
 class GatedGateway(FakeGateway):
