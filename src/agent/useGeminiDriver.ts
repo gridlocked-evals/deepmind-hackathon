@@ -119,7 +119,7 @@ export function useGeminiDriver(scenario: ScenarioBundle, plan: ScenarioPlan, ad
   }, [availabilityAttempt]);
 
   const inject = useCallback((id: string) => {
-    if (!activeRef.current || !simulation.current?.events) return;
+    if (!activeRef.current || !simulation.current?.events || traceRef.current?.adversary) return;
     simulation.current = { ...simulation.current, events: requestEvent(simulation.current.events, id, simulation.current.time) };
     if (traceRef.current) recordFrame(traceRef.current, simulation.current);
     refreshEvents(value => value + 1);

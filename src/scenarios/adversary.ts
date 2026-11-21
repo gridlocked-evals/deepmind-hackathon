@@ -5,6 +5,7 @@ import { MAX_COMMAND_AGE_SECONDS } from '../agent/types';
 import { EVENT_RUNTIME, parseScenario, requestEvent } from './events';
 import type { EventSpec, ScenarioPlan } from './events';
 import type { RunTrace } from './trace';
+import { footprintContact } from './trace';
 
 /** Adversary lane (#91): Carbon or a seeded random policy picks #72 events under one budget. */
 export type AdversaryMode = 'off' | 'carbon' | 'random';
@@ -82,6 +83,9 @@ export interface AdversaryTrace {
 }
 
 export const attackId = (index: number) => `attack-${index + 1}`;
+// Match applyDue's tolerance when mapping a requested trigger to its actual barrier.
+const appliedBarrier = (time: number) => Math.ceil((time - 1e-9) / ADVERSARY_INTERVAL_S) * ADVERSARY_INTERVAL_S;
+const spacedBarriers = (previous: number[], time: number) => previous.every(at => appliedBarrier(time) - appliedBarrier(at) >= MIN_ATTACK_GAP_S);
 
 /** Two placeholder slots so the scene preallocates actors; manual triggers never fire unless an attack replaces them. */
 export const ADVERSARY_PLAN: ScenarioPlan = parseScenario({ schemaVersion: 'gridlocked-scenario.v1', id: 'adversary-run', runtime: EVENT_RUNTIME,
@@ -91,7 +95,7 @@ export const ADVERSARY_PLAN: ScenarioPlan = parseScenario({ schemaVersion: 'grid
 
 /** Earliest allowed trigger for the next attack, or null when the budget is spent. Checked before any call. */
 export function nextAttackWindow(previous: number[], time: number) {
-  if (previous.length >= MAX_ATTACKS || time > LAST_TRIGGER_S + 1e-9) return null;
+  if (previous.length >= MAX_ATTACKS || time > LAST_TRIGGER_S + 1e-9 || !spacedBarriers(previous, LAST_TRIGGER_S)) return null;
   const earliest = Math.max(time, ...previous.map(at => at + MIN_ATTACK_GAP_S));
   return earliest <= LAST_TRIGGER_S + 1e-9 ? earliest : null;
 }
@@ -120,7 +124,8 @@ export function validateDecision(raw: unknown): AttackDecision {
 export function attackEvent(decision: AttackDecision, index: number, previous: number[], time: number): EventSpec {
   const earliest = nextAttackWindow(previous, time);
   if (index !== previous.length || earliest === null) fail('The attack budget is spent for this run.');
-  if (decision.trigger_seconds! < earliest! - 1e-9 || decision.trigger_seconds! > LAST_TRIGGER_S + 1e-9)
+  if (decision.trigger_seconds! < earliest! - 1e-9 || decision.trigger_seconds! > LAST_TRIGGER_S + 1e-9
+    || !spacedBarriers(previous, decision.trigger_seconds!))
     fail(`Attacks must be ${MIN_ATTACK_GAP_S} s apart, not in the past, and trigger by ${LAST_TRIGGER_S} s.`);
   // #90 time triggers stop at 24 s, so attacks are manual events requested at the barrier that reaches trigger_seconds.
   return parseScenario({ ...ADVERSARY_PLAN, events: [{ id: attackId(index), type: decision.event_type, trigger: { kind: 'manual' },
@@ -129,8 +134,9 @@ export function attackEvent(decision: AttackDecision, index: number, previous: n
 
 /** Same gate for both adversaries: worst-case reaction (the max command age) plus comfortable braking plus 5 m. */
 export function avoidable(distanceAheadM: number, speedMps: number) {
-  return distanceAheadM >= speedMps * MAX_COMMAND_AGE_SECONDS + speedMps ** 2 / (2 * COMFORTABLE_BRAKING) + 5;
+  return distanceAheadM >= minimumAttackDistance(speedMps);
 }
+const minimumAttackDistance = (speedMps: number) => speedMps * MAX_COMMAND_AGE_SECONDS + speedMps ** 2 / (2 * COMFORTABLE_BRAKING) + 5;
 
 /** At a barrier, requests every due attack as a manual event (or voids it) and applies it at this exact simulation time. */
 export function applyDue(state: DriverSimulation, decisions: AdversaryDecisionRecord[]): DriverSimulation {
@@ -179,7 +185,7 @@ export function adversaryBarrier(settings: AdversarySettings, trace: RunTrace, c
       log.decisions.push({ attackIndex: attacks.length, decidedAt: state.time, chosenBy: mode, ...result, injection: null });
     };
     if (mode === 'random') {
-      try { record({ modelId: 'seeded-random', requestId: `random-${settings.seed}-${calls}`, decision: randomDecision(rng, previous, state.time) }); }
+      try { record({ modelId: 'seeded-random', requestId: `random-${settings.seed}-${calls}`, decision: randomDecision(rng, previous, state.time, state.speed) }); }
       catch (failure) { stop((failure as Error).message); }
       applyNow();
       return null;
@@ -216,19 +222,26 @@ export function seededRandom(seed: number) {
   };
 }
 
-/** Matched random baseline: asked at the same barriers as Carbon; uniform action, type, trigger and parameters
- * within the same bounds, budget and cutoff. Always draws six numbers so the stream does not depend on the branch. */
-export function randomDecision(rng: () => number, previous: number[], time: number): AttackDecision {
+/** Matched random baseline: the same timing and avoidability gates as Carbon, on a 0.1 s/m parameter grid.
+ * Always draws six numbers so the stream does not depend on the branch. */
+export function randomDecision(rng: () => number, previous: number[], time: number, speedMps = 0): AttackDecision {
   const earliest = nextAttackWindow(previous, time);
   if (earliest === null) fail('The attack budget is spent for this run.');
   const draws = [rng(), rng(), rng(), rng(), rng(), rng()];
   const round = (value: number) => Math.round(value * 10) / 10;
   const uniform = (draw: number, [low, high]: readonly [number, number]) => Math.min(high, Math.max(low, round(low + draw * (high - low))));
-  if (draws[0] < .5) return { action: 'wait', event_type: null, trigger_seconds: null, parameters: null, durationSeconds: null, reason: 'Seeded random baseline: wait.' };
+  const minimumDistance = Math.ceil(Math.max(BOUNDS.distanceAheadM[0], minimumAttackDistance(speedMps)) * 10) / 10;
+  if (draws[0] < .5 || minimumDistance > BOUNDS.distanceAheadM[1])
+    return { action: 'wait', event_type: null, trigger_seconds: null, parameters: null, durationSeconds: null, reason: 'Seeded random baseline: wait.' };
+  // Sample only admissible tenths, rather than turning a randomly invalid schedule into an error.
+  const triggers: number[] = [];
+  for (let tenth = Math.ceil(earliest! * 10 - 1e-9); tenth <= LAST_TRIGGER_S * 10; tenth++) {
+    const candidate = tenth / 10;
+    if (spacedBarriers(previous, candidate)) triggers.push(candidate);
+  }
   return { action: 'attack', event_type: ATTACK_TYPES[Math.min(ATTACK_TYPES.length - 1, Math.floor(draws[1] * ATTACK_TYPES.length))],
-    // Round up to stay at or after the earliest allowed trigger.
-    trigger_seconds: Math.min(LAST_TRIGGER_S, Math.ceil((earliest! + draws[2] * (LAST_TRIGGER_S - earliest!)) * 10 - 1e-6) / 10),
-    parameters: { distanceAheadM: uniform(draws[3], BOUNDS.distanceAheadM), approachSeconds: uniform(draws[4], BOUNDS.approachSeconds) },
+    trigger_seconds: triggers[Math.min(triggers.length - 1, Math.floor(draws[2] * triggers.length))],
+    parameters: { distanceAheadM: uniform(draws[3], [minimumDistance, BOUNDS.distanceAheadM[1]]), approachSeconds: uniform(draws[4], BOUNDS.approachSeconds) },
     durationSeconds: uniform(draws[5], BOUNDS.durationSeconds), reason: 'Seeded random baseline: attack.' };
 }
 
@@ -241,9 +254,10 @@ export async function requestCarbon(url: string, body: { run_id: string; attack_
     const message = (payload?.detail as { message?: unknown } | undefined)?.message;
     throw new Error(`Carbon adversary failed: ${typeof message === 'string' ? message.slice(0, 200) : `HTTP ${response.status}`}. No fallback attack; adversary stopped for this run.`);
   }
-  if (payload.run_id !== body.run_id || payload.attack_index !== body.attack_index || typeof payload.model_id !== 'string' || typeof payload.request_id !== 'string')
+  if (payload.run_id !== body.run_id || payload.attack_index !== body.attack_index || payload.model_id !== 'gemini-4-carbon'
+    || payload.max_attacks !== MAX_ATTACKS || typeof payload.request_id !== 'string' || !payload.request_id.trim() || payload.request_id.length > 80)
     throw new Error('Carbon adversary returned a mismatched response. No fallback attack; adversary stopped for this run.');
-  return { modelId: payload.model_id.slice(0, 80), requestId: payload.request_id.slice(0, 80), decision: validateDecision(payload.decision) };
+  return { modelId: payload.model_id, requestId: payload.request_id, decision: validateDecision(payload.decision) };
 }
 
 type Box = { state: ActorState; def: ActorDefinition };
@@ -253,16 +267,13 @@ function corners({ state, def }: Box): [number, number][] {
 }
 /** Exact distance between two oriented rectangles; 0 when they overlap (sampled at recorded ticks). */
 export function separation(a: Box, b: Box) {
+  // Crossed rectangles can overlap without containing any of each other's corners.
+  if (footprintContact(a.state, a.def, b.state, b.def)) return 0;
   const ca = corners(a), cb = corners(b);
-  const inside = (p: [number, number], box: Box) => {
-    const dx = p[0] - box.state.x, dy = p[1] - box.state.y, c = Math.cos(box.state.heading), s = Math.sin(box.state.heading);
-    return Math.abs(dx * c + dy * s) <= box.def.length / 2 && Math.abs(-dx * s + dy * c) <= box.def.width / 2;
-  };
   const toSegment = (p: [number, number], q: [number, number], r: [number, number]) => {
     const dx = r[0] - q[0], dy = r[1] - q[1], t = Math.max(0, Math.min(1, ((p[0] - q[0]) * dx + (p[1] - q[1]) * dy) / (dx * dx + dy * dy)));
     return Math.hypot(p[0] - q[0] - t * dx, p[1] - q[1] - t * dy);
   };
-  if (ca.some(p => inside(p, b)) || cb.some(p => inside(p, a))) return 0;
   let best = Infinity;
   for (const [points, other] of [[ca, cb], [cb, ca]] as const)
     for (const p of points) for (let i = 0; i < 4; i++) best = Math.min(best, toSegment(p, other[i], other[(i + 1) % 4]));
@@ -278,6 +289,7 @@ export function attackRecords(trace: RunTrace): AttackRecord[] {
     const id = attackId(row.attackIndex), prefix = `event-${id}-`;
     const applied = trace.eventLog.find(item => item.eventId === id && item.kind === 'applied');
     const removed = trace.eventLog.find(item => item.eventId === id && item.kind === 'cleared');
+    const anchorProgress = trace.appliedEvents.find(item => item.id === id)?.anchorProgress;
     const base = { eventId: id, eventType: row.decision.event_type!, chosenBy: row.chosenBy, reason: row.decision.reason, modelId: row.modelId,
       requestId: row.requestId, decidedAt: row.decidedAt, triggerTime: row.decision.trigger_seconds!, appliedAt: applied?.time ?? null };
     if (!applied) {
@@ -294,9 +306,11 @@ export function attackRecords(trace: RunTrace): AttackRecord[] {
       if (!ego || !hazards.length) return;
       for (const actor of hazards) minSeparation = Math.min(minSeparation, separation({ state: ego, def: egoDef }, { state: actor, def: defs.get(actor.id)! }));
       if (passed === null) {
-        // Cleared: the ego's rear is beyond every corner of the obstruction along the ego's heading.
+        // Route progress must first pass the attack anchor: a bend can put an upcoming hazard
+        // behind the ego's current heading even before the ego reaches it along the route.
         const c = Math.cos(ego.heading), s = Math.sin(ego.heading), rear = -egoDef.length / 2;
-        if (hazards.every(actor => corners({ state: actor, def: defs.get(actor.id)! }).every(([x, y]) => (x - ego.x) * c + (y - ego.y) * s < rear))) passed = frame.time;
+        if (anchorProgress !== undefined && telemetry && telemetry.progress + rear > anchorProgress
+          && hazards.every(actor => corners({ state: actor, def: defs.get(actor.id)! }).every(([x, y]) => (x - ego.x) * c + (y - ego.y) * s < rear))) passed = frame.time;
       }
       if (passed === null && ego.speed < .1) held = true;
     });
@@ -331,13 +345,17 @@ export function runMetrics(trace: RunTrace): RunMetrics {
     progressM: first && last ? last.progress - first.progress : 0, stoppedWhileTraversableS: Math.round(stopped * 10) / 10 };
 }
 
-/** Avoided = no contact. Void and horizon-censored attacks are left out of both denominators and counted separately. */
+/** Only physical clearance earns credit. Assistance and censoring never remove an eligible issued attack. */
 export function adversaryScore(records: AttackRecord[]) {
-  const scored = records.filter(row => row.outcome && row.resolution !== 'horizon_censored');
+  const scored = records.filter(row => !row.void && row.outcome !== null);
   const slice = (assisted: boolean) => {
     const rows = scored.filter(row => row.guardAssisted === assisted);
-    return { avoided: rows.filter(row => row.outcome !== 'contact').length, total: rows.length };
+    return { cleared: rows.filter(row => row.outcome === 'cleared').length, total: rows.length };
   };
-  return { unassisted: slice(false), assisted: slice(true), void: records.filter(row => row.void).length,
+  const unassisted = slice(false), assisted = slice(true);
+  const outcomes = { contact: 0, near_miss: 0, cleared: 0, unresolved: 0 };
+  for (const row of scored) outcomes[row.outcome!]++;
+  return { headline: { cleared: unassisted.cleared, total: scored.length }, unassisted, assisted, outcomes,
+    void: records.filter(row => row.void).length,
     censored: records.filter(row => row.resolution === 'horizon_censored').length };
 }

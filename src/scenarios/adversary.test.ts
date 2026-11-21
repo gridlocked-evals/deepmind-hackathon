@@ -85,7 +85,8 @@ describe('adversary lane (#91)', () => {
     const { records, run } = await drive(carbon('carbon', false));
     expect(records[0]).toMatchObject({ outcome: 'unresolved', resolution: 'safe_hold', guardAssisted: true });
     expect(run.anyContact).toBe(false);
-    expect(adversaryScore(records)).toMatchObject({ unassisted: { avoided: 0, total: 0 }, assisted: { avoided: 1, total: 1 } });
+    expect(adversaryScore(records)).toMatchObject({ headline: { cleared: 0, total: 1 },
+      unassisted: { cleared: 0, total: 0 }, assisted: { cleared: 0, total: 1 } });
   });
   it('a model safe stop is unresolved safe_hold and a vanished obstruction is unresolved removed, never cleared', async () => {
     stubCarbon(once(attack()));

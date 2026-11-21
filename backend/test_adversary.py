@@ -1,12 +1,14 @@
 """Adversary budget, validation and transport tests; never use a provider or credentials."""
 import asyncio
 from copy import deepcopy
+from datetime import date
 import json
 from types import SimpleNamespace
 from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
+import httpx
 import pytest
 
 from backend.adversary import (
@@ -14,6 +16,7 @@ from backend.adversary import (
     REACTION_SECONDS, RUN_SECONDS, min_avoidable_distance, router,
 )
 from backend.driver import MAX_REQUEST_BYTES
+from backend.gateway import GatewayConfig, ModelGateway
 from backend.gateway.contracts import ErrorCode, GatewayError, Service
 
 URL = "/api/adversary/attack"
@@ -74,6 +77,7 @@ def test_valid_attack_uses_carbon_adversary_stage_and_data_only_prompt():
     data = json.loads(call["input_value"].split("Input JSON:\n")[1])
     assert data["state"] == request_body()["state"] and data["previous_attacks"] == []
     assert data["budget"]["max_trigger_seconds"] == MAX_TRIGGER_SECONDS == RUN_SECONDS - 12 == 48
+    assert data["budget"]["adversary_interval_seconds"] == 3
     assert set(data["menu"]["event_types"]) == {"car-crash", "stalled-vehicle"}
 
 
@@ -91,7 +95,7 @@ def test_valid_wait_leaves_slot_open_and_identical_replay_is_cached():
 def test_second_attack_reason_is_never_fed_back():
     client, gateway, _ = client_for()
     client.post(URL, json=request_body())
-    gateway.output = dict(ATTACK, trigger_seconds=18.0, reason="second")
+    gateway.output = dict(ATTACK, trigger_seconds=19.0, reason="second")
     prior = [{"event_type": "car-crash", "trigger_seconds": 8.0}]
     response = client.post(URL, json=request_body(1, prior, time=9.0))
     assert response.status_code == 200 and response.json()["attack_index"] == 1
@@ -174,6 +178,59 @@ def test_cancellation_stores_failure_and_prevents_duplicate_bill():
     asyncio.run(scenario())
 
 
+@pytest.mark.parametrize("dispatched", [False, True])
+def test_cancelled_real_gateway_retains_only_actual_attempt_id(tmp_path, dispatched):
+    async def scenario():
+        entered, release = asyncio.Event(), asyncio.Event()
+        calls = []
+
+        async def handler(request):
+            calls.append(request)
+            entered.set()
+            await release.wait()
+            return httpx.Response(200, json={"status": "completed", "steps": [{"type": "model_output",
+                "content": [{"type": "text", "text": json.dumps(ATTACK)}]}]})
+
+        config = GatewayConfig(data_dir=tmp_path / "ledger", rates_valid_through=date(2030, 1, 1),
+                               max_concurrency=1)
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+            gateway = ModelGateway(config, http, api_key="test-adversary-key")
+            controller = AdversaryController(gateway)
+            body = AttackRequest.model_validate(request_body())
+            if not dispatched:
+                await gateway.slots.acquire()
+            task = asyncio.create_task(controller.attack(body))
+            if dispatched:
+                await entered.wait()
+            else:
+                await asyncio.sleep(0)
+            task.cancel("private cancellation detail")
+            with pytest.raises(asyncio.CancelledError) as cancelled:
+                await task
+            if not dispatched:
+                gateway.slots.release()
+            records = gateway.ledger.attempts()
+            expected_id = records[0]["request_id"] if dispatched else None
+            assert getattr(cancelled.value, "request_id", None) == expected_id
+            assert cancelled.value.args == ("private cancellation detail",)
+            assert len(records) == int(dispatched) and len(calls) == int(dispatched)
+            if dispatched:
+                assert records[0]["outcome"] == "cancelled" and records[0]["usage"] is None
+                assert records[0]["charged_tokens"] > 0
+            with pytest.raises(HTTPException) as duplicate:
+                await controller.attack(body)
+            assert duplicate.value.detail["code"] == "cancelled"
+            assert duplicate.value.detail["request_id"] == expected_id
+            assert "private cancellation detail" not in json.dumps(duplicate.value.detail)
+            assert len(calls) == int(dispatched) and controller.runs[body.run_id].calls == 1
+            assert controller.in_flight == 0 and gateway.slots._value == 1
+            release.set()
+            next_body = AttackRequest.model_validate(request_body(run_id="next-run-0002"))
+            assert (await controller.attack(next_body)).decision.action == "attack"
+            assert len(calls) == int(dispatched) + 1
+    asyncio.run(scenario())
+
+
 @pytest.mark.parametrize("change", [
     {"extra": "x"}, {"action": "teleport"}, {"event_type": "pedestrian"},
     {"trigger_seconds": MAX_TRIGGER_SECONDS + 0.5}, {"trigger_seconds": -1.0}, {"trigger_seconds": "8"},
@@ -220,6 +277,28 @@ def test_trigger_too_close_to_previous_attack_is_rejected(trigger):
     assert response.status_code == 502 and detail(response)["code"] == "invalid_output"
 
 
+@pytest.mark.parametrize("first,second,accepted", [
+    (3.1, 13.1, False),  # requested gap 10 s, actual barriers 6 -> 15 only 9 s
+    (3.1, 15.0, False), (3.1, 15.1, True), (3.0, 13.0, True),
+    (5.0, 15.0 + 5e-10, False),  # within the injector's 1e-9 boundary tolerance
+    (5.0, 15.1, True), (37.1, 48.0, False), (36.0, 48.0, True),
+])
+def test_requested_and_applied_attack_times_both_keep_minimum_gap(first, second, accepted):
+    gateway = FakeGateway(dict(ATTACK, trigger_seconds=first))
+    client, _, _ = client_for(gateway)
+    assert client.post(URL, json=request_body(time=0.0)).status_code == 200
+    gateway.output = dict(ATTACK, trigger_seconds=second)
+    prior = [{"event_type": "car-crash", "trigger_seconds": first}]
+    response = client.post(URL, json=request_body(1, prior, time=first + 1))
+    assert response.status_code == (200 if accepted else 502)
+    if accepted:
+        assert response.json()["decision"]["trigger_seconds"] == second
+    else:
+        assert detail(response)["code"] == "invalid_output"
+        assert client.post(URL, json=request_body(1, prior, time=first + 1)).json() == response.json()
+        assert len(gateway.calls) == 2
+
+
 def test_unavoidable_attack_is_a_typed_error_not_clamped():
     speed = 10.0
     limit = min_avoidable_distance(speed)
@@ -230,6 +309,21 @@ def test_unavoidable_attack_is_a_typed_error_not_clamped():
     assert "decision" not in response.json()
     client, _, _ = client_for(FakeGateway(dict(ATTACK, parameters={"distanceAheadM": limit + 0.1, "approachSeconds": 2.0})))
     assert client.post(URL, json=request_body(speed=speed)).status_code == 200
+
+
+def test_model_may_use_the_exact_minimum_distance_advertised_in_its_prompt():
+    class EchoMinimumGateway(FakeGateway):
+        async def generate(self, service, **kwargs):
+            data = json.loads(kwargs["input_value"].split("Input JSON:\n")[1])
+            self.output["parameters"]["distanceAheadM"] = data["budget"]["min_distance_ahead_m"]
+            return await super().generate(service, **kwargs)
+
+    client, gateway, _ = client_for(EchoMinimumGateway())
+    response = client.post(URL, json=request_body(speed=8.0))
+    assert response.status_code == 200
+    distance = response.json()["decision"]["parameters"]["distanceAheadM"]
+    assert distance >= min_avoidable_distance(8.0)
+    assert distance == gateway.output["parameters"]["distanceAheadM"]
 
 
 @pytest.mark.parametrize("path,value", [

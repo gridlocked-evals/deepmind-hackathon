@@ -12,6 +12,8 @@ Explore New York through its public roadway cameras, pick a street, and give Gem
 
 Quick start after installing dependencies: run `npm run dev:api` and `npm run dev` in separate terminals. Cameras, route previews, and traffic replay need no model credential. Gemini driving uses optional backend-only `GEMINI_API_KEY` or `GOOGLE_API_KEY` configuration; no key goes into the browser.
 
+Run `npm run test:browser` for offline desktop/mobile driver lifecycle regression tests after installing Playwright Chromium. See [browser test setup and coverage](docs/BROWSER_TESTS.md).
+
 The repository also implements capture storage, Carbon edits, Nano Banana references, Decisions gates, a bounded Genie runtime, and evaluation components. See [edit/reference/gate integration](docs/EDIT_REFERENCE_GATE.md) and [Genie runtime](docs/GENIE_RUNTIME.md) for their contracts and remaining integration work. The simulator driver is separate from the visual Genie navigation controller.
 
 ## Hackathon provenance (Nov 21, 2026)
