@@ -1,12 +1,12 @@
 # Gotham Forge architecture
 
-Gotham Forge currently combines a geographic NYC map, one deterministic traffic demonstration, and independently advancing public camera footage. The frontend runs without model credentials. The FastAPI backend supplies camera metadata and HLS transport; it does not execute the traffic simulation.
+The current interface combines a geographic NYC map, one deterministic traffic demonstration, and independently advancing public camera footage. The frontend runs without model credentials. FastAPI supplies camera metadata, HLS transport, bounded capture, and a server-only model gateway; it does not execute the traffic simulation. Element 119's model pipeline is being built separately from the authored demo.
 
 For setup and controls, see [RUNNING.md](../RUNNING.md). The broader reconstruction and evaluation roadmap remains in [GOTHAM_FORGE_PLAN.md](../GOTHAM_FORGE_PLAN.md).
 
 ## Contracts and ownership
 
-Shared frontend contracts live in [src/types.ts](../src/types.ts).
+The existing demo's frontend contracts live in [src/types.ts](../src/types.ts). Element 119's versioned Python/TypeScript artifact contracts and ownership live in [CONTRACTS.md](CONTRACTS.md). These preserve capture/media identity, evidence time domains, model provenance, unknowns, image-space edit permissions, and distinct stochastic world-session identities.
 
 | Contract | Responsibility |
 | --- | --- |
@@ -54,7 +54,13 @@ The API exposes `GET /api/health`, `/api/cameras` for Manhattan DOT snapshots, `
 
 The DOT directory cache retains the last successful fetch time when serving stale data. Snapshot images load directly from validated DOT URLs. HLS requests use the local proxy first; the frontend can fall back to a known direct stream URL. Native HLS is preferred when supported, otherwise `hls.js` is loaded dynamically. Playback has bounded retries, explicit error states, visibility-aware suspension, and cleanup when the source changes.
 
-The HLS proxy accepts registered camera IDs rather than arbitrary upstream URLs. It validates source host/path and redirects, rewrites playlist URIs to camera-bound opaque tokens, supports single byte ranges, and bounds concurrency and response sizes. Tokens, source health, and caches are in memory. A server restart discards them; there is no footage archive or persistent episode store.
+The HLS proxy accepts registered camera IDs rather than arbitrary upstream URLs. It validates source host/path and redirects, rewrites playlist URIs to camera-bound opaque tokens, supports single byte ranges, and bounds concurrency and response sizes. Proxy tokens, source health, and directory caches are in memory. Separately, [the capture service](CAPTURE_API.md) persists immutable episode manifests/media and pinned references within a storage budget. A proxy token is not a capture ID.
+
+## Model services
+
+[The model gateway](MODEL_GATEWAY.md) owns credential selection, immutable inference requests, bounded concurrency/retries/timeouts, budgets, and sanitized audit records. Hydrogen and Carbon retain distinct required roles. Standard model interactions, typed Decisions requests, and Genie live sessions use separate adapters; Genie completion must end server generation. Provider success is recorded only after a validated response, and local tests do not establish account access.
+
+The local API loads `.env` only on the server. `GEMINI_KEY_PROFILE` explicitly selects the Tier 3 or Workshop AI Studio key; neither key reaches the Vite bundle. Run one backend worker per local evidence/budget directory until shared coordination is implemented.
 
 ## Extension points and current limits
 

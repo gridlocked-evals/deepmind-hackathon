@@ -1,5 +1,20 @@
 # Verification record
 
+## Element 119 foundation — November 21, 2026
+
+The shared Python/TypeScript contracts, model gateway, capture service, configuration, and integrated API pass **95 Python tests**, **35 frontend tests**, contract generation drift checks, and the production build. The existing large application-chunk warning remains. Provider HTTP/SDK tests use mocks and do not verify model availability or project quotas.
+
+One actual public 511NY Vestry source (`511ny-32998`) was recorded and sealed after fixing parsing of the harmless `EXT-X-DISCONTINUITY-SEQUENCE` metadata tag. True discontinuity markers remain unsupported and are rejected. The accepted episode contained **4.671 seconds declared**, **4.670733 seconds decoded**, **70 frames**, and **159,988 bytes**. Its shared `CaptureContext` validated; exposure time and broadcast delay remained unknown.
+
+- Capture ID: `cap_7f3295864f4c48ad83c50b77022394d4`
+- Original-media SHA-256: `dcc84014d0a97a0d385e3c5408c1a753440fd069d2fdc1372d7c315ec6d990bf`
+- Manifest SHA-256: `0b37c7fa537cfefa1d2cc9e39f1fb99de1d6b7621ed7c10f478ee6b22d976f8c`
+- Retained local evidence: ignored `data/live-validation/` (not committed or publicly hosted).
+
+This is narrow live-video acceptance, not a real snapshot/model/world/UI/evaluation result. No real model smoke calls were made; add the server credentials and run the explicit [gateway probes](MODEL_GATEWAY.md#capability-smoke-tests). Complete the remaining issue acceptance criteria before closing issues #3 and #4. The [contracts guide](CONTRACTS.md) documents the synthetic cross-language fixture and malformed cases.
+
+## Baseline UI — November 19, 2026
+
 The initial simulation UI was verified locally on November 19, 2026. The traffic scenario is deterministic, hand-authored illustrative traffic; camera footage is a separate public source.
 
 ## Automated checks

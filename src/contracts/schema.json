@@ -1,0 +1,1452 @@
+{
+  "$defs": {
+    "CaptureContext": {
+      "additionalProperties": false,
+      "properties": {
+        "captureId": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{1,95}$",
+          "title": "Captureid",
+          "type": "string"
+        },
+        "sourceId": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{1,95}$",
+          "title": "Sourceid",
+          "type": "string"
+        },
+        "originalMediaSha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Originalmediasha256",
+          "type": "string"
+        },
+        "modality": {
+          "enum": [
+            "snapshot",
+            "video"
+          ],
+          "title": "Modality",
+          "type": "string"
+        },
+        "durationSeconds": {
+          "maximum": 120,
+          "minimum": 0,
+          "title": "Durationseconds",
+          "type": "number"
+        },
+        "allowedInterval": {
+          "$ref": "#/$defs/TimeInterval"
+        },
+        "receivedAt": {
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,6})?Z$",
+          "title": "Receivedat",
+          "type": "string"
+        },
+        "sourceCapturedAt": {
+          "anyOf": [
+            {
+              "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,6})?Z$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Sourcecapturedat"
+        },
+        "sourceClock": {
+          "enum": [
+            "exposure",
+            "program_date_time",
+            "unknown"
+          ],
+          "title": "Sourceclock",
+          "type": "string"
+        },
+        "clockUncertaintySeconds": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Clockuncertaintyseconds"
+        }
+      },
+      "required": [
+        "captureId",
+        "sourceId",
+        "originalMediaSha256",
+        "modality",
+        "durationSeconds",
+        "allowedInterval",
+        "receivedAt",
+        "sourceCapturedAt",
+        "sourceClock",
+        "clockUncertaintySeconds"
+      ],
+      "title": "CaptureContext",
+      "type": "object"
+    },
+    "EditedRegion": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{1,95}$",
+          "title": "Id",
+          "type": "string"
+        },
+        "region": {
+          "$ref": "#/$defs/ImageRegion"
+        },
+        "permissions": {
+          "items": {
+            "$ref": "#/$defs/VehiclePermission"
+          },
+          "minItems": 1,
+          "title": "Permissions",
+          "type": "array"
+        },
+        "provenance": {
+          "enum": [
+            "inserted",
+            "generated"
+          ],
+          "title": "Provenance",
+          "type": "string"
+        },
+        "evidence": {
+          "items": {
+            "$ref": "#/$defs/EvidenceRef"
+          },
+          "minItems": 1,
+          "title": "Evidence",
+          "type": "array"
+        }
+      },
+      "required": [
+        "id",
+        "region",
+        "permissions",
+        "provenance",
+        "evidence"
+      ],
+      "title": "EditedRegion",
+      "type": "object"
+    },
+    "EvaluationMetric": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{1,95}$",
+          "title": "Name",
+          "type": "string"
+        },
+        "value": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Value"
+        },
+        "unit": {
+          "minLength": 1,
+          "title": "Unit",
+          "type": "string"
+        },
+        "unknownReason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Unknownreason"
+        }
+      },
+      "required": [
+        "name",
+        "value",
+        "unit",
+        "unknownReason"
+      ],
+      "title": "EvaluationMetric",
+      "type": "object"
+    },
+    "EvaluationResult": {
+      "additionalProperties": false,
+      "properties": {
+        "schemaVersion": {
+          "const": "1.0",
+          "title": "Schemaversion",
+          "type": "string"
+        },
+        "id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{1,95}$",
+          "title": "Id",
+          "type": "string"
+        },
+        "capture": {
+          "$ref": "#/$defs/CaptureContext"
+        },
+        "createdAt": {
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,6})?Z$",
+          "title": "Createdat",
+          "type": "string"
+        },
+        "provenance": {
+          "const": "derived",
+          "title": "Provenance",
+          "type": "string"
+        },
+        "trace": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ModelTrace"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "unknowns": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Unknowns",
+          "type": "array"
+        },
+        "kind": {
+          "const": "EvaluationResult",
+          "title": "Kind",
+          "type": "string"
+        },
+        "worldSessionId": {
+          "anyOf": [
+            {
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{1,95}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Worldsessionid"
+        },
+        "datasetId": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{1,95}$",
+          "title": "Datasetid",
+          "type": "string"
+        },
+        "split": {
+          "enum": [
+            "development",
+            "held_out"
+          ],
+          "title": "Split",
+          "type": "string"
+        },
+        "baselineId": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{1,95}$",
+          "title": "Baselineid",
+          "type": "string"
+        },
+        "attemptIds": {
+          "items": {
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{1,95}$",
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Attemptids",
+          "type": "array"
+        },
+        "outcome": {
+          "enum": [
+            "pass",
+            "fail",
+            "unknown"
+          ],
+          "title": "Outcome",
+          "type": "string"
+        },
+        "evaluatedSeconds": {
+          "minimum": 0,
+          "title": "Evaluatedseconds",
+          "type": "number"
+        },
+        "unknownSeconds": {
+          "minimum": 0,
+          "title": "Unknownseconds",
+          "type": "number"
+        },
+        "metrics": {
+          "items": {
+            "$ref": "#/$defs/EvaluationMetric"
+          },
+          "title": "Metrics",
+          "type": "array"
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "id",
+        "capture",
+        "createdAt",
+        "provenance",
+        "trace",
+        "unknowns",
+        "kind",
+        "worldSessionId",
+        "datasetId",
+        "split",
+        "baselineId",
+        "attemptIds",
+        "outcome",
+        "evaluatedSeconds",
+        "unknownSeconds",
+        "metrics"
+      ],
+      "title": "EvaluationResult",
+      "type": "object"
+    },
+    "EvidenceRef": {
+      "additionalProperties": false,
+      "properties": {
+        "captureId": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{1,95}$",
+          "title": "Captureid",
+          "type": "string"
+        },
+        "originalMediaSha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Originalmediasha256",
+          "type": "string"
+        },
+        "timeSeconds": {
+          "maximum": 120,
+          "minimum": 0,
+          "title": "Timeseconds",
+          "type": "number"
+        },
+        "frameIndex": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Frameindex"
+        },
+        "region": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ImageRegion"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "captureId",
+        "originalMediaSha256",
+        "timeSeconds",
+        "frameIndex",
+        "region"
+      ],
+      "title": "EvidenceRef",
+      "type": "object"
+    },
+    "GateCheck": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{1,95}$",
+          "title": "Name",
+          "type": "string"
+        },
+        "result": {
+          "enum": [
+            "pass",
+            "fail",
+            "unknown"
+          ],
+          "title": "Result",
+          "type": "string"
+        },
+        "probability": {
+          "anyOf": [
+            {
+              "maximum": 1,
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Probability"
+        },
+        "confidence": {
+          "anyOf": [
+            {
+              "maximum": 1,
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Confidence"
+        },
+        "threshold": {
+          "maximum": 1,
+          "minimum": 0,
+          "title": "Threshold",
+          "type": "number"
+        },
+        "minimumConfidence": {
+          "maximum": 1,
+          "minimum": 0,
+          "title": "Minimumconfidence",
+          "type": "number"
+        },
+        "evidence": {
+          "items": {
+            "$ref": "#/$defs/EvidenceRef"
+          },
+          "title": "Evidence",
+          "type": "array"
+        }
+      },
+      "required": [
+        "name",
+        "result",
+        "probability",
+        "confidence",
+        "threshold",
+        "minimumConfidence",
+        "evidence"
+      ],
+      "title": "GateCheck",
+      "type": "object"
+    },
+    "GateDecision": {
+      "additionalProperties": false,
+      "properties": {
+        "schemaVersion": {
+          "const": "1.0",
+          "title": "Schemaversion",
+          "type": "string"
+        },
+        "id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{1,95}$",
+          "title": "Id",
+          "type": "string"
+        },
+        "capture": {
+          "$ref": "#/$defs/CaptureContext"
+        },
+        "createdAt": {
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,6})?Z$",
+          "title": "Createdat",
+          "type": "string"
+        },
+        "provenance": {
+          "const": "derived",
+          "title": "Provenance",
+          "type": "string"
+        },
+        "trace": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ModelTrace"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "unknowns": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Unknowns",
+          "type": "array"
+        },
+        "kind": {
+          "const": "GateDecision",
+          "title": "Kind",
+          "type": "string"
+        },
+        "referenceImageId": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{1,95}$",
+          "title": "Referenceimageid",
+          "type": "string"
+        },
+        "verdict": {
+          "enum": [
+            "accept",
+            "reject",
+            "unknown"
+          ],
+          "title": "Verdict",
+          "type": "string"
+        },
+        "action": {
+          "enum": [
+            "allow_world_creation",
+            "block",
+            "review"
+          ],
+          "title": "Action",
+          "type": "string"
+        },
+        "checks": {
+          "items": {
+            "$ref": "#/$defs/GateCheck"
+          },
+          "minItems": 1,
+          "title": "Checks",
+          "type": "array"
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "id",
+        "capture",
+        "createdAt",
+        "provenance",
+        "trace",
+        "unknowns",
+        "kind",
+        "referenceImageId",
+        "verdict",
+        "action",
+        "checks"
+      ],
+      "title": "GateDecision",
+      "type": "object"
+    },
+    "ImageRegion": {
+      "additionalProperties": false,
+      "properties": {
+        "x": {
+          "maximum": 1,
+          "minimum": 0,
+          "title": "X",
+          "type": "number"
+        },
+        "y": {
+          "maximum": 1,
+          "minimum": 0,
+          "title": "Y",
+          "type": "number"
+        },
+        "width": {
+          "exclusiveMinimum": 0,
+          "maximum": 1,
+          "title": "Width",
+          "type": "number"
+        },
+        "height": {
+          "exclusiveMinimum": 0,
+          "maximum": 1,
+          "title": "Height",
+          "type": "number"
+        }
+      },
+      "required": [
+        "x",
+        "y",
+        "width",
+        "height"
+      ],
+      "title": "ImageRegion",
+      "type": "object"
+    },
+    "ModelTrace": {
+      "additionalProperties": false,
+      "properties": {
+        "traceId": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{1,95}$",
+          "title": "Traceid",
+          "type": "string"
+        },
+        "requestId": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}$",
+          "title": "Requestid",
+          "type": "string"
+        },
+        "providerRequestId": {
+          "anyOf": [
+            {
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Providerrequestid"
+        },
+        "modelId": {
+          "enum": [
+            "gemini-4-hydrogen",
+            "gemini-4-carbon",
+            "gemini-nano-banana-2.1",
+            "gemini-decision-1",
+            "genie-4"
+          ],
+          "title": "Modelid",
+          "type": "string"
+        },
+        "promptId": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{1,95}$",
+          "title": "Promptid",
+          "type": "string"
+        },
+        "configId": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{1,95}$",
+          "title": "Configid",
+          "type": "string"
+        },
+        "inputSha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Inputsha256",
+          "type": "string"
+        },
+        "startedAt": {
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,6})?Z$",
+          "title": "Startedat",
+          "type": "string"
+        },
+        "completedAt": {
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,6})?Z$",
+          "title": "Completedat",
+          "type": "string"
+        },
+        "outcome": {
+          "enum": [
+            "success",
+            "error",
+            "unknown"
+          ],
+          "title": "Outcome",
+          "type": "string"
+        },
+        "inputTokens": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Inputtokens"
+        },
+        "outputTokens": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Outputtokens"
+        }
+      },
+      "required": [
+        "traceId",
+        "requestId",
+        "providerRequestId",
+        "modelId",
+        "promptId",
+        "configId",
+        "inputSha256",
+        "startedAt",
+        "completedAt",
+        "outcome",
+        "inputTokens",
+        "outputTokens"
+      ],
+      "title": "ModelTrace",
+      "type": "object"
+    },
+    "NavigationEvent": {
+      "additionalProperties": false,
+      "properties": {
+        "schemaVersion": {
+          "const": "1.0",
+          "title": "Schemaversion",
+          "type": "string"
+        },
+        "id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{1,95}$",
+          "title": "Id",
+          "type": "string"
+        },
+        "capture": {
+          "$ref": "#/$defs/CaptureContext"
+        },
+        "createdAt": {
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,6})?Z$",
+          "title": "Createdat",
+          "type": "string"
+        },
+        "provenance": {
+          "enum": [
+            "observed",
+            "derived"
+          ],
+          "title": "Provenance",
+          "type": "string"
+        },
+        "trace": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ModelTrace"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "unknowns": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Unknowns",
+          "type": "array"
+        },
+        "kind": {
+          "const": "NavigationEvent",
+          "title": "Kind",
+          "type": "string"
+        },
+        "worldSessionId": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{1,95}$",
+          "title": "Worldsessionid",
+          "type": "string"
+        },
+        "sequence": {
+          "minimum": 0,
+          "title": "Sequence",
+          "type": "integer"
+        },
+        "sessionTimeSeconds": {
+          "maximum": 120,
+          "minimum": 0,
+          "title": "Sessiontimeseconds",
+          "type": "number"
+        },
+        "frameSha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Framesha256",
+          "type": "string"
+        },
+        "controller": {
+          "enum": [
+            "human",
+            "hydrogen",
+            "supervisor"
+          ],
+          "title": "Controller",
+          "type": "string"
+        },
+        "action": {
+          "enum": [
+            "forward",
+            "backward",
+            "left",
+            "right",
+            "release_all",
+            "terminate"
+          ],
+          "title": "Action",
+          "type": "string"
+        },
+        "holdMilliseconds": {
+          "maximum": 1000,
+          "minimum": 0,
+          "title": "Holdmilliseconds",
+          "type": "integer"
+        },
+        "reason": {
+          "minLength": 1,
+          "title": "Reason",
+          "type": "string"
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "id",
+        "capture",
+        "createdAt",
+        "provenance",
+        "trace",
+        "unknowns",
+        "kind",
+        "worldSessionId",
+        "sequence",
+        "sessionTimeSeconds",
+        "frameSha256",
+        "controller",
+        "action",
+        "holdMilliseconds",
+        "reason"
+      ],
+      "title": "NavigationEvent",
+      "type": "object"
+    },
+    "Observation": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{1,95}$",
+          "title": "Id",
+          "type": "string"
+        },
+        "category": {
+          "enum": [
+            "anchor",
+            "lane",
+            "crossing",
+            "count",
+            "signal",
+            "obstruction",
+            "event"
+          ],
+          "title": "Category",
+          "type": "string"
+        },
+        "value": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Value"
+        },
+        "confidence": {
+          "anyOf": [
+            {
+              "maximum": 1,
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Confidence"
+        },
+        "unknownReason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Unknownreason"
+        },
+        "provenance": {
+          "enum": [
+            "observed",
+            "derived",
+            "assumed"
+          ],
+          "title": "Provenance",
+          "type": "string"
+        },
+        "evidence": {
+          "items": {
+            "$ref": "#/$defs/EvidenceRef"
+          },
+          "minItems": 1,
+          "title": "Evidence",
+          "type": "array"
+        }
+      },
+      "required": [
+        "id",
+        "category",
+        "value",
+        "confidence",
+        "unknownReason",
+        "provenance",
+        "evidence"
+      ],
+      "title": "Observation",
+      "type": "object"
+    },
+    "ObservationBatch": {
+      "additionalProperties": false,
+      "properties": {
+        "schemaVersion": {
+          "const": "1.0",
+          "title": "Schemaversion",
+          "type": "string"
+        },
+        "id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{1,95}$",
+          "title": "Id",
+          "type": "string"
+        },
+        "capture": {
+          "$ref": "#/$defs/CaptureContext"
+        },
+        "createdAt": {
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,6})?Z$",
+          "title": "Createdat",
+          "type": "string"
+        },
+        "provenance": {
+          "enum": [
+            "observed",
+            "derived"
+          ],
+          "title": "Provenance",
+          "type": "string"
+        },
+        "trace": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ModelTrace"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "unknowns": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Unknowns",
+          "type": "array"
+        },
+        "kind": {
+          "const": "ObservationBatch",
+          "title": "Kind",
+          "type": "string"
+        },
+        "observations": {
+          "items": {
+            "$ref": "#/$defs/Observation"
+          },
+          "minItems": 1,
+          "title": "Observations",
+          "type": "array"
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "id",
+        "capture",
+        "createdAt",
+        "provenance",
+        "trace",
+        "unknowns",
+        "kind",
+        "observations"
+      ],
+      "title": "ObservationBatch",
+      "type": "object"
+    },
+    "ReferenceImage": {
+      "additionalProperties": false,
+      "properties": {
+        "schemaVersion": {
+          "const": "1.0",
+          "title": "Schemaversion",
+          "type": "string"
+        },
+        "id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{1,95}$",
+          "title": "Id",
+          "type": "string"
+        },
+        "capture": {
+          "$ref": "#/$defs/CaptureContext"
+        },
+        "createdAt": {
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,6})?Z$",
+          "title": "Createdat",
+          "type": "string"
+        },
+        "provenance": {
+          "const": "generated",
+          "title": "Provenance",
+          "type": "string"
+        },
+        "trace": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ModelTrace"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "unknowns": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Unknowns",
+          "type": "array"
+        },
+        "kind": {
+          "const": "ReferenceImage",
+          "title": "Kind",
+          "type": "string"
+        },
+        "streetEditId": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{1,95}$",
+          "title": "Streeteditid",
+          "type": "string"
+        },
+        "artifactId": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{1,95}$",
+          "title": "Artifactid",
+          "type": "string"
+        },
+        "mediaSha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Mediasha256",
+          "type": "string"
+        },
+        "mediaType": {
+          "enum": [
+            "image/png",
+            "image/jpeg"
+          ],
+          "title": "Mediatype",
+          "type": "string"
+        },
+        "width": {
+          "exclusiveMinimum": 0,
+          "title": "Width",
+          "type": "integer"
+        },
+        "height": {
+          "exclusiveMinimum": 0,
+          "title": "Height",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "id",
+        "capture",
+        "createdAt",
+        "provenance",
+        "trace",
+        "unknowns",
+        "kind",
+        "streetEditId",
+        "artifactId",
+        "mediaSha256",
+        "mediaType",
+        "width",
+        "height"
+      ],
+      "title": "ReferenceImage",
+      "type": "object"
+    },
+    "StreetEdit": {
+      "additionalProperties": false,
+      "properties": {
+        "schemaVersion": {
+          "const": "1.0",
+          "title": "Schemaversion",
+          "type": "string"
+        },
+        "id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{1,95}$",
+          "title": "Id",
+          "type": "string"
+        },
+        "capture": {
+          "$ref": "#/$defs/CaptureContext"
+        },
+        "createdAt": {
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,6})?Z$",
+          "title": "Createdat",
+          "type": "string"
+        },
+        "provenance": {
+          "const": "inserted",
+          "title": "Provenance",
+          "type": "string"
+        },
+        "trace": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ModelTrace"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "unknowns": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Unknowns",
+          "type": "array"
+        },
+        "kind": {
+          "const": "StreetEdit",
+          "title": "Kind",
+          "type": "string"
+        },
+        "observationBatchId": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{1,95}$",
+          "title": "Observationbatchid",
+          "type": "string"
+        },
+        "requestedChange": {
+          "minLength": 1,
+          "title": "Requestedchange",
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "accepted",
+            "rejected",
+            "needs_clarification"
+          ],
+          "title": "Status",
+          "type": "string"
+        },
+        "regions": {
+          "items": {
+            "$ref": "#/$defs/EditedRegion"
+          },
+          "title": "Regions",
+          "type": "array"
+        },
+        "preservedObservationIds": {
+          "items": {
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{1,95}$",
+            "type": "string"
+          },
+          "title": "Preservedobservationids",
+          "type": "array"
+        },
+        "nanoBananaPrompt": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Nanobananaprompt"
+        },
+        "worldPrompt": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Worldprompt"
+        },
+        "explanation": {
+          "minLength": 1,
+          "title": "Explanation",
+          "type": "string"
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "id",
+        "capture",
+        "createdAt",
+        "provenance",
+        "trace",
+        "unknowns",
+        "kind",
+        "observationBatchId",
+        "requestedChange",
+        "status",
+        "regions",
+        "preservedObservationIds",
+        "nanoBananaPrompt",
+        "worldPrompt",
+        "explanation"
+      ],
+      "title": "StreetEdit",
+      "type": "object"
+    },
+    "TimeInterval": {
+      "additionalProperties": false,
+      "properties": {
+        "startSeconds": {
+          "maximum": 120,
+          "minimum": 0,
+          "title": "Startseconds",
+          "type": "number"
+        },
+        "endSeconds": {
+          "maximum": 120,
+          "minimum": 0,
+          "title": "Endseconds",
+          "type": "number"
+        }
+      },
+      "required": [
+        "startSeconds",
+        "endSeconds"
+      ],
+      "title": "TimeInterval",
+      "type": "object"
+    },
+    "VehiclePermission": {
+      "additionalProperties": false,
+      "properties": {
+        "actor": {
+          "enum": [
+            "car",
+            "bus",
+            "bicycle",
+            "pedestrian",
+            "emergency"
+          ],
+          "title": "Actor",
+          "type": "string"
+        },
+        "access": {
+          "enum": [
+            "allow",
+            "deny",
+            "unknown"
+          ],
+          "title": "Access",
+          "type": "string"
+        }
+      },
+      "required": [
+        "actor",
+        "access"
+      ],
+      "title": "VehiclePermission",
+      "type": "object"
+    },
+    "WorldSession": {
+      "additionalProperties": false,
+      "properties": {
+        "schemaVersion": {
+          "const": "1.0",
+          "title": "Schemaversion",
+          "type": "string"
+        },
+        "id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{1,95}$",
+          "title": "Id",
+          "type": "string"
+        },
+        "capture": {
+          "$ref": "#/$defs/CaptureContext"
+        },
+        "createdAt": {
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,6})?Z$",
+          "title": "Createdat",
+          "type": "string"
+        },
+        "provenance": {
+          "const": "generated",
+          "title": "Provenance",
+          "type": "string"
+        },
+        "trace": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ModelTrace"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "unknowns": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Unknowns",
+          "type": "array"
+        },
+        "kind": {
+          "const": "WorldSession",
+          "title": "Kind",
+          "type": "string"
+        },
+        "referenceImageId": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{1,95}$",
+          "title": "Referenceimageid",
+          "type": "string"
+        },
+        "gateDecisionId": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{1,95}$",
+          "title": "Gatedecisionid",
+          "type": "string"
+        },
+        "interactionId": {
+          "anyOf": [
+            {
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Interactionid"
+        },
+        "state": {
+          "enum": [
+            "created",
+            "connecting",
+            "active",
+            "stopping",
+            "completed",
+            "failed"
+          ],
+          "title": "State",
+          "type": "string"
+        },
+        "transport": {
+          "enum": [
+            "webrtc",
+            "websocket"
+          ],
+          "title": "Transport",
+          "type": "string"
+        },
+        "replaySemantics": {
+          "const": "stochastic_no_exact_reset",
+          "title": "Replaysemantics",
+          "type": "string"
+        },
+        "maximumDurationSeconds": {
+          "exclusiveMinimum": 0,
+          "maximum": 120,
+          "title": "Maximumdurationseconds",
+          "type": "number"
+        },
+        "maximumCostUsd": {
+          "exclusiveMinimum": 0,
+          "title": "Maximumcostusd",
+          "type": "number"
+        },
+        "terminationReason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Terminationreason"
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "id",
+        "capture",
+        "createdAt",
+        "provenance",
+        "trace",
+        "unknowns",
+        "kind",
+        "referenceImageId",
+        "gateDecisionId",
+        "interactionId",
+        "state",
+        "transport",
+        "replaySemantics",
+        "maximumDurationSeconds",
+        "maximumCostUsd",
+        "terminationReason"
+      ],
+      "title": "WorldSession",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "schemaVersion": {
+      "const": "1.0",
+      "title": "Schemaversion",
+      "type": "string"
+    },
+    "observations": {
+      "$ref": "#/$defs/ObservationBatch"
+    },
+    "edit": {
+      "$ref": "#/$defs/StreetEdit"
+    },
+    "reference": {
+      "$ref": "#/$defs/ReferenceImage"
+    },
+    "gate": {
+      "$ref": "#/$defs/GateDecision"
+    },
+    "session": {
+      "$ref": "#/$defs/WorldSession"
+    },
+    "navigation": {
+      "items": {
+        "$ref": "#/$defs/NavigationEvent"
+      },
+      "title": "Navigation",
+      "type": "array"
+    },
+    "evaluation": {
+      "$ref": "#/$defs/EvaluationResult"
+    }
+  },
+  "required": [
+    "schemaVersion",
+    "observations",
+    "edit",
+    "reference",
+    "gate",
+    "session",
+    "navigation",
+    "evaluation"
+  ],
+  "title": "VerticalSlice",
+  "type": "object",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://element119.local/contracts/1.0"
+}

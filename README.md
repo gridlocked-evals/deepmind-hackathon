@@ -1,12 +1,14 @@
-# Gotham Forge simulation workspace
+# Crash Test NYC / Element 119
 
-Interactive NYC city map, a detailed illustrative Vestry Street traffic simulation, and toggleable public camera feeds.
+NYC camera evidence → Hydrogen observation → Carbon mayor edit → Nano Banana reference → Decisions acceptance → Genie exploration. The shared contracts, model gateway, and capture foundation are being implemented against the [core issues](https://github.com/Paradox560/deepmind-hackathon/issues/1). The existing interface contains a city map, an illustrative Vestry traffic demo, and public camera feeds; the full model-driven UI is still pending.
 
 **[Setup and controls](RUNNING.md)** · [Architecture](docs/ARCHITECTURE.md) · [Camera API](docs/CAMERA_API.md) · [Verification](docs/VERIFICATION.md)
 
 [Implementation plan](GOTHAM_FORGE_PLAN.md) · [Source attribution](THIRD_PARTY_NOTICES.md)
 
-Quick start after installing dependencies: run `npm run dev:api` and `npm run dev` in separate terminals. No model credentials are needed.
+Quick start after installing dependencies: run `npm run dev:api` and `npm run dev` in separate terminals. Camera browsing works without model credentials. For model access, copy `.env.example` to `.env` and follow [credential setup](RUNNING.md#model-credentials).
+
+[Shared contracts](docs/CONTRACTS.md) · [Model gateway](docs/MODEL_GATEWAY.md) · [Capture API](docs/CAPTURE_API.md)
 
 ---
 

@@ -5,6 +5,7 @@ Run: python -m uvicorn backend.main:app --host 127.0.0.1 --port 8000
 import asyncio
 from contextlib import asynccontextmanager
 import json
+import os
 from pathlib import Path
 import re
 import time
@@ -15,7 +16,10 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
+from .capture import CaptureService, router as capture_router
+from .config import load_environment
 from .feeds import HLS_SOURCES, REGISTRY_URL, public_cameras, utc_now
+from .gateway import ModelGateway
 from .proxy import proxy_media, resolve_token
 
 DOT_URL = "https://webcams.nyctmc.org/api/cameras"
@@ -25,21 +29,39 @@ ROOT = Path(__file__).resolve().parent.parent
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    load_environment()
     async with httpx.AsyncClient(
         timeout=httpx.Timeout(10, connect=5, pool=3), follow_redirects=False,
         limits=httpx.Limits(max_connections=12, max_keepalive_connections=8),
         headers={"User-Agent": "GothamForge/0.1 public-camera-viewer"},
     ) as client:
         app.state.http = client
-        yield
+        async def snapshots():
+            rows, _ = await camera_cache.get(lambda: fetch_dot(client))
+            return rows
+
+        storage = Path(os.environ.get("CAPTURE_STORAGE_DIR", "data/captures"))
+        if not storage.is_absolute():
+            storage = ROOT / storage
+        app.state.capture = CaptureService(
+            storage, client, max_bytes=int(os.environ.get("CAPTURE_MAX_BYTES", "536870912")),
+            snapshot_loader=snapshots,
+        )
+        app.state.gateway = ModelGateway.from_env()
+        try:
+            yield
+        finally:
+            await app.state.capture.close()
+            await app.state.gateway.close()
 
 
-app = FastAPI(title="Gotham Forge", version="0.1.0", lifespan=lifespan)
+app = FastAPI(title="Crash Test NYC / Element 119", version="0.2.0", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware, allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
-    allow_methods=["GET"], allow_headers=["Range"],
+    allow_methods=["GET", "POST"], allow_headers=["Range", "Content-Type"],
     expose_headers=["Content-Range", "Accept-Ranges", "Content-Length"],
 )
+app.include_router(capture_router)
 
 
 class CameraCache:
@@ -121,6 +143,11 @@ async def fetch_dot(client: httpx.AsyncClient) -> list[dict]:
 @app.get("/api/health")
 async def health():
     return {"status": "ok", "service": "gotham-forge-camera-api", "timestamp": utc_now()}
+
+
+@app.get("/api/models/status")
+async def model_status(request: Request):
+    return request.app.state.gateway.status()
 
 
 @app.get("/api/cameras")

@@ -4,7 +4,7 @@ A geographic simulation workspace for New York: a 3D city map, an illustrative V
 
 ## Start locally
 
-Requires Node 22.12+ and Python 3.11+. No model keys, GPU runtime, SUMO, or capture service is required.
+Requires Node 22.12+ and Python 3.11+. Camera browsing and the authored demo work without model credentials. Video capture also requires `ffmpeg` and `ffprobe` on PATH. GPU runtimes and SUMO are not required for the Element 119 core.
 
 ```sh
 npm ci
@@ -23,6 +23,22 @@ npm run dev
 ```
 
 Open the local URL printed by Vite. It proxies `/api` to the FastAPI service on `127.0.0.1:8000`. If port 5173 is occupied, Vite prints the next available port.
+
+## Model credentials
+
+Copy `.env.example` to `.env` in the **deepmind-hackathon repository root** if `.env` does not already exist. Enter the keys locally:
+
+```dotenv
+GEMINI_API_KEY=your-tier-3-gemini-ai-studio-key
+WORKSHOP_API_KEY=your-workshop-gemini-ai-studio-key
+GEMINI_KEY_PROFILE=primary
+```
+
+Both credentials are Gemini AI Studio keys. `primary` selects `GEMINI_API_KEY`; `workshop` selects `WORKSHOP_API_KEY`. Selection is explicit: quota failures do not switch projects automatically. Restart the backend after changing configuration. The API and smoke CLI load this checkout's `.env`; exported environment variables take precedence.
+
+`.env` is ignored by Git. Do not put keys into `src/`, `VITE_*` variables, request URLs, or committed files. The status endpoint reports configuration and connectivity without returning credentials. Tier 3 describes the project's access tier; actual model availability and quota still need a successful project-specific smoke test. See [Model gateway](docs/MODEL_GATEWAY.md) for limits and the opt-in live smoke command.
+
+Runtime media and request evidence default to the ignored `data/` directory. Run one backend worker against a local data directory; this foundation does not coordinate budgets or capture state across multiple workers. Capture API behavior, supported media, and sealed-prefix access are documented in [Capture API](docs/CAPTURE_API.md).
 
 ## Explore
 
@@ -51,13 +67,14 @@ See the detailed [architecture guide](docs/ARCHITECTURE.md), [camera API referen
 - MapLibre owns geographic projection and the shared WebGL context. A custom Three.js layer draws locally metric roads, instanced traffic, and the detailed ego vehicle. Local axes are east/north/up; headings are radians counterclockwise from east.
 - `ScenarioProvider.loadScenario()` returns the typed `ScenarioBundle`. `DemoScenarioProvider` is the initial implementation. A later backend adapter can supply compatible scene geometry and timestamped frames without rewriting the view.
 - Camera selection is separate from scene identity. Roadside video is an HTML layer above the map, not a calibrated projection onto it.
-- FastAPI contains only camera metadata, a DOT cache, and bounded media transport. HLS playlists resolve server-owned camera IDs and opaque resource tokens; arbitrary URLs are not accepted.
+- FastAPI supplies camera metadata, a DOT cache, bounded media transport, capture services, and model gateway status. HLS playlists resolve server-owned camera IDs and opaque resource tokens; arbitrary URLs are not accepted. The model pipeline is not yet wired into the authored demo UI.
 
 Public endpoints: `GET /api/health`, `GET /api/cameras`, `GET /api/vision/cameras`, and `/api/feeds/{camera_id}/index.m3u8` with tokenized child resources. See the local `/docs` route for exact schemas.
 
 ## Verify
 
 ```sh
+npm run contracts:check
 npm run build
 npm test
 npm run test:api
@@ -69,4 +86,4 @@ For a production-style local preview, run `npm run build`, then start `npm run d
 
 Implementation verification: production build, six scenario tests, and 19 API tests passed. Desktop (1440 × 900) and mobile (390 × 844) views were reviewed in-browser. Vestry HLS video visibly advanced through the local proxy. Camera changes, feed toggling, seeking, layer switches, and City/Intersection/Follow transitions were exercised; the active page kept at most one video element. Chrome reported approximately 120 map render events per second in Follow with one playing feed on the development machine; this is an observed local result, not a cross-device guarantee.
 
-Gemini/SUMO, footage capture, calibrated reconstruction, generated video, intervention search, and evaluation remain future integration work described in `GOTHAM_FORGE_PLAN.md`.
+The current contract/gateway/capture foundation is covered by automated tests. Real model access, live-media acceptance, end-to-end extraction/edit/image/world integration, Mayor Mode UI, and independent evaluation remain acceptance work in [the Element 119 plan](GOTHAM_FORGE_PLAN.md). SUMO and calibrated reconstruction are later milestones.

@@ -1,0 +1,424 @@
+{
+  "schemaVersion": "1.0",
+  "observations": {
+    "schemaVersion": "1.0",
+    "kind": "ObservationBatch",
+    "id": "observations-fixture",
+    "capture": {
+      "captureId": "capture-fixture",
+      "sourceId": "511ny-32998",
+      "originalMediaSha256": "6a1a1f32494e7cf112671a755ea7a3022857a1ac9f451a0f66b23f93a6927fed",
+      "modality": "video",
+      "durationSeconds": 30,
+      "allowedInterval": {
+        "startSeconds": 0,
+        "endSeconds": 20
+      },
+      "receivedAt": "2026-11-21T15:00:00Z",
+      "sourceCapturedAt": null,
+      "sourceClock": "unknown",
+      "clockUncertaintySeconds": null
+    },
+    "createdAt": "2026-11-21T15:00:00Z",
+    "provenance": "observed",
+    "trace": {
+      "traceId": "trace-observations-fixture",
+      "requestId": "fixture/observations-fixture",
+      "modelId": "gemini-4-hydrogen",
+      "promptId": "prompt-fixture-v1",
+      "configId": "config-fixture-v1",
+      "inputSha256": "61ba648405be1297754811e4fe236e86fcc776694e634f991b024356ecffd808",
+      "startedAt": "2026-11-21T15:00:00Z",
+      "completedAt": "2026-11-21T15:00:01Z",
+      "outcome": "success",
+      "inputTokens": null,
+      "outputTokens": null,
+      "providerRequestId": null
+    },
+    "unknowns": [
+      "Synthetic contract fixture; no real model call or measured result."
+    ],
+    "observations": [
+      {
+        "id": "crossing-fixture",
+        "category": "crossing",
+        "value": "Visible painted crossing",
+        "confidence": 0.8,
+        "unknownReason": null,
+        "provenance": "observed",
+        "evidence": [
+          {
+            "captureId": "capture-fixture",
+            "originalMediaSha256": "6a1a1f32494e7cf112671a755ea7a3022857a1ac9f451a0f66b23f93a6927fed",
+            "timeSeconds": 4,
+            "frameIndex": 96,
+            "region": {
+              "x": 0.1,
+              "y": 0.2,
+              "width": 0.15,
+              "height": 0.5
+            }
+          }
+        ]
+      },
+      {
+        "id": "signal-fixture",
+        "category": "signal",
+        "value": null,
+        "confidence": null,
+        "unknownReason": "Signal face is occluded.",
+        "provenance": "observed",
+        "evidence": [
+          {
+            "captureId": "capture-fixture",
+            "originalMediaSha256": "6a1a1f32494e7cf112671a755ea7a3022857a1ac9f451a0f66b23f93a6927fed",
+            "timeSeconds": 4,
+            "frameIndex": 96,
+            "region": {
+              "x": 0.1,
+              "y": 0.2,
+              "width": 0.15,
+              "height": 0.5
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "edit": {
+    "schemaVersion": "1.0",
+    "kind": "StreetEdit",
+    "id": "edit-fixture",
+    "capture": {
+      "captureId": "capture-fixture",
+      "sourceId": "511ny-32998",
+      "originalMediaSha256": "6a1a1f32494e7cf112671a755ea7a3022857a1ac9f451a0f66b23f93a6927fed",
+      "modality": "video",
+      "durationSeconds": 30,
+      "allowedInterval": {
+        "startSeconds": 0,
+        "endSeconds": 20
+      },
+      "receivedAt": "2026-11-21T15:00:00Z",
+      "sourceCapturedAt": null,
+      "sourceClock": "unknown",
+      "clockUncertaintySeconds": null
+    },
+    "createdAt": "2026-11-21T15:00:00Z",
+    "provenance": "inserted",
+    "trace": {
+      "traceId": "trace-edit-fixture",
+      "requestId": "fixture/edit-fixture",
+      "modelId": "gemini-4-carbon",
+      "promptId": "prompt-fixture-v1",
+      "configId": "config-fixture-v1",
+      "inputSha256": "054fd41d587069ef7676962d134fe218eb54fc4800e7eef51b5ec496e92ac27c",
+      "startedAt": "2026-11-21T15:00:00Z",
+      "completedAt": "2026-11-21T15:00:01Z",
+      "outcome": "success",
+      "inputTokens": null,
+      "outputTokens": null,
+      "providerRequestId": null
+    },
+    "unknowns": [
+      "Synthetic contract fixture; no real model call or measured result."
+    ],
+    "observationBatchId": "observations-fixture",
+    "requestedChange": "Add a protected bicycle lane.",
+    "status": "accepted",
+    "regions": [
+      {
+        "id": "bike-lane-fixture",
+        "region": {
+          "x": 0.1,
+          "y": 0.2,
+          "width": 0.15,
+          "height": 0.5
+        },
+        "permissions": [
+          {
+            "actor": "bicycle",
+            "access": "allow"
+          },
+          {
+            "actor": "car",
+            "access": "deny"
+          }
+        ],
+        "provenance": "inserted",
+        "evidence": [
+          {
+            "captureId": "capture-fixture",
+            "originalMediaSha256": "6a1a1f32494e7cf112671a755ea7a3022857a1ac9f451a0f66b23f93a6927fed",
+            "timeSeconds": 4,
+            "frameIndex": 96,
+            "region": {
+              "x": 0.1,
+              "y": 0.2,
+              "width": 0.15,
+              "height": 0.5
+            }
+          }
+        ]
+      }
+    ],
+    "preservedObservationIds": [
+      "crossing-fixture"
+    ],
+    "nanoBananaPrompt": "Preserve crossing; add the bicycle lane within the indicated image region.",
+    "worldPrompt": "Explore the visually edited street; geometry remains uncalibrated.",
+    "explanation": "The permitted edit is an image-space proposal."
+  },
+  "reference": {
+    "schemaVersion": "1.0",
+    "kind": "ReferenceImage",
+    "id": "reference-fixture",
+    "capture": {
+      "captureId": "capture-fixture",
+      "sourceId": "511ny-32998",
+      "originalMediaSha256": "6a1a1f32494e7cf112671a755ea7a3022857a1ac9f451a0f66b23f93a6927fed",
+      "modality": "video",
+      "durationSeconds": 30,
+      "allowedInterval": {
+        "startSeconds": 0,
+        "endSeconds": 20
+      },
+      "receivedAt": "2026-11-21T15:00:00Z",
+      "sourceCapturedAt": null,
+      "sourceClock": "unknown",
+      "clockUncertaintySeconds": null
+    },
+    "createdAt": "2026-11-21T15:00:00Z",
+    "provenance": "generated",
+    "trace": {
+      "traceId": "trace-reference-fixture",
+      "requestId": "fixture/reference-fixture",
+      "modelId": "gemini-nano-banana-2.1",
+      "promptId": "prompt-fixture-v1",
+      "configId": "config-fixture-v1",
+      "inputSha256": "0056c434b81a332ceaedba0fe8ff8b2e0650c7aafd4576ddaa2994546200cff1",
+      "startedAt": "2026-11-21T15:00:00Z",
+      "completedAt": "2026-11-21T15:00:01Z",
+      "outcome": "success",
+      "inputTokens": null,
+      "outputTokens": null,
+      "providerRequestId": null
+    },
+    "unknowns": [
+      "Synthetic contract fixture; no real model call or measured result."
+    ],
+    "streetEditId": "edit-fixture",
+    "artifactId": "image-fixture",
+    "mediaSha256": "7b14bf6d652f5efac3f7ff75e969e5e20d179c3bb188ffb1dc0bf17cdc33fff5",
+    "mediaType": "image/png",
+    "width": 1280,
+    "height": 720
+  },
+  "gate": {
+    "schemaVersion": "1.0",
+    "kind": "GateDecision",
+    "id": "gate-fixture",
+    "capture": {
+      "captureId": "capture-fixture",
+      "sourceId": "511ny-32998",
+      "originalMediaSha256": "6a1a1f32494e7cf112671a755ea7a3022857a1ac9f451a0f66b23f93a6927fed",
+      "modality": "video",
+      "durationSeconds": 30,
+      "allowedInterval": {
+        "startSeconds": 0,
+        "endSeconds": 20
+      },
+      "receivedAt": "2026-11-21T15:00:00Z",
+      "sourceCapturedAt": null,
+      "sourceClock": "unknown",
+      "clockUncertaintySeconds": null
+    },
+    "createdAt": "2026-11-21T15:00:00Z",
+    "provenance": "derived",
+    "trace": {
+      "traceId": "trace-gate-fixture",
+      "requestId": "fixture/gate-fixture",
+      "modelId": "gemini-decision-1",
+      "promptId": "prompt-fixture-v1",
+      "configId": "config-fixture-v1",
+      "inputSha256": "3634a61043af463589ac06932aa1cc56df3650f6fa99aad0cfb01927358f0e12",
+      "startedAt": "2026-11-21T15:00:00Z",
+      "completedAt": "2026-11-21T15:00:01Z",
+      "outcome": "success",
+      "inputTokens": null,
+      "outputTokens": null,
+      "providerRequestId": null
+    },
+    "unknowns": [
+      "Synthetic contract fixture; no real model call or measured result."
+    ],
+    "referenceImageId": "reference-fixture",
+    "verdict": "accept",
+    "action": "allow_world_creation",
+    "checks": [
+      {
+        "name": "preserves-crossing",
+        "result": "pass",
+        "probability": 0.95,
+        "confidence": 0.9,
+        "threshold": 0.8,
+        "evidence": [
+          {
+            "captureId": "capture-fixture",
+            "originalMediaSha256": "6a1a1f32494e7cf112671a755ea7a3022857a1ac9f451a0f66b23f93a6927fed",
+            "timeSeconds": 4,
+            "frameIndex": 96,
+            "region": {
+              "x": 0.1,
+              "y": 0.2,
+              "width": 0.15,
+              "height": 0.5
+            }
+          }
+        ],
+        "minimumConfidence": 0.8
+      }
+    ]
+  },
+  "session": {
+    "schemaVersion": "1.0",
+    "kind": "WorldSession",
+    "id": "world-fixture",
+    "capture": {
+      "captureId": "capture-fixture",
+      "sourceId": "511ny-32998",
+      "originalMediaSha256": "6a1a1f32494e7cf112671a755ea7a3022857a1ac9f451a0f66b23f93a6927fed",
+      "modality": "video",
+      "durationSeconds": 30,
+      "allowedInterval": {
+        "startSeconds": 0,
+        "endSeconds": 20
+      },
+      "receivedAt": "2026-11-21T15:00:00Z",
+      "sourceCapturedAt": null,
+      "sourceClock": "unknown",
+      "clockUncertaintySeconds": null
+    },
+    "createdAt": "2026-11-21T15:00:00Z",
+    "provenance": "generated",
+    "trace": {
+      "traceId": "trace-world-fixture",
+      "requestId": "fixture/world-fixture",
+      "modelId": "genie-4",
+      "promptId": "prompt-fixture-v1",
+      "configId": "config-fixture-v1",
+      "inputSha256": "9421b31385846594b01955c2671edf0ccdd1e3743f7e0a4437b332161c0ea2d5",
+      "startedAt": "2026-11-21T15:00:00Z",
+      "completedAt": "2026-11-21T15:00:01Z",
+      "outcome": "success",
+      "inputTokens": null,
+      "outputTokens": null,
+      "providerRequestId": null
+    },
+    "unknowns": [
+      "Synthetic contract fixture; no real model call or measured result."
+    ],
+    "referenceImageId": "reference-fixture",
+    "gateDecisionId": "gate-fixture",
+    "interactionId": "interactions/fixture-world",
+    "state": "completed",
+    "transport": "websocket",
+    "replaySemantics": "stochastic_no_exact_reset",
+    "maximumDurationSeconds": 15,
+    "maximumCostUsd": 2,
+    "terminationReason": "Bounded fixture finished."
+  },
+  "navigation": [
+    {
+      "schemaVersion": "1.0",
+      "kind": "NavigationEvent",
+      "id": "navigation-fixture",
+      "capture": {
+        "captureId": "capture-fixture",
+        "sourceId": "511ny-32998",
+        "originalMediaSha256": "6a1a1f32494e7cf112671a755ea7a3022857a1ac9f451a0f66b23f93a6927fed",
+        "modality": "video",
+        "durationSeconds": 30,
+        "allowedInterval": {
+          "startSeconds": 0,
+          "endSeconds": 20
+        },
+        "receivedAt": "2026-11-21T15:00:00Z",
+        "sourceCapturedAt": null,
+        "sourceClock": "unknown",
+        "clockUncertaintySeconds": null
+      },
+      "createdAt": "2026-11-21T15:00:00Z",
+      "provenance": "derived",
+      "trace": {
+        "traceId": "trace-navigation-fixture",
+        "requestId": "fixture/navigation-fixture",
+        "modelId": "gemini-4-hydrogen",
+        "promptId": "prompt-fixture-v1",
+        "configId": "config-fixture-v1",
+        "inputSha256": "346228b9861f4847f2c4755a1ddbf4c2d4dd991f1ef758aaa621ec40106db948",
+        "startedAt": "2026-11-21T15:00:00Z",
+        "completedAt": "2026-11-21T15:00:01Z",
+        "outcome": "success",
+        "inputTokens": null,
+        "outputTokens": null,
+        "providerRequestId": null
+      },
+      "unknowns": [
+        "Synthetic contract fixture; no real model call or measured result."
+      ],
+      "worldSessionId": "world-fixture",
+      "sequence": 0,
+      "sessionTimeSeconds": 3,
+      "frameSha256": "8fbe82f81415e2adc41e8d53acb3e79ddf70aa56a93b0114bde55484a20f5e7f",
+      "controller": "hydrogen",
+      "action": "forward",
+      "holdMilliseconds": 200,
+      "reason": "Bounded illustrative command."
+    }
+  ],
+  "evaluation": {
+    "schemaVersion": "1.0",
+    "kind": "EvaluationResult",
+    "id": "evaluation-fixture",
+    "capture": {
+      "captureId": "capture-fixture",
+      "sourceId": "511ny-32998",
+      "originalMediaSha256": "6a1a1f32494e7cf112671a755ea7a3022857a1ac9f451a0f66b23f93a6927fed",
+      "modality": "video",
+      "durationSeconds": 30,
+      "allowedInterval": {
+        "startSeconds": 0,
+        "endSeconds": 20
+      },
+      "receivedAt": "2026-11-21T15:00:00Z",
+      "sourceCapturedAt": null,
+      "sourceClock": "unknown",
+      "clockUncertaintySeconds": null
+    },
+    "createdAt": "2026-11-21T15:00:00Z",
+    "provenance": "derived",
+    "trace": null,
+    "unknowns": [
+      "Synthetic contract fixture; no real model call or measured result."
+    ],
+    "worldSessionId": "world-fixture",
+    "datasetId": "dataset-fixture",
+    "split": "development",
+    "baselineId": "baseline-fixture",
+    "attemptIds": [
+      "attempt-fixture"
+    ],
+    "outcome": "unknown",
+    "evaluatedSeconds": 15,
+    "unknownSeconds": 15,
+    "metrics": [
+      {
+        "name": "visible-violation-rate",
+        "value": null,
+        "unit": "events/second",
+        "unknownReason": "No real evaluation has been run."
+      }
+    ]
+  }
+}
