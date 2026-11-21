@@ -14,7 +14,7 @@ from pydantic import BaseModel
 
 from .adapters import GenieAdapter, HTTPAdapter, reported_usage, safe_id
 from .config import GatewayConfig, backend_key
-from .contracts import (MODELS, STAGES, CallContext, CallResult, ErrorCode, GatewayError,
+from .contracts import (MODELS, STAGES, CallContext, CallResult, ErrorCode, GatewayError, GenieCallState,
                         PreparedCall, Service, canonical, digest)
 from .ledger import Ledger
 
@@ -150,6 +150,7 @@ class ModelGateway:
             if world_timeout is not None:
                 timeout = world_timeout
         attempts = 1 if call.service == Service.GENIE else self.config.max_attempts
+        world_state = (world_executor or GenieCallState()) if call.service == Service.GENIE else None
         for attempt in range(attempts):
             request_id = None
             started = time.monotonic()
@@ -175,7 +176,10 @@ class ModelGateway:
                     response_evidence = self._redact(raw)
                 async with asyncio.timeout(timeout):
                     if call.service == Service.GENIE:
-                        result = await (world_executor or self.genie).execute(call, on_id)
+                        if world_executor is not None:
+                            result = await world_executor.execute(call, on_id)
+                        else:
+                            result = await self.genie.execute(call, on_id, world_state)
                     else:
                         result = await self.http.execute(call, on_id, on_response)
                 evidence = self._redact(result.evidence)
@@ -197,15 +201,19 @@ class ModelGateway:
                     error = GatewayError(ErrorCode.CANCELLED)
                 else:
                     error = GatewayError(ErrorCode.STORAGE)
-                if world_executor is not None and world_executor.termination_pending:
+                if world_state is not None and world_state.termination_pending:
                     # Preserve the unresolved-world admission latch even if caller
                     # cancellation or a storage failure interrupts finalization.
                     error = GatewayError(ErrorCode.TERMINATION)
                 try:
                     if request_id:
                         evidence = response_evidence or {"error": error.public()}
-                        result_hash = self.ledger.artifact(canonical(evidence))
                         usage = reported_usage(response_evidence.get("usage")) if response_evidence else None
+                        if world_state is not None:
+                            usage = world_state.usage
+                            evidence = {**evidence, "termination": world_state.termination,
+                                        "usage": usage.model_dump() if usage else None}
+                        result_hash = self.ledger.artifact(canonical(evidence))
                         self.ledger.finish(request_id, outcome=error.code.value,
                             latency_ms=(time.monotonic() - started) * 1000, result_hash=result_hash,
                             usage=usage, microusd=rate.usage_charge(usage) if usage else None)
