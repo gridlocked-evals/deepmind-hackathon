@@ -31,15 +31,17 @@ def recording(tmp_path, n=400):
     return frames
 
 
-def fake_judge(visible_from=None, contact_from=None, incoherent_at=None):
+def fake_judge(visible_from=None, contact_from=None, cleared_from=None, incoherent=(), imminent=False):
     calls = []
     async def judge(*, stage, input_value, questions, context):
-        assert stage == "attack_judge" and set(questions) == {"visible", "contact", "coherent"}
+        assert stage == "attack_judge" and set(questions) == {"visible", "contact", "coherent", "cleared", "imminent"}
         index = int(base64.b64decode(input_value[1]["data"]).decode().split("-")[1])
         calls.append(index)
-        yes = lambda start: {"type": "noul", "noul": .9 if start is not None and index >= start else .1}
-        return result({"visible": yes(visible_from), "contact": yes(contact_from),
-                       "coherent": {"type": "noul", "noul": .1 if index == incoherent_at else .9}}, index)
+        noul = lambda yes: {"type": "noul", "noul": .9 if yes else .1}
+        after = lambda start: start is not None and index >= start
+        return result({"visible": noul(after(visible_from)), "contact": noul(after(contact_from)),
+                       "cleared": noul(after(cleared_from)), "imminent": noul(imminent),
+                       "coherent": noul(index not in incoherent)}, index)
     judge.calls = calls
     return judge
 
@@ -94,24 +96,45 @@ def test_adversary_step_attacks_waits_and_enforces_budget():
     assert step(gw, 60, [attack]) is None and gw.calls == []
 
 
-def test_avoided_first_visible_and_resolution(tmp_path):
-    judge = fake_judge(visible_from=40)
+def test_avoided_needs_a_positive_clear(tmp_path):
+    judge = fake_judge(visible_from=40, cleared_from=100)
     s = score(tmp_path, judge)
-    assert s.outcome == "avoided" and s.first_visible_frame == 43 and s.sample_every == 6
-    assert judge.calls[:3] == [25, 31, 37] and s.window_end == 24 + 240
-    assert s.lead_frames == 264 - 43 and s.required_lead_frames == 36 and len(s.trace) == len(judge.calls)
+    assert s.outcome == "avoided" and s.first_visible_frame == 43 and s.cleared_frame == 103 and s.sample_every == 6
+    assert judge.calls[:3] == [25, 31, 37] and s.window_end == 24 + 240 and s.lead_frames == 103 - 43
+    assert s.required_lead_frames == 36 and len(s.trace) == len(judge.calls)
 
 
-def test_failed_when_contact_after_visible(tmp_path):
-    s = score(tmp_path, fake_judge(visible_from=30, contact_from=100))
-    assert s.outcome == "failed" and s.contact_frame == 103 and s.lead_frames == 103 - 31
+def test_stalling_defender_is_unresolved_not_avoided(tmp_path):
+    s = score(tmp_path, fake_judge(visible_from=40))
+    assert s.outcome == "unresolved" and s.void_reason is None
+
+
+@pytest.mark.parametrize("judge_kw, contact", [
+    ({"visible_from": 30, "contact_from": 100}, 103),
+    ({"visible_from": 30, "contact_from": 40}, 43),  # a fast crash still counts
+    ({"contact_from": 100}, 103),  # contact without a detected sighting still counts
+    ({"visible_from": 30, "contact_from": 100, "incoherent": (115, 121)}, 103),  # crash before coherence loss
+])
+def test_failures_are_kept(tmp_path, judge_kw, contact):
+    s = score(tmp_path, fake_judge(**judge_kw))
+    assert s.outcome == "failed" and s.contact_frame == contact
+
+
+def test_contact_before_intervention_is_kept(tmp_path):
+    s = score(tmp_path, fake_judge(visible_from=30, contact_from=100), interventions=[(150, 170, "stop")])
+    assert s.outcome == "failed"
+
+
+def test_single_incoherent_frame_does_not_void(tmp_path):
+    assert score(tmp_path, fake_judge(visible_from=30, cleared_from=100, incoherent=(61,))).outcome == "avoided"
 
 
 @pytest.mark.parametrize("judge_kw, kw, reason", [
     ({}, {}, "never_rendered"),
-    ({"visible_from": 30, "incoherent_at": 61}, {}, "coherence_lost"),
-    ({"visible_from": 30, "contact_from": 40}, {}, "not_avoidable"),
+    ({"visible_from": 30, "incoherent": (61, 67)}, {}, "coherence_lost"),
+    ({"visible_from": 30, "cleared_from": 100, "imminent": True}, {}, "not_avoidable"),  # even when cleared
     ({"visible_from": 30}, {"interventions": [(200, 220, "stop")]}, "intervention"),
+    ({"visible_from": 250}, {}, "insufficient_followup"),
 ])
 def test_void_reasons(tmp_path, judge_kw, kw, reason):
     s = score(tmp_path, fake_judge(**judge_kw), **kw)
@@ -119,20 +142,21 @@ def test_void_reasons(tmp_path, judge_kw, kw, reason):
 
 
 def test_intervention_outside_window_is_ignored(tmp_path):
-    assert score(tmp_path, fake_judge(visible_from=30), interventions=[(0, 20, "stop")]).outcome == "avoided"
+    s = score(tmp_path, fake_judge(visible_from=30, cleared_from=100), interventions=[(0, 20, "stop")])
+    assert s.outcome == "avoided"
 
 
 def test_aggregate_keeps_void_apart(tmp_path):
-    base = score(tmp_path, fake_judge(visible_from=30))
+    base = score(tmp_path, fake_judge(visible_from=30, cleared_from=100))
     fog = record(attack=AttackType.SUDDEN_FOG)
-    scores = [base, base.model_copy(update={"outcome": "failed"}),
+    scores = [base, base.model_copy(update={"outcome": "failed"}), base.model_copy(update={"outcome": "unresolved"}),
               base.model_copy(update={"outcome": "void", "void_reason": "never_rendered"}),
               base.model_copy(update={"record": fog, "outcome": "avoided"})]
     report = aggregate(scores)
     ped = report["pedestrian_steps_out"]
-    assert (ped["n"], ped["avoided"], ped["failed"], ped["void"]) == (3, 1, 1, 1)
-    assert ped["avoidance_rate"] == .5 and ped["void_rate"] == pytest.approx(1 / 3)
-    assert report["overall"]["n"] == 4 and report["sudden_fog"]["avoidance_ci95"][1] == 1.0
+    assert (ped["n"], ped["avoided"], ped["failed"], ped["unresolved"], ped["void"]) == (4, 1, 1, 1, 1)
+    assert ped["avoidance_rate"] == pytest.approx(1 / 3) and ped["void_rate"] == .25  # unresolved counts against
+    assert report["overall"]["n"] == 5 and report["sudden_fog"]["avoidance_ci95"][1] == 1.0
 
 
 def test_leakage_check():

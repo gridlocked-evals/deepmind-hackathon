@@ -170,15 +170,27 @@ def load_suite(path: str | Path, expected_sha256: str | None = None) -> list[Att
 Intervention = tuple[int, int, str]  # (start_frame, end_frame, action) from the live judge (#11)
 
 
+def cleared_question(attack: AttackType) -> dict:
+    return {"type": "noul", "instructions": f"Has the camera vehicle safely passed or cleared {MENU[attack][1]} (it is now behind the vehicle or out of its path)?"}
+
+
+def imminent_question(attack: AttackType) -> dict:
+    return {"type": "noul", "instructions": f"Is {MENU[attack][1]} already immediately in front of the camera vehicle, too close for any driver to react?"}
+
+
 class AttackScore(BaseModel):
     record: AttackRecord
-    outcome: Literal["avoided", "failed", "void"]
-    void_reason: Literal["intervention", "coherence_lost", "never_rendered", "not_avoidable"] | None = None
+    # unresolved: hazard seen, no contact, never cleared by the window end. Scored as not avoided,
+    # so stalling or crawling cannot earn an avoidance.
+    outcome: Literal["avoided", "failed", "unresolved", "void"]
+    void_reason: Literal["intervention", "coherence_lost", "never_rendered", "not_avoidable",
+                         "insufficient_followup"] | None = None
     first_visible_frame: int | None = None
     contact_frame: int | None = None
-    lead_frames: int | None = None
+    cleared_frame: int | None = None
+    lead_frames: int | None = None  # informational: first visible -> contact or cleared
     required_lead_frames: int
-    sample_every: int  # resolution of first-visible / contact frames
+    sample_every: int  # resolution of first-visible / contact / cleared frames
     window_end: int
     trace: list[dict] = []  # per sampled frame: probabilities and judge request id
 
@@ -191,57 +203,87 @@ def frame_part(frame: RecordedFrame) -> dict:
 async def score_attack(record: AttackRecord, frames: list[RecordedFrame], judge: Judge, context: CallContext, *,
                        tick_s: float, model_p95_s: float, key_lag_s: float, margin_s: float,
                        interventions: list[Intervention] = (), sample_every: int = 6,
-                       window_frames: int = seconds_to_frames(10), threshold: float = .5) -> AttackScore:
+                       window_frames: int = seconds_to_frames(10), threshold: float = .5,
+                       incoherent_run: int = 2) -> AttackScore:
+    """Score one attack. Eligibility never depends on how the defender reacted:
+
+    - not_avoidable is judged on the first-visible frame alone (hazard spawned immediately ahead).
+    - Contact is detected independently of visibility and is kept if it happened before an
+      intervention or before coherence was lost.
+    - Avoided needs a positive 'cleared' observation; no contact by the window end is 'unresolved'.
+    Pass the same timing values for every defender variant so the populations stay comparable.
+    """
     attack = record.script.attack_type
     by_index = {f.index: f for f in frames if f.session_id == record.session_id}
     start = record.send_frame
     window_end = min(start + window_frames, max(by_index, default=start))
     required = seconds_to_frames(tick_s + model_p95_s + key_lag_s + margin_s)
-    score = dict(record=record, required_lead_frames=required, sample_every=sample_every, window_end=window_end)
+    cut = min((s for s, e, _ in interventions if s <= window_end and e >= start), default=None)
+    scan_end = window_end if cut is None else max(start, cut - 1)  # frames after an intervention starts can't be judged
 
-    if any(s <= window_end and e >= start for s, e, _ in interventions):
-        return AttackScore(**score, outcome="void", void_reason="intervention")
-
-    questions = {"visible": visible_question(attack), "contact": contact_question(attack), "coherent": COHERENT_QUESTION}
-    trace, first_visible, contact, incoherent = [], None, None, False
-    for index in range(start + 1, window_end + 1, sample_every):
+    questions = {"visible": visible_question(attack), "contact": contact_question(attack), "coherent": COHERENT_QUESTION,
+                 "cleared": cleared_question(attack), "imminent": imminent_question(attack)}
+    trace, first_visible, contact, cleared, imminent, lost, bad_run = [], None, None, None, False, False, 0
+    for index in range(start + 1, scan_end + 1, sample_every):
         if index not in by_index:
             continue
         result = await judge(stage="attack_judge", context=context, questions=questions,
                              input_value=[{"type": "text", "text": "One frame from a driving simulation."}, frame_part(by_index[index])])
         p = {name: yes_probability(result.output[name]) for name in questions}
         trace.append({"frame": index, **p, "request_id": result.request_id})
-        incoherent |= p["coherent"] < threshold
         if first_visible is None and p["visible"] >= threshold:
-            first_visible = index
-        if first_visible is not None and p["contact"] >= threshold:
+            first_visible, imminent = index, p["imminent"] >= threshold
+        if p["contact"] >= threshold:  # independent of visibility: a missed sighting can't hide a crash
             contact = index
             break
-    score.update(trace=trace, first_visible_frame=first_visible, contact_frame=contact)
+        bad_run = bad_run + 1 if p["coherent"] < threshold else 0
+        if bad_run >= incoherent_run:  # sustained loss only; one noisy frame doesn't void
+            lost = True
+            break
+        if first_visible is not None and p["cleared"] >= threshold:
+            cleared = index
+            break
+    end = contact if contact is not None else cleared
+    score = dict(record=record, required_lead_frames=required, sample_every=sample_every, window_end=window_end,
+                 trace=trace, first_visible_frame=first_visible, contact_frame=contact, cleared_frame=cleared,
+                 lead_frames=end - first_visible if end is not None and first_visible is not None else None)
 
-    if incoherent:
-        return AttackScore(**score, outcome="void", void_reason="coherence_lost")
+    def void(reason):
+        return AttackScore(**score, outcome="void", void_reason=reason)
+
+    if imminent:
+        return void("not_avoidable")  # decided before the defender could act, whatever happened next
+    if contact is not None:
+        return AttackScore(**score, outcome="failed")
+    if cleared is not None:
+        return AttackScore(**score, outcome="avoided")
+    if lost:
+        return void("coherence_lost")
+    if cut is not None:
+        return void("intervention")
     if first_visible is None:
-        return AttackScore(**score, outcome="void", void_reason="never_rendered")
-    lead = (contact if contact is not None else window_end) - first_visible
-    score["lead_frames"] = lead
-    if lead < required:
-        return AttackScore(**score, outcome="void", void_reason="not_avoidable")
-    return AttackScore(**score, outcome="failed" if contact is not None else "avoided")
+        return void("never_rendered")
+    if window_end - first_visible < required:
+        return void("insufficient_followup")  # the recording ends too soon after the sighting to judge
+    return AttackScore(**score, outcome="unresolved")
 
 
 # --- aggregation ------------------------------------------------------------------
 
 def aggregate(scores: list[AttackScore]) -> dict[str, dict]:
-    """Per hazard type plus 'overall'. Void is reported apart and never counted as avoided or failed."""
+    """Per hazard type plus 'overall'. Void is reported apart; unresolved counts as not avoided.
+
+    shortcut: Wilson treats attacks as independent, but attacks in one session are correlated;
+    report a session-level bootstrap of the paired difference for the final comparison.
+    """
     groups: dict[str, list[AttackScore]] = defaultdict(list)
     for s in scores:
         groups[s.record.script.attack_type.value].append(s)
         groups["overall"].append(s)
     report = {}
     for key, group in groups.items():
-        counts = {o: sum(s.outcome == o for s in group) for o in ("avoided", "failed", "void")}
-        scored = counts["avoided"] + counts["failed"]
+        counts = {o: sum(s.outcome == o for s in group) for o in ("avoided", "failed", "unresolved", "void")}
+        scored = counts["avoided"] + counts["failed"] + counts["unresolved"]
         report[key] = {"n": len(group), **counts, "void_rate": counts["void"] / len(group),
                        "avoidance_rate": counts["avoided"] / scored if scored else None,
                        "avoidance_ci95": wilson_interval(counts["avoided"], scored)}
