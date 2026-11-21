@@ -117,7 +117,7 @@ def cache_video(base: str, cameras: list[dict], args, kept: dict) -> tuple[dict,
     return kept, dropped
 
 
-def cache_snapshot(base: str, camera: dict, max_seconds: float) -> tuple[str, dict | str]:
+def cache_snapshot(base: str, camera: dict, max_seconds: float, pinned: list) -> tuple[str, dict | str]:
     for attempt in range(4):
         t0 = time.monotonic()
         try:
@@ -135,7 +135,10 @@ def cache_snapshot(base: str, camera: dict, max_seconds: float) -> tuple[str, di
         call(base, f"/api/captures/{quote(saved['capture']['id'])}/pins", {"jobId": PIN_JOB})
     except (RuntimeError, URLError) as exc:
         return camera["id"], f"pin failed: {exc}"
-    return camera["id"], {"kind": "snapshot", "saved": saved, "fetchS": round(took, 2)}
+    entry = {"kind": "snapshot", "saved": saved, "fetchS": round(took, 2)}
+    # Recorded here, not via kept: pool.map results may never be consumed if the run fails.
+    pinned.append(entry)
+    return camera["id"], entry
 
 
 def main() -> int:
@@ -158,6 +161,7 @@ def main() -> int:
     # The previous run's pins stay until the replacement index is written: the old index still references them.
     previous = json.loads(OUT.read_text()).get("cameras", {}).values() if OUT.exists() else []
     kept: dict = {}
+    pinned: list = []
     try:
         video = call(base, "/api/vision/cameras")
         video = video.get("cameras", video) if isinstance(video, dict) else video
@@ -168,7 +172,7 @@ def main() -> int:
             dot = [c for c in dot if c.get("kind") == "snapshot"]
             print(f"Saving {len(dot)} DOT snapshots (drop if slower than {args.snapshot_max_seconds:g} s)…", flush=True)
             with ThreadPoolExecutor(args.snapshot_workers) as pool:
-                for index, (cid, result) in enumerate(pool.map(lambda c: cache_snapshot(base, c, args.snapshot_max_seconds), dot), 1):
+                for index, (cid, result) in enumerate(pool.map(lambda c: cache_snapshot(base, c, args.snapshot_max_seconds, pinned), dot), 1):
                     (kept if isinstance(result, dict) else dropped)[cid] = result
                     if index % 50 == 0:
                         print(f"  {index}/{len(dot)}", flush=True)
@@ -193,7 +197,7 @@ def main() -> int:
                                    "cameras": kept, "dropped": dropped}))
         tmp.replace(OUT)
     except BaseException:
-        unpin(base, kept.values())
+        unpin(base, {e["saved"]["capture"]["id"]: e for e in [*kept.values(), *pinned]}.values())
         raise
     unpin(base, previous)
     print(f"\nKept {len(kept)} cameras, dropped {len(dropped)}. Wrote {OUT}")
