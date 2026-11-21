@@ -24,7 +24,7 @@ All model checks in this integration use isolated fixtures or disabled providers
 
 ## Final integrated checks
 
-- Backend: 479 tests passed in the integrated suite, including the local socket-binding H100 helper regression. No H100 job was launched.
+- Backend: 492 tests passed in the final integrated suite, including the concurrent Windows capture fix, evaluation safeguards and local socket-binding H100 helper regression. No H100 job was launched.
 - Frontend: 64 tests passed; production build and generated-contract drift check passed. Vite retains its existing large-bundle advisory.
 - Real browser: the latest Gridlocked design, Gemini map driver and Evidence workflow coexist at desktop 1200×900 and mobile 390×844, with no horizontal overflow or console errors. The tablet toolbar overlap found during review was fixed and rechecked.
 - A fresh recorder accepted its initially empty buffer, then retained 25.025 seconds. The UI selected and saved a 15.015-second, 225-frame prefix. Stop retained the buffered interval. A failed extraction preserved the saved capture and reported one attempted and two unprocessed windows.
