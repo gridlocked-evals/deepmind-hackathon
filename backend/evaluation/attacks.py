@@ -12,7 +12,7 @@ from enum import StrEnum
 import json
 from pathlib import Path
 import random
-from typing import Any, Literal
+from typing import Any, Callable, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -99,8 +99,13 @@ class AdversaryChoice(BaseModel):
 
 async def adversary_step(gateway, *, frames: list[dict], frame_index: int, defender_actions: list[str],
                          log: list[AttackRecord], session_id: str, context: CallContext,
+                         current_frame: Callable[[], int] | None = None,
                          budget: Budget = Budget()) -> AttackRecord | None:
-    """One Carbon decision. `frames` are gateway image parts (newest last). Returns the attack to send, or None."""
+    """One Carbon decision. `frames` are gateway image parts (newest last). Returns the attack to send, or None.
+
+    `current_frame` reports the stream's newest frame index; it stamps the send frame after Carbon
+    answers, since the call takes seconds and `frame_index` is when the decision started.
+    """
     if not allowed([r.send_frame for r in log], frame_index, budget):
         return None  # budget enforced in code, before spending a call
     menu = "\n".join(f"- {t.value}: {text}" for t, (text, _) in MENU.items())
@@ -113,9 +118,12 @@ async def adversary_step(gateway, *, frames: list[dict], frame_index: int, defen
     choice = AdversaryChoice.model_validate(result.output)
     if choice.action == "wait":
         return None
+    send = current_frame() if current_frame else frame_index
+    if not allowed([r.send_frame for r in log], send, budget):
+        return None  # the call took long enough to cross a gap or the 90 s limit
     attack = AttackType(choice.action)
-    script = AttackScript(attack_type=attack, steering_text=choice.wording or MENU[attack][0], trigger_frame=frame_index)
-    return AttackRecord(script=script, session_id=session_id, send_frame=frame_index, source="adaptive")
+    script = AttackScript(attack_type=attack, steering_text=choice.wording or MENU[attack][0], trigger_frame=send)
+    return AttackRecord(script=script, session_id=session_id, send_frame=send, source="adaptive")
 
 
 # --- random baseline -------------------------------------------------------------

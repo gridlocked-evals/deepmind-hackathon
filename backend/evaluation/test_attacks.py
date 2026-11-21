@@ -142,3 +142,12 @@ def test_leakage_check():
                 '{"history": [{"attack_type": "door_opens"}]}'):
         with pytest.raises(ValueError):
             assert_no_leakage(bad, records)
+
+
+def test_adversary_stamps_send_frame_after_carbon_answers():
+    image = {"type": "image", "mime_type": "image/jpeg", "data": "eA=="}
+    run = lambda now, log=[]: asyncio.run(adversary_step(FakeGateway({"action": "door_opens"}), frames=[image],
+        frame_index=50, defender_actions=[], log=log, session_id="s1", context=CONTEXT, current_frame=lambda: now))
+    assert run(110).send_frame == 110 and run(110).script.trigger_frame == 110
+    # The decision started in time, but Carbon answered after the 90 s limit.
+    assert run(seconds_to_frames(90) + 1) is None
