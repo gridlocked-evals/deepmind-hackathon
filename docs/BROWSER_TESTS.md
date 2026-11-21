@@ -21,6 +21,7 @@ After building, target one case with `npx playwright test --project=desktop-chro
 - HTTP errors, the 130-second timeout, invalid JSON, invalid decision fields, and mismatched run/step identities, without a fallback decision or automatic retry.
 - Replay → driver → replay and Map/Intersection/Follow perspective changes, comparing controls with the frame and ego transform actually consumed by the renderer.
 - Twelve decisions maximum, at most three simulated seconds per decision, a frozen simulation while awaiting responses, and distinct destination/decision-limit completion states.
+- Lifecycle and timing cases explicitly run the baseline without hazards, so short-route arrival remains valid with the scenario lab enabled. A separate event-mode case starts the primary scenario control, checks that the scheduled hazard reaches the next model observation, and confirms that a pending response still freezes simulation.
 
 ## Isolation and observability
 

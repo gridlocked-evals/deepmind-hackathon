@@ -55,7 +55,7 @@ test('stopping while thinking or driving freezes the car; restart owns a new run
   await driver.page.getByRole('button', { name: 'Stop drive', exact: true }).click();
   await driver.page.clock.runFor(32);
   await expectFrozen(driver);
-  await expect(driver.page.getByRole('button', { name: 'Restart Gemini drive' })).toBeEnabled();
+  await expect(driver.page.getByRole('button', { name: 'Restart scenario', exact: true })).toBeEnabled();
 });
 
 test('late responses remain inert after Stop and after a newer run starts, even when abort is ignored', async ({ driver }) => {
@@ -169,7 +169,7 @@ for (const phase of ['thinking', 'driving'] as const) {
     await expectFrozen(driver);
     await driver.openDriver();
     await expect(driver.page.locator('.driver-decision-heading')).toHaveText('Drive stopped');
-    await expect(driver.page.getByRole('button', { name: 'Restart Gemini drive' })).toBeEnabled();
+    await expect(driver.page.getByRole('button', { name: 'Restart scenario', exact: true })).toBeEnabled();
   });
 }
 
@@ -257,5 +257,29 @@ test('arrival on a short real route finishes before the decision limit', async (
   expect(driver.gateway.calls.length).toBeLessThan(12);
   expect(await driver.time()).toBeLessThan(36);
   await expect(driver.page.locator('.driver-metrics > div').nth(1)).toContainText('0m');
+  await expectFrozen(driver);
+});
+
+test('event mode exposes its scheduled hazard at the next decision without advancing a pending run', async ({ driver }) => {
+  await driver.open();
+  await driver.planRoute('long');
+  await driver.startDriver('event');
+  const first = await driver.gateway.waitForRequest(0);
+  expect(first.observation.simulation_time).toBe(0);
+  expect(first.observation.lead_gap_m).toBeNull();
+  await driver.gateway.reply(0);
+  await expect.poll(() => driver.decisionCount()).toBe(1);
+  await driver.page.clock.runFor(3100);
+  const next = await driver.gateway.waitForRequest(1);
+  expect(next.run_id).toBe(first.run_id);
+  expect(next.step).toBe(1);
+  expect(next.observation.simulation_time).toBeCloseTo(3, 6);
+  expect(next.observation.lead_gap_m).not.toBeNull();
+  expect(next.observation.lead_gap_m!).toBeGreaterThan(0);
+  await driver.openDriver();
+  await expect(driver.page.locator('.scenario-events')).toContainText('applied · 3.0s');
+  await expectFrozen(driver);
+  await driver.page.getByRole('button', { name: 'Stop drive', exact: true }).click();
+  await expect(driver.page.locator('.driver-decision-heading')).toHaveText('Drive stopped');
   await expectFrozen(driver);
 });

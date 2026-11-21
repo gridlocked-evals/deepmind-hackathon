@@ -244,9 +244,14 @@ export class DriverHarness {
   }
 
   /** Production closes the tools on mobile; call openDriver to inspect the panel again. */
-  async startDriver() {
+  async startDriver(mode: 'baseline' | 'event' = 'baseline') {
     await this.openDriver();
-    await this.page.getByRole('button', { name: /^(Start|Restart) Gemini drive$/ }).click();
+    // Timing/arrival checks isolate driver lifecycle from injected hazards. The
+    // event-mode case still exercises the primary scenario action explicitly.
+    const start = mode === 'baseline'
+      ? this.page.getByRole('button', { name: 'Run baseline without hazards', exact: true })
+      : this.page.getByRole('button', { name: /^(Start scenario with Gemini|Restart scenario)$/ });
+    await start.click();
   }
 
   async planRoute(kind: 'short' | 'long') {

@@ -21,7 +21,7 @@ async function expectStoppedWithoutFallback(driver: DriverHarness, message: stri
   const { page } = driver;
   await expect(page.getByRole('alert')).toHaveText(message);
   await expect(page.getByRole('status').filter({ hasText: 'Drive interrupted' })).toBeVisible();
-  await expect(page.getByRole('button', { name: 'Restart Gemini drive', exact: true })).toBeEnabled();
+  await expect(page.getByRole('button', { name: 'Restart scenario', exact: true })).toBeEnabled();
   await expect(page.getByRole('button', { name: 'Stop drive', exact: true })).toHaveCount(0);
   await expect(page.locator('.driver-history')).toHaveCount(0);
   expect(await driver.time()).toBe(0);
