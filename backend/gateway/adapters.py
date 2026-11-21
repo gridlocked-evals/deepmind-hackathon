@@ -97,7 +97,7 @@ def validate_answers(raw: dict, questions: dict) -> dict:
     if not isinstance(answers, dict) or set(answers) != set(questions):
         raise GatewayError(ErrorCode.INVALID_OUTPUT)
     def probability(value):
-        return type(value) in (int, float) and math.isfinite(value) and 0 <= value <= 1
+        return type(value) in (int, float) and 0 <= value <= 1 and math.isfinite(value)
     for name, answer in answers.items():
         question = questions[name]
         if not isinstance(answer, dict) or answer.get("type") != question["type"] or not probability(answer.get("confidence")):
@@ -120,7 +120,7 @@ def validate_answers(raw: dict, questions: dict) -> dict:
             else:
                 score = answer.get("score")
                 legend = {str(i): value for i, value in enumerate(question["criteria"])}
-                if (type(score) not in (int, float) or not math.isfinite(score) or not 0 <= score <= len(legend) - 1
+                if (type(score) not in (int, float) or not 0 <= score <= len(legend) - 1 or not math.isfinite(score)
                         or answer.get("legend") != legend
                         or not math.isclose(score, sum(int(k) * p for k, p in probabilities.items()), abs_tol=.05)):
                     raise GatewayError(ErrorCode.INVALID_OUTPUT)
