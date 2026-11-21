@@ -102,14 +102,14 @@ def build_packet(failures: list[ScoredEpisode], test_suite: list[AttackScript]) 
             raise HoldoutError(f"{f.episode.episode_id}: repair evidence must come from development only")
         s = f.score
         # Only what the defender could see: the hazard type once it was visible (never the scripted type of an
-        # unseen attack), and how long it was observed instead of window_end, which is send_frame + window.
+        # unseen attack). No window_end or anything derived from it: window_end is send_frame + window, and
+        # together with first_visible_frame any duration based on it gives the send time back.
         seen = s.first_visible_frame is not None
         packet.append({"episode_id": f.episode.episode_id, "hazard": s.record.script.attack_type.value if seen else None,
                        "outcome": s.outcome, "void_reason": s.void_reason,
                        "first_visible_frame": s.first_visible_frame, "contact_frame": s.contact_frame,
                        "cleared_frame": s.cleared_frame, "lead_frames": s.lead_frames,
                        "required_lead_frames": s.required_lead_frames,
-                       "observed_frames": s.window_end - s.first_visible_frame if seen else None,
                        "defender_actions": list(f.defender_actions)})
     check_packet(packet, [f.score.record for f in failures], test_suite)
     return packet

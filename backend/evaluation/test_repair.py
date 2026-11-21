@@ -92,10 +92,13 @@ def test_unseen_hazard_and_send_timing_stay_out_of_packet():
                                                           paired_void_reason="never_rendered"))
     packet = build_packet([never, paired], TEST_SUITE)  # also runs check_packet
     for row in packet:
-        assert row["hazard"] is None and row["observed_frames"] is None and "window_end" not in row
+        assert row["hazard"] is None
     assert PED.value not in json.dumps(packet) and "264" not in json.dumps(packet)
     seen = build_packet([DEV_FAIL], TEST_SUITE)[0]
-    assert seen["hazard"] == PED.value and seen["observed_frames"] == 240 and "window_end" not in seen
+    assert seen["hazard"] == PED.value
+    # no send-relative field: first_visible_frame plus any window-based duration would rebuild the send time
+    for row in packet + [seen]:
+        assert not {"window_end", "observed_frames"} & set(row)
 
 
 def test_test_split_source_raises():
