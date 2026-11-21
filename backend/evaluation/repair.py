@@ -14,9 +14,9 @@ from typing import Annotated, Literal, Union
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from backend.gateway.contracts import CallContext, GatewayError, Identifier, Service
+from backend.gateway.contracts import CallContext, GatewayError, Identifier, Service, canonical, digest
 from .attacks import AttackRecord, AttackScore, AttackScript, aggregate, assert_no_leakage, load_suite, suite_hash
-from .manifest import Episode, FinalRun, HoldoutError, opened_marker
+from .manifest import Episode, FinalRun, HoldoutError, Sha256, opened_marker, verify_lock
 
 Value = Union[float, str]
 
@@ -83,6 +83,66 @@ class RepairProposal(BaseModel):
     rationale: str = Field(max_length=2000)
 
 
+# --- comparison plan ----------------------------------------------------------------
+
+class PlanSlot(BaseModel):
+    """One planned comparison: a script on an episode, replicate `replicate`, run before and after repair."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    split: Literal["dev", "test"]
+    episode_id: Identifier
+    script: AttackScript
+    replicate: int = Field(ge=0)
+
+    @property
+    def comparison_id(self) -> str:
+        """Derived from the slot, so a run cannot be relabelled to pair with another."""
+        script_sha = digest(canonical(self.script.model_dump(mode="json")))
+        return digest(canonical([self.episode_id, script_sha, self.replicate]))[:16]
+
+    def __str__(self) -> str:
+        return f"{self.split}:{self.episode_id}/{self.script.attack_type.value}/r{self.replicate}/{self.comparison_id}"
+
+
+class ComparisonPlan(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    manifest_sha256: Sha256
+    slots: tuple[PlanSlot, ...] = Field(min_length=1)
+
+
+def plan_path(lock_path: str | Path) -> Path:
+    return Path(str(lock_path) + ".plan.json")
+
+
+def register_plan(lock_path: str | Path, pinned_sha256: str, suite_path: str | Path, slots: list[PlanSlot]) -> str:
+    """Write the comparison roster once, before any FinalRun opens the holdout; returns its hash."""
+    if opened_marker(lock_path).exists():
+        raise HoldoutError("holdout already opened: the comparison plan must be registered before any FinalRun")
+    locked = verify_lock(lock_path, pinned_sha256)
+    suite = load_suite(suite_path, locked.manifest.attack_suite_sha256)
+    split_of = {e.episode_id: e.split for e in locked.episodes()}
+    for slot in slots:
+        if split_of.get(slot.episode_id) != slot.split:
+            raise ValueError(f"{slot}: not a {slot.split}-split episode of the locked manifest")
+        if slot.split == "test" and slot.script not in suite:
+            raise ValueError(f"{slot}: test slots must use frozen-suite scripts")
+    if len(set(slots)) != len(slots):
+        raise ValueError("duplicate plan slots")
+    data = canonical(ComparisonPlan(manifest_sha256=locked.sha256, slots=tuple(slots)).model_dump(mode="json"))
+    with plan_path(lock_path).open("xb") as handle:
+        handle.write(data)
+    return digest(data)
+
+
+def read_plan(lock_path: str | Path, expected_sha256: str | None = None) -> tuple[ComparisonPlan, str]:
+    data = plan_path(lock_path).read_bytes()
+    plan = ComparisonPlan.model_validate_json(data)
+    sha = digest(canonical(plan.model_dump(mode="json")))
+    if sha != digest(data) or (expected_sha256 is not None and sha != expected_sha256):
+        raise ValueError("comparison plan changed after it was pinned")
+    return plan, sha
+
+
 # --- evidence packet ----------------------------------------------------------------
 
 class ScoredEpisode(BaseModel):
@@ -90,9 +150,18 @@ class ScoredEpisode(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
     episode: Episode
-    comparison_id: Identifier  # planned replicate id, shared across variants; never the runtime session UUID
+    replicate: int = Field(ge=0)  # planned replicate index, shared across variants; never the runtime session
     score: AttackScore
     defender_actions: tuple[str, ...] = ()
+
+    @property
+    def slot(self) -> PlanSlot:
+        return PlanSlot(split=self.episode.split, episode_id=self.episode.episode_id,
+                        script=self.score.record.script, replicate=self.replicate)
+
+    @property
+    def comparison_id(self) -> str:
+        return self.slot.comparison_id
 
 
 def build_packet(failures: list[ScoredEpisode], test_suite: list[AttackScript]) -> list[dict]:
@@ -171,14 +240,19 @@ class RepairSession:
         self.surface, self.initial, self.values = surface, dict(values), dict(values)
         self.failures, self.test_suite = failures, test_suite
         self.packet = build_packet(failures, test_suite)
-        self.lock_path, self.run, self.sealed = Path(lock_path), None, False
+        self.lock_path, self.run, self.sealed, self.plan_sha256 = Path(lock_path), None, False, None
         self.max_rounds, self.proposals, self.rounds = max_rounds, [], 0  # rounds: reserved before the Carbon await
 
     def open_holdout(self, lock_path: str | Path, pinned_sha256: str) -> FinalRun:
-        """The session's only way to the holdout; tuning ends here."""
+        """The session's only way to the holdout; tuning ends here. Needs a registered plan, whose hash it pins."""
         if Path(lock_path) != self.lock_path:
             raise ValueError("holdout must be opened on this session's manifest")
         if self.run is None:
+            if not plan_path(lock_path).exists():
+                raise HoldoutError("register the comparison plan before opening the holdout")
+            plan, self.plan_sha256 = read_plan(lock_path)
+            if plan.manifest_sha256 != pinned_sha256:
+                raise ValueError("comparison plan was registered for a different manifest")
             self.run = FinalRun(lock_path, pinned_sha256)
         return self.run
 
@@ -225,15 +299,18 @@ class RepairSession:
              holdout_after: list[ScoredEpisode]) -> RepairTrial:
         """Record the dev rerun and the held-out-camera holdout for the run from `open_holdout`.
 
-        Dev and holdout before/after must each cover the same (episode_id, comparison_id, script)
-        slots. Assign comparison_id before running each replicate and reuse it across variants;
-        record.session_id still identifies the actual, distinct runtime session for each rollout.
+        Dev and holdout before/after must each cover exactly their split's slots of the plan pinned at
+        `open_holdout`. Rows pair by slot (episode, script, replicate); record.session_id still identifies
+        the actual, distinct runtime session for each rollout.
         """
         if run is None or run is not self.run:
             raise HoldoutError("seal needs the FinalRun returned by this session's open_holdout")
         if self.sealed:
             raise HoldoutError("trial already sealed")
         locked = run.verify()
+        plan, _ = read_plan(self.lock_path, self.plan_sha256)
+        if plan.manifest_sha256 != locked.sha256:
+            raise ValueError("comparison plan was registered for a different manifest")
         suite = load_suite(suite_path, locked.manifest.attack_suite_sha256)
         episodes = locked.episodes()
         dev_cameras = {e.source_id for e in episodes if e.split == "dev"}
@@ -244,13 +321,15 @@ class RepairSession:
         for item in dev_before + dev_after:
             if item.episode not in episodes or item.episode.split != "dev":
                 raise ValueError(f"{item.episode.episode_id}: dev scores must come from dev-split manifest episodes")
-        slot = lambda side: Counter((i.episode.episode_id, i.comparison_id, i.score.record.script) for i in side)
-        for name, before, after in (("dev", dev_before, dev_after), ("holdout", holdout_before, holdout_after)):
-            before_slots, after_slots = slot(before), slot(after)
-            if before_slots != after_slots:
-                raise ValueError(f"{name} before/after must cover the same (episode, comparison, script) slots")
-            if any(count != 1 for count in before_slots.values()):
-                raise ValueError(f"{name} comparison slots must be unique; give every replicate its own comparison_id")
+        names = lambda slots: ", ".join(sorted(map(str, slots))) or "none"
+        for name, split, side in (("dev before", "dev", dev_before), ("dev after", "dev", dev_after),
+                                  ("holdout before", "test", holdout_before), ("holdout after", "test", holdout_after)):
+            planned = {s for s in plan.slots if s.split == split}
+            got = Counter(i.slot for i in side)
+            missing, extra, dupes = planned - set(got), set(got) - planned, [s for s, n in got.items() if n > 1]
+            if missing or extra or dupes:
+                raise ValueError(f"{name} must cover exactly the planned slots; missing: {names(missing)}; "
+                                 f"extra: {names(extra)}; duplicate: {names(dupes)}")
         self.sealed = True
         hb, ha = aggregate([i.score for i in holdout_before]), aggregate([i.score for i in holdout_after])
         db, da = aggregate([i.score for i in dev_before]), aggregate([i.score for i in dev_after])
