@@ -54,6 +54,14 @@ Three gaps are especially consequential:
 - **Closed-loop validity:** recorded future trajectories cannot describe how other actors react to a newly controlled vehicle. Reactive behavior must be modeled and its assumptions exposed.
 - **Measurement validity:** visual similarity does not establish correct flow, timing, geometry, or policy safety. Evaluate those quantities directly.
 
+### Additional research context: SceneDiffuser++
+
+[SceneDiffuser++: City-Scale Traffic Simulation via a Generative World Model](https://arxiv.org/pdf/2506.21976v1) (Tan et al., 2025, v1) complements the Waymo reference with a semantic-state simulator. Section 3 jointly models actors and traffic lights through conditional multi-tensor diffusion. A predicted validity channel handles entry, exit, and occlusion; masked supervision and validity-weighted soft clipping support sparse states. Section 4.1 separates planner/world-model executions and evaluates distributions over long rollouts. This paper and the February 2026 Waymo World Model announcement describe distinct systems.
+
+Its training uses a large WOMD corpus; evaluation uses expanded maps. Short training clips do not establish learning citywide dynamics from one NYC recording. Treat it as architectural context, with checkpoint availability unverified.
+
+**Our implementation decisions:** retain Gemini extraction and SUMO within eight hours. In Sections 8–10, add an actor entry/exit ledger and separate physical existence from camera visibility: an occluded actor persists. Keep future simulator predictions inaccessible to the driving policy. In Section 14, check actor conservation, boundary flows, and signal transitions against observable held-out evidence. Extend distributional realism tests across independent episodes later; diffusion training stays in Section 20's research roadmap.
+
 ## 3. Scope and success conditions
 
 ### Required in eight hours
