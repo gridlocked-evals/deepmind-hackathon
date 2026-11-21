@@ -78,7 +78,17 @@ def test_valid_attack_uses_carbon_adversary_stage_and_data_only_prompt():
     assert data["state"] == request_body()["state"] and data["previous_attacks"] == []
     assert data["budget"]["max_trigger_seconds"] == MAX_TRIGGER_SECONDS == RUN_SECONDS - 12 == 48
     assert data["budget"]["adversary_interval_seconds"] == 3
-    assert set(data["menu"]["event_types"]) == {"car-crash", "stalled-vehicle"}
+    assert set(data["menu"]["event_types"]) == {"car-crash", "stalled-vehicle", "cut-in-vehicle", "hard-braking", "slow-traffic", "two-car-roadblock"}
+
+
+@pytest.mark.parametrize("event_type", ["cut-in-vehicle", "hard-braking", "slow-traffic", "two-car-roadblock"])
+def test_new_hazards_are_accepted_and_preserve_model_choice(event_type):
+    choice = dict(ATTACK, event_type=event_type)
+    client, gateway, _ = client_for(FakeGateway(choice))
+    response = client.post(URL, json=request_body())
+    assert response.status_code == 200 and response.json()["decision"] == choice
+    prompt = json.loads(gateway.calls[0][1]["input_value"].split("Input JSON:\n")[1])
+    assert event_type in prompt["menu"]["event_types"]
 
 
 def test_valid_wait_leaves_slot_open_and_identical_replay_is_cached():

@@ -52,7 +52,7 @@ function expectSameBefore(a: ReturnType<typeof drive>, b: ReturnType<typeof driv
 }
 
 describe('no future information in the driver payload (#91, #70 b)', () => {
-  for (const type of ['car-crash', 'stalled-vehicle']) {
+  for (const type of ['car-crash', 'stalled-vehicle', 'cut-in-vehicle', 'hard-braking', 'slow-traffic', 'two-car-roadblock']) {
     it(`(a) ${type} scheduled at 5 s vs 9 s: identical before 5 s`, () => {
       expectSameBefore(drive(plan(type, { trigger: { kind: 'time', seconds: 5 } })),
         drive(plan(type, { trigger: { kind: 'time', seconds: 9 } })), 5);

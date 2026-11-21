@@ -99,12 +99,14 @@ it('continues at the arrived route endpoint instead of teleporting on normal com
   expect(h.snapshot().restarts).toBe(0); await h.stop();
 });
 
-it('spawns a Carbon-selected event through the shared injector and retains its outcome', async () => {
-  carbon(body => body.previous_attacks.length ? wait : ({ action: 'attack', event_type: 'stalled-vehicle', trigger_seconds: 3,
+it.each(['stalled-vehicle', 'cut-in-vehicle', 'hard-braking', 'slow-traffic', 'two-car-roadblock'])('spawns Carbon-selected %s through the shared injector and retains its outcome', async eventType => {
+  carbon(body => body.previous_attacks.length ? wait : ({ action: 'attack', event_type: eventType, trigger_seconds: 3,
     parameters: { distanceAheadM: 60, approachSeconds: 2 }, durationSeconds: 4, reason: 'Block the lane fixture.' }));
   const h = harness(); await h.clock.advance(15_000);
   expect(h.onFrame.mock.calls.some(([frame]) => frame.actors.some((a: { id: string }) => a.id.startsWith('event-')))).toBe(true);
   expect(h.snapshot().attacks[0].chosenBy).toBe('carbon');
+  expect(h.snapshot().attacks[0].eventType).toBe(eventType);
+  expect(h.snapshot().attacks[0].void).toBeNull();
   expect(h.snapshot().attacks[0].appliedAt).toBe(3);
   expect(h.snapshot().attacks[0].reason).toBe('Block the lane fixture.');
   await h.stop(); expect(h.traces[0].adversary?.decisions.filter(row => row.decision.action === 'attack')).toHaveLength(1);

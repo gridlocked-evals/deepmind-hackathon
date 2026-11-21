@@ -2,7 +2,7 @@ import { DEMO_SCENE_ID, demoSignal, sampleScenario, streetPoint } from '../scene
 import type { ActorDefinition, ActorState, ScenarioBundle, SimulationFrame, Vec2 } from '../types';
 import { SPEED_LIMIT_MPS } from './types';
 import type { DriverDecision, DriverObservation, GuardReason } from './types';
-import { advanceEvents, sampleEvents } from '../scenarios/events';
+import { advanceEvents, eventTravelDistance, sampleEvents } from '../scenarios/events';
 import type { EventState } from '../scenarios/events';
 
 export const MAX_PHYSICS_STEP = 0.1;
@@ -92,7 +92,7 @@ export function prepareDriverDecision(state: DriverSimulation): DriverSimulation
 
 export function validateEventRun(state: DriverSimulation) {
   if (state.events?.mode === 'event' && state.events.plan.events.some(event =>
-    state.progress + event.parameters.distanceAheadM + 8 >= state.path.length)) {
+    state.progress + event.parameters.distanceAheadM + eventTravelDistance(event) + 8 >= state.path.length)) {
     throw new Error('This route is too short for the configured hazard distance. Choose a longer route or reduce the distance.');
   }
 }

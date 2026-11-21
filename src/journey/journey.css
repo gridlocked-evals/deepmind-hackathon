@@ -20,6 +20,7 @@
 .journey-events { padding: 0; list-style: none; }.journey-events li { padding: 12px; margin-bottom: 8px; background: #ffffff05; border: 1px solid #ffffff13; border-radius: 8px; }
 .journey-events li > div { display: flex; justify-content: space-between; gap: 8px; font-size: 12px; }.journey-events li > div span { color: #9ce0c0; font-size: 11px; }
 .journey-events p { margin: 8px 0; }.journey-empty { padding: 15px 0; }.journey-panel details { margin-bottom: 15px; font-size: 12px; }
+.journey-menu summary { cursor: pointer; color: #9ce0c0; }.journey-menu ul { padding-left: 19px; color: #c5d6db; line-height: 1.8; }
 .journey-launch { background: #123e34; color: #c9f2df; border: 1px solid #547e6e; border-radius: 8px; padding: 9px 12px; cursor: pointer; white-space: nowrap; }
 @media (max-width: 1000px) { .journey-launch { font-size: 11px; padding: 8px; } .journey-panel { right: 14px; } }
 @media (max-width: 760px) { .journey-panel { top: 126px; max-height: calc(100dvh - 148px); } }

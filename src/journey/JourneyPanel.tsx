@@ -1,14 +1,17 @@
 import { Bot, Download, Play, Square, X } from 'lucide-react';
 import type { Journey } from './useJourney';
+import { eventTypes } from '../scenarios/events';
 import './journey.css';
 
 export function JourneyPanel({ journey, onStart, onClose }: { journey: Journey; onStart: () => void; onClose: () => void }) {
   const { snapshot: s } = journey;
   const latest = s.trace?.adversary?.decisions.at(-1);
+  const scenarioLabel = (type: string) => eventTypes().find(event => event.type === type)?.label ?? type;
   return <section className="journey-panel" aria-labelledby="journey-title">
     <header><div><span className="journey-eyebrow">NYC · CONTINUOUS JOURNEY</span><h2 id="journey-title"><Bot size={18} />Driver vs adversary</h2></div>
       <button className="icon-button" onClick={onClose} aria-label="Close journey panel"><X size={18} /></button></header>
     <p>A car travels NYC streets. Carbon spawns hazards; Gemini Decisions drives. A stuck car restarts from a random location.</p>
+    <details className="journey-menu"><summary>Available scenarios ({eventTypes().length})</summary><ul>{eventTypes().map(event => <li key={event.type}>{event.label}</li>)}</ul></details>
     <div className="journey-actions">{journey.active
       ? <button className="driver-stop" onClick={journey.stop}><Square size={14} />Stop journey</button>
       : <button className="driver-start" onClick={onStart}><Play size={14} />{s.trip ? 'Start new journey' : 'Start journey'}</button>}
@@ -28,7 +31,7 @@ export function JourneyPanel({ journey, onStart, onClose }: { journey: Journey; 
       <h3>Scenarios & outcomes</h3>
       {s.attacks.length === 0 ? <p className="journey-empty">Waiting for the adversary’s first scenario.</p> : <ol className="journey-events">
         {[...s.attacks].reverse().slice(0, 12).map(row => <li key={`${row.window}-${row.eventId}`}>
-          <div><strong>{row.eventType === 'car-crash' ? 'Car crash ahead' : 'Stalled vehicle'}</strong><span>{row.void === 'not_reached' ? journey.active && row.window === s.windows ? 'Scheduled' : 'Not reached' : row.void === 'unavoidable' ? 'Skipped: too close at trigger speed' : row.void ? 'Skipped: route too short' : row.outcome?.replaceAll('_', ' ')}</span></div>
+          <div><strong>{scenarioLabel(row.eventType)}</strong><span>{row.void === 'not_reached' ? journey.active && row.window === s.windows ? 'Scheduled' : 'Not reached' : row.void === 'unavoidable' ? 'Skipped: too close at trigger speed' : row.void ? 'Skipped: route too short' : row.outcome?.replaceAll('_', ' ')}</span></div>
           <p>{row.reason}</p><small>Window {row.window} · trigger {row.triggerTime.toFixed(1)}s · {row.guardAssisted ? 'Guard assisted' : 'No guard assistance'}{row.resolution && ` · ${row.resolution.replaceAll('_', ' ')}`}</small>
         </li>)}</ol>}
       {s.restartsLog.length > 0 && <details><summary>Restart history ({s.restarts})</summary>{s.restartsLog.slice(-8).reverse().map(row => <p key={row.trip}>Trip {row.trip}: {row.reason}</p>)}</details>}

@@ -5,6 +5,15 @@ car on an OpenStreetMap / OSRM driving route between NYC locations. Carbon choos
 hazards using the adversary from PR #97; Gemini Decisions controls speed. Steering,
 acceleration, and the normal safety guards remain local simulation controls.
 
+**Available scenarios (6)** lists Carbon's menu in the journey panel: car crash,
+stalled vehicle, car cutting in, sudden hard braking, slow-moving traffic, and a
+two-car roadblock. Carbon chooses the type and timing; it can repeat types or wait.
+The two-attack limit applies per window, not to the number of available types.
+To choose a particular hazard yourself, open **Traffic demo → Gemini driver →
+Scenario Lab** and select it from **Event**. Moving hazards follow the route;
+clearance removes them after the configured interval. These are scripted vehicle
+behaviours with model-controlled selection and ego speed.
+
 The journey automatically continues across 60-decision/60-second windows without
 resetting the car's position or speed. On arrival it plans another route from the
 actual arrival coordinate. If the car advances less than 2 metres for 25 simulated
@@ -19,7 +28,7 @@ calls. Starting a normal route, camera selection, or Traffic demo ends journey m
 
 ## Relationship to PRs #97 and #98
 
-This feature is stacked on **#97**, which supplies `/api/adversary/attack`,
+This feature builds on merged **#97**, which supplies `/api/adversary/attack`,
 `adversaryBarrier`, the scenario injector, server-enforced attack budgets, and
 outcome calculations. No second adversary endpoint or scoring implementation is
 introduced. **#98** caches camera footage and applies evidence to camera-specific
@@ -83,3 +92,20 @@ Regression coverage includes the reported 21/25 m cases and a stopped car
 accelerating to 25 mph before a future hazard. Validation after integrating #97's
 latest corrections: 178 frontend tests passed plus one existing expected failure,
 246 backend driver/adversary/gateway tests passed, and the production build passed.
+
+### Expanded scenario menu
+
+The four additional vehicle events have regression coverage for motion, road
+bends, driver visibility, duration isolation, route-end admission, cleanup and
+recorded replay. Each also runs through the journey's real Carbon adapter and
+injector with fixture API responses. The random baseline can draw all six types.
+
+A live Carbon/Decisions run on November 21 selected a cut-in at 6 seconds (58 m
+ahead) and hard braking at 18 seconds (60 m ahead). Both applied at the scheduled
+barrier and rendered. The driver slowed behind the cut-in; it cleared at 23 s.
+The run was manually stopped after 28 decisions, 28.7 simulated seconds and
+119.4 m. Neither attack was void or guard-assisted. Outcomes were unresolved:
+scripted removal for the cut-in and horizon censoring for hard braking. This
+verifies generation and execution, not independent physical clearance. The
+slow-traffic and roadblock types were verified with deterministic simulation
+tests; all six choices were checked in the browser UI.

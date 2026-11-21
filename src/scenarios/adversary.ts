@@ -19,7 +19,7 @@ export const LAST_TRIGGER_S = 48;
 export const ADVERSARY_INTERVAL_S = 3;
 export const MAX_ADVERSARY_CALLS = 16;
 export const NEAR_MISS_M = 1;
-export const ATTACK_TYPES = ['car-crash', 'stalled-vehicle'] as const;
+export const ATTACK_TYPES = ['car-crash', 'stalled-vehicle', 'cut-in-vehicle', 'hard-braking', 'slow-traffic', 'two-car-roadblock'] as const;
 export type AttackType = typeof ATTACK_TYPES[number];
 const BOUNDS = { distanceAheadM: [20, 100], approachSeconds: [1, 4], durationSeconds: [1, 20] } as const;
 
