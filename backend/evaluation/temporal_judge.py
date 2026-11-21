@@ -60,6 +60,7 @@ class Window:
     answers: dict | None = None
     error: str | None = None
     stale: bool = False
+    actionable: bool = False  # admitted to the controller when this answer arrived
 
 
 def load_image(frame: RecordedFrame) -> dict:
@@ -72,7 +73,9 @@ def classify(answers: dict | None, p: Params) -> dict[str, str]:
     if not answers:
         return {k: UNKNOWN for k in VIOLATIONS}
     try:
-        if yes_probability(answers[AMBIGUITY]) >= p.ambiguous_p:
+        ambiguity_confidence = float(answers[AMBIGUITY].get("confidence", 0))
+        if (not ambiguity_confidence >= p.min_confidence
+                or not yes_probability(answers[AMBIGUITY]) < p.ambiguous_p):  # NaN fails closed
             return {k: UNKNOWN for k in VIOLATIONS}
     except (KeyError, ValueError, TypeError):
         return {k: UNKNOWN for k in VIOLATIONS}
@@ -163,6 +166,7 @@ class TemporalJudge:
             self.newest_answered = max(self.newest_answered, w.start)
         if w.stale or self.stopped or superseded:
             return  # logged in self.windows, but cannot act
+        w.actionable = True
         self._act(w)
 
     def _miss(self) -> None:
@@ -186,21 +190,23 @@ class TemporalJudge:
             # so #24 keeps the frames before the defender was touched.
             self.interventions.append((self.newest, self.newest, "release_keys", "violation:" + ",".join(hits)))
             self.controller.release_keys()
-            for e in self.events():
+            for e in self.events(actionable_only=True):
                 if e["type"] in hits and e["windows"] >= self.p.stop_after and e["start_lo"] <= w.start <= e["end_hi"]:
                     self._stop("repeated_violation:" + e["type"], "violation:" + e["type"])
         elif w.answers and all(v == UNKNOWN for v in w.outcomes.values()):
             self.interventions.append((w.start, w.end, "review", "ambiguous"))
             self.controller.request_review({"start_frame": w.start, "end_frame": w.end, "answers": w.answers})
 
-    def events(self) -> list[dict]:
+    def events(self, *, actionable_only: bool = False) -> list[dict]:
         """One event per run of overlapping/adjacent violation windows of the same type.
 
         Interval-censored: the violation starts in [start_lo, start_hi] and ends in [end_lo, end_hi].
+        Diagnostic events retain every result; controller counts include only answers admitted to act.
         """
         out = []
         for kind in VIOLATIONS:
-            ws = sorted((w for w in self.windows if w.outcomes.get(kind) == OBSERVED), key=lambda w: w.start)
+            ws = sorted((w for w in self.windows if w.outcomes.get(kind) == OBSERVED
+                         and (not actionable_only or w.actionable)), key=lambda w: w.start)
             for s, e in merge([(w.start, w.end) for w in ws]):
                 group = [w for w in ws if s <= w.start <= e]
                 out.append({"type": kind, "start_lo": s, "start_hi": group[0].end,

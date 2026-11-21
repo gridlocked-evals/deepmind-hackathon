@@ -65,7 +65,8 @@ async def register_observations(batch: dict, request: Request):
     try:
         parsed = ObservationBatch.model_validate(batch)
     except ValidationError as exc:
-        return JSONResponse({"error": "invalid observation batch", "detail": exc.errors(include_url=False)},
+        return JSONResponse({"error": "invalid observation batch",
+                             "detail": exc.errors(include_url=False, include_context=False)},
                             status_code=422)
     try:
         return request.app.state.artifacts.put("observations", parsed.id, parsed)

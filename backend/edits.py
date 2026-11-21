@@ -178,9 +178,12 @@ def request_permissions(preset: Preset, allowed: list[str] | None, forbidden: li
         raise EditRequestError(f"{', '.join(outside)} is outside the {preset.name} preset")
     blocked = list(dict.fromkeys([*ALWAYS_FORBIDDEN, *(forbidden or [])]))
     try:
-        return Permissions(allowed=scope, forbidden=blocked)
+        permissions = Permissions(allowed=scope, forbidden=blocked)
     except ValidationError as exc:
         raise EditRequestError(exc.errors()[0]["msg"].removeprefix("Value error, ")) from None
+    if preset.main not in permissions.allowed or preset.main in permissions.forbidden:
+        raise EditRequestError(f"the {preset.name} preset must allow its result class {preset.main}")
+    return permissions
 
 
 def validate_output(out: CarbonEditOutput, batch: ObservationBatch, preset: Preset,
@@ -203,6 +206,8 @@ def validate_output(out: CarbonEditOutput, batch: ObservationBatch, preset: Pres
             errors.append(f"{name} targets {op.target}, which this request does not allow")
         if op.op == "modify" and op.becomes not in (preset.main, *preset.extras):
             errors.append(f"{name} must turn {op.target} into {preset.main}, not {op.becomes}")
+        if op.op == "modify" and (op.becomes not in permissions.allowed or op.becomes in permissions.forbidden):
+            errors.append(f"{name} creates {op.becomes}, which this request does not allow")
         if op.op == "add" and op.target not in (preset.main, *preset.extras):
             errors.append(f"{name} adds {op.target}, which the {preset.name} preset cannot add")
         if op.op == "remove" and op.target not in preset.convertible:
