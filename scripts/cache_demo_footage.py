@@ -56,29 +56,41 @@ def latest_clip(status: dict, clip_s: float) -> tuple[float, float, str] | None:
     return end - start, end - start, status["history"]["bufferRevision"]
 
 
-def cache_video(base: str, cameras: list[dict], args) -> tuple[dict, dict]:
-    kept, dropped = {}, {}
-    started = time.monotonic()
-    for camera in cameras:
-        call(base, f"/api/captures/{quote(camera['id'])}/recording", {})
-    print(f"Recording {len(cameras)} video cameras for {args.record_seconds:.0f} s…", flush=True)
+def cache_video(base: str, cameras: list[dict], args, kept: dict, dropped: dict) -> None:
+    """Fills kept/dropped in place so the caller can release pins if a later step fails."""
+    recording: list[str] = []
     first_media: dict[str, tuple[float, float]] = {}  # camera -> (elapsed s, buffered s) when media first arrived
     statuses: dict[str, dict] = {}
-    while time.monotonic() - started < args.record_seconds:
-        time.sleep(2)
+    started = time.monotonic()
+    try:
         for camera in cameras:
-            status = call(base, f"/api/captures/{quote(camera['id'])}/buffer")
-            statuses[camera["id"]] = status
-            if status["bufferedSeconds"] > 0 and camera["id"] not in first_media:
-                first_media[camera["id"]] = (time.monotonic() - started, status["bufferedSeconds"])
-    elapsed = time.monotonic() - started
-    for camera in cameras:
-        cid, status = camera["id"], statuses.get(camera["id"], {})
-        try:
-            # A segment can land between the last poll and the stop; the clip must use the final buffer revision.
-            status = call(base, f"/api/captures/{quote(cid)}/stop", {})
-        except (RuntimeError, URLError) as exc:
-            print(f"  warn: could not stop {cid}: {exc}", file=sys.stderr)
+            try:
+                call(base, f"/api/captures/{quote(camera['id'])}/recording", {})
+                recording.append(camera["id"])
+            except (RuntimeError, URLError, TimeoutError) as exc:
+                dropped[camera["id"]] = f"could not start recording: {exc}"
+        print(f"Recording {len(recording)} video cameras for {args.record_seconds:.0f} s…", flush=True)
+        while time.monotonic() - started < args.record_seconds:
+            time.sleep(2)
+            for cid in recording:
+                try:
+                    status = call(base, f"/api/captures/{quote(cid)}/buffer")
+                except (RuntimeError, URLError, TimeoutError):
+                    continue  # one failed poll is not fatal; the final state comes from /stop
+                statuses[cid] = status
+                if status["bufferedSeconds"] > 0 and cid not in first_media:
+                    first_media[cid] = (time.monotonic() - started, status["bufferedSeconds"])
+    finally:
+        # Always stop what was started, even on errors or Ctrl-C, so no recorder keeps pulling video.
+        elapsed = time.monotonic() - started
+        for cid in recording:
+            try:
+                # A segment can land between the last poll and the stop; the clip must use the final buffer revision.
+                statuses[cid] = call(base, f"/api/captures/{quote(cid)}/stop", {})
+            except (RuntimeError, URLError, TimeoutError) as exc:
+                print(f"  warn: could not stop {cid}: {exc}", file=sys.stderr)
+    for cid in recording:
+        status = statuses.get(cid, {})
         # Slow = media took too long to start, or arrived well below real time once it did.
         start_s, start_buffered = first_media.get(cid, (None, 0))
         # Measured after first arrival: the first playlist fetch returns a backlog that would inflate the rate.
@@ -106,7 +118,18 @@ def cache_video(base: str, cameras: list[dict], args) -> tuple[dict, dict]:
             continue
         kept[cid] = {"kind": "hls", "saved": saved, "firstMediaS": round(start_s, 1), "realtimeRatio": round(rate, 2)}
         print(f"  keep {cid}: {duration:.1f} s clip, {rate:.2f}x real time")
-    return kept, dropped
+
+
+def capture_ids(cameras: dict) -> set[str]:
+    return {entry["saved"]["capture"]["id"] for entry in cameras.values()}
+
+
+def release(base: str, ids: set[str]) -> None:
+    for capture_id in ids:
+        try:
+            call(base, f"/api/captures/{quote(capture_id)}/pins/{PIN_JOB}", method="DELETE")
+        except (RuntimeError, URLError, TimeoutError):
+            print(f"  warn: could not unpin {capture_id}", file=sys.stderr)
 
 
 def cache_snapshot(base: str, camera: dict, max_seconds: float) -> tuple[str, dict | str]:
@@ -147,16 +170,28 @@ def main() -> int:
     base = args.base.rstrip("/")
 
     call(base, "/api/health")
-    if OUT.exists():  # release the previous run's pins so the store can evict that footage
-        for entry in json.loads(OUT.read_text()).get("cameras", {}).values():
-            try:
-                call(base, f"/api/captures/{quote(entry['saved']['capture']['id'])}/pins/{PIN_JOB}", method="DELETE")
-            except (RuntimeError, URLError):
-                pass
+    try:
+        previous = capture_ids(json.loads(OUT.read_text()).get("cameras", {})) if OUT.exists() else set()
+    except (ValueError, KeyError, TypeError):
+        previous = set()
+    kept: dict = {}
+    dropped: dict = {}
+    try:
+        run(base, args, kept, dropped)
+    except BaseException:
+        # The old cache file and its pins stay valid; only this run's new pins are released.
+        release(base, capture_ids(kept))
+        raise
+    # Release the previous run's footage only after the new cache is written.
+    release(base, previous - capture_ids(kept))
+    print(f"\nKept {len(kept)} cameras, dropped {len(dropped)}. Wrote {OUT}")
+    return 0 if kept else 1
 
+
+def run(base: str, args, kept: dict, dropped: dict) -> None:
     video = call(base, "/api/vision/cameras")
     video = video.get("cameras", video) if isinstance(video, dict) else video
-    kept, dropped = cache_video(base, video, args)
+    cache_video(base, video, args, kept, dropped)
 
     if not args.skip_snapshots:
         dot = call(base, "/api/cameras", timeout=120)["cameras"]
@@ -187,8 +222,6 @@ def main() -> int:
     tmp.write_text(json.dumps({"schemaVersion": "demo-cache.v1", "createdAt": datetime.now(timezone.utc).isoformat(),
                                "cameras": kept, "dropped": dropped}))
     tmp.replace(OUT)
-    print(f"\nKept {len(kept)} cameras, dropped {len(dropped)}. Wrote {OUT}")
-    return 0 if kept else 1
 
 
 if __name__ == "__main__":
