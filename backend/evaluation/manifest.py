@@ -2,7 +2,8 @@
 
 The manifest core (episodes, prompts, thresholds, frozen #24 attack suite) is
 hashed with gateway `canonical`/`digest`. The post-freeze, judge-selected fresh
-capture is appended as a labelled addition outside that hash.
+capture is appended as a labelled addition outside that hash; `full_sha256`
+covers core plus additions and is pinned by the first FinalRun.
 """
 from __future__ import annotations
 
@@ -16,7 +17,7 @@ from typing import Annotated, Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from backend.evaluation.common import wilson_interval
-from backend.gateway.contracts import MODELS, Identifier, Service, canonical, digest
+from backend.gateway.contracts import MODELS, ErrorCode, Identifier, Service, canonical, digest
 
 Sha256 = Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
 MAX_EPISODE_SECONDS = 120
@@ -121,6 +122,16 @@ class LockedManifest(BaseModel):
     def episodes(self) -> tuple[Episode, ...]:
         return self.manifest.episodes + tuple(a.episode for a in self.additions)
 
+    @property
+    def full_sha256(self) -> str:
+        """Core hash plus additions: any swapped, removed or appended addition changes it."""
+        return digest(canonical(self.model_dump(mode="json")))
+
+
+def opened_marker(path: str | Path) -> Path:
+    """Exists once a FinalRun has opened the holdout; holds the full hash it pinned."""
+    return Path(str(path) + ".opened")
+
 
 def _write(path: Path, locked: LockedManifest) -> None:
     temporary = path.with_suffix(path.suffix + ".tmp")
@@ -148,10 +159,14 @@ def verify_lock(path: str | Path, expected_sha256: str | None = None) -> LockedM
 
 
 def add_fresh_capture(path: str | Path, episode: Episode, expected_sha256: str) -> LockedManifest:
-    """Append the judge-selected post-freeze capture without touching the original hash."""
+    """Append the single judge-selected post-freeze capture, only before any FinalRun, without touching the core hash."""
+    if opened_marker(path).exists():
+        raise HoldoutError("holdout already opened: no additions after a FinalRun")
     locked = verify_lock(path, expected_sha256)
     if episode.split != "test":
         raise ValueError("the post-freeze fresh capture is a test episode")
+    if locked.additions:
+        raise ValueError("at most one post-freeze fresh capture")
     updated = locked.model_copy(update={"additions": locked.additions + (Addition(episode=episode),)})
     check_lineage(updated.episodes())
     _write(Path(path), updated)
@@ -159,15 +174,41 @@ def add_fresh_capture(path: str | Path, episode: Episode, expected_sha256: str) 
 
 
 class FinalRun:
-    """The only holder of test-split access; exists only for a verified, pinned lock."""
+    """The only holder of test-split access; exists only for a verified, pinned lock.
+
+    The first FinalRun writes `<lock>.opened` with the full hash; later runs and `verify()`
+    must match it, so additions cannot change once the holdout has been opened.
+    """
 
     def __init__(self, path: str | Path, expected_sha256: str):
+        self.path = Path(path)
         self.locked = verify_lock(path, expected_sha256)
+        self.full_sha256 = self.locked.full_sha256
+        marker = opened_marker(path)
+        try:
+            with marker.open("x") as handle:
+                handle.write(self.full_sha256)
+        except FileExistsError:
+            pass
+        self.verify()
+
+    def verify(self) -> LockedManifest:
+        """Re-read the lock; fail if core or additions differ from what was pinned at first opening."""
+        locked = verify_lock(self.path, self.locked.sha256)
+        pinned = opened_marker(self.path).read_text().strip()
+        if locked.full_sha256 != pinned or self.full_sha256 != pinned:
+            raise ValueError("manifest additions changed after the holdout was opened")
+        return locked
 
 
 def read_source(path: str | Path, manifest: Manifest | LockedManifest,
                 run: FinalRun | None = None) -> tuple[Episode, bytes]:
-    """Load episode bytes by content hash; test bytes need a FinalRun."""
+    """Load episode bytes by content hash; test bytes need a FinalRun.
+
+    Without `run` the caller's in-memory manifest is trusted as given: this is a tripwire
+    against accidentally loading holdout bytes, not a security boundary. A FinalRun (which
+    re-verifies the lock on disk) is the real guard.
+    """
     data = Path(path).read_bytes()
     fingerprint = digest(data)
     episodes = run.locked.episodes() if run else (
@@ -200,6 +241,13 @@ class Attempt(BaseModel):
     latency_ms: float = Field(ge=0)
     stochastic: bool = False  # independent Genie trial
     manifest_sha256: Sha256 | None = None
+    error_code: ErrorCode | None = None  # required for RETRY: the gateway failure being retried
+
+    @model_validator(mode="after")
+    def retry_has_error(self) -> Attempt:
+        if self.outcome == Outcome.RETRY and self.error_code is None:
+            raise ValueError("a retry must carry the gateway error_code that caused it")
+        return self
 
 
 class ResultsLedger:

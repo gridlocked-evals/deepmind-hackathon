@@ -2,11 +2,12 @@
 
 Carbon sees development failure logs only (never adversary prompts, steering
 text or the frozen test suite), may change only declared surface fields within
-bounds, gets at most `max_rounds` proposals, and the trial is sealed the moment
-holdout results are recorded. Every proposal, rejection and regression is kept.
+bounds, gets at most `max_rounds` proposals, and tuning stops the moment the
+holdout is opened. Every proposal, rejection and regression is kept.
 """
 from __future__ import annotations
 
+from collections import Counter
 import json
 from pathlib import Path
 from typing import Annotated, Literal, Union
@@ -15,7 +16,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from backend.gateway.contracts import CallContext, GatewayError, Identifier, Service
 from .attacks import AttackRecord, AttackScore, AttackScript, aggregate, assert_no_leakage, load_suite, suite_hash
-from .manifest import Episode, FinalRun, HoldoutError
+from .manifest import Episode, FinalRun, HoldoutError, opened_marker
 
 Value = Union[float, str]
 
@@ -157,19 +158,28 @@ def delta(before: dict, after: dict) -> dict[str, float | None]:
 
 
 class RepairSession:
-    """At most `max_rounds` Carbon proposals; sealed (no more proposals) once holdout is recorded."""
+    """At most `max_rounds` Carbon proposals; none once any FinalRun has opened this manifest's holdout."""
 
     def __init__(self, surface: RepairSurface, values: dict[str, Value], failures: list[ScoredEpisode],
-                 test_suite: list[AttackScript], *, max_rounds: int = 2):
+                 test_suite: list[AttackScript], *, lock_path: str | Path, max_rounds: int = 2):
         surface.validate_values(values)
         self.surface, self.initial, self.values = surface, dict(values), dict(values)
         self.failures, self.test_suite = failures, test_suite
         self.packet = build_packet(failures, test_suite)
-        self.max_rounds, self.proposals, self.sealed = max_rounds, [], False
+        self.lock_path, self.run, self.sealed = Path(lock_path), None, False
+        self.max_rounds, self.proposals = max_rounds, []
+
+    def open_holdout(self, lock_path: str | Path, pinned_sha256: str) -> FinalRun:
+        """The session's only way to the holdout; tuning ends here."""
+        if Path(lock_path) != self.lock_path:
+            raise ValueError("holdout must be opened on this session's manifest")
+        if self.run is None:
+            self.run = FinalRun(lock_path, pinned_sha256)
+        return self.run
 
     async def propose(self, gateway, context: CallContext) -> ProposalRecord:
-        if self.sealed:
-            raise HoldoutError("trial is sealed: no tuning after the holdout is opened")
+        if self.run is not None or opened_marker(self.lock_path).exists():
+            raise HoldoutError("no tuning after the holdout is opened")
         if len(self.proposals) >= self.max_rounds:
             raise RuntimeError(f"repair attempt cap of {self.max_rounds} reached")
         body = {"surface": self.surface.model_dump(mode="json"), "values": self.values, "failures": self.packet}
@@ -197,24 +207,36 @@ class RepairSession:
         self.proposals.append(record)
         return record
 
-    def seal(self, run: FinalRun, suite_path: str | Path, *, dev_before: list[AttackScore], dev_after: list[AttackScore],
-             holdout_before: list[ScoredEpisode], holdout_after: list[ScoredEpisode]) -> RepairTrial:
-        """Record the dev rerun and the held-out-camera holdout; afterwards no proposal is allowed."""
-        if not isinstance(run, FinalRun):
-            raise HoldoutError("holdout results need a FinalRun")
+    def seal(self, run: FinalRun, suite_path: str | Path, *, dev_before: list[ScoredEpisode],
+             dev_after: list[ScoredEpisode], holdout_before: list[ScoredEpisode],
+             holdout_after: list[ScoredEpisode]) -> RepairTrial:
+        """Record the dev rerun and the held-out-camera holdout for the run from `open_holdout`.
+
+        Holdout before/after must cover the same multiset of (episode_id, record.session_id, frozen script)
+        slots, so no slot can be dropped or rerun on one side only.
+        """
+        if run is None or run is not self.run:
+            raise HoldoutError("seal needs the FinalRun returned by this session's open_holdout")
         if self.sealed:
             raise HoldoutError("trial already sealed")
-        manifest = run.locked.manifest
-        suite = load_suite(suite_path, manifest.attack_suite_sha256)
-        episodes = run.locked.episodes()
+        locked = run.verify()
+        suite = load_suite(suite_path, locked.manifest.attack_suite_sha256)
+        episodes = locked.episodes()
         dev_cameras = {e.source_id for e in episodes if e.split == "dev"}
         for item in holdout_before + holdout_after:
             e = item.episode
             if e not in episodes or e.split != "test" or e.source_id in dev_cameras or item.score.record.script not in suite:
                 raise ValueError(f"{e.episode_id}: holdout must be a frozen-suite attack on a held-out test camera")
+        for item in dev_before + dev_after:
+            if item.episode not in episodes or item.episode.split != "dev":
+                raise ValueError(f"{item.episode.episode_id}: dev scores must come from dev-split manifest episodes")
+        slots = [Counter((i.episode.episode_id, i.score.record.session_id, i.score.record.script) for i in side)
+                 for side in (holdout_before, holdout_after)]
+        if slots[0] != slots[1]:
+            raise ValueError("holdout before/after must cover the same (episode, session, script) slots")
         self.sealed = True
         hb, ha = aggregate([i.score for i in holdout_before]), aggregate([i.score for i in holdout_after])
-        db, da = aggregate(dev_before), aggregate(dev_after)
+        db, da = aggregate([i.score for i in dev_before]), aggregate([i.score for i in dev_after])
         dev_delta, holdout_delta = delta(db, da), delta(hb, ha)
         targeted = sorted({f.score.record.script.attack_type.value for f in self.failures})
         return RepairTrial(
@@ -225,4 +247,4 @@ class RepairSession:
             regressions={"dev": [k for k, d in dev_delta.items() if d is not None and d < 0],
                          "holdout": [k for k, d in holdout_delta.items() if d is not None and d < 0]},
             unsuccessful_fixes=[k for k in targeted if (holdout_delta.get(k) or 0) <= 0],
-            manifest_sha256=run.locked.sha256, suite_sha256=suite_hash(suite))
+            manifest_sha256=locked.sha256, suite_sha256=suite_hash(suite))

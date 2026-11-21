@@ -106,7 +106,8 @@ def test_bytes_shared_across_splits_are_rejected(tmp_path):
 def test_ledger_keeps_failures_and_report_has_full_denominators(tmp_path):
     ledger = ResultsLedger(tmp_path / "results.jsonl")
     for outcome in Outcome:
-        ledger.append(Attempt(episode_id="t1", system="full", outcome=outcome, cost_usd=.01, latency_ms=10))
+        ledger.append(Attempt(episode_id="t1", system="full", outcome=outcome, cost_usd=.01, latency_ms=10,
+                              error_code="timeout" if outcome == Outcome.RETRY else None))
     ledger.append(Attempt(episode_id="t1", system="baseline", outcome="success", cost_usd=.002,
                           latency_ms=5, stochastic=True))
     rows = ledger.read()
@@ -119,6 +120,36 @@ def test_ledger_keeps_failures_and_report_has_full_denominators(tmp_path):
     assert full["ci95"][0] < 1 / 6 < full["ci95"][1]
     assert result["baseline"]["counts"]["error"] == 0
     assert "not the same worlds" in result["baseline"]["trials"]
+
+
+def test_retry_needs_gateway_error_code():
+    with pytest.raises(ValidationError, match="error_code"):
+        Attempt(episode_id="t1", system="full", outcome="retry", cost_usd=0, latency_ms=0)
+    with pytest.raises(ValidationError):
+        Attempt(episode_id="t1", system="full", outcome="retry", cost_usd=0, latency_ms=0, error_code="flaky")
+    assert Attempt(episode_id="t1", system="full", outcome="retry", cost_usd=0, latency_ms=0,
+                   error_code="quota_exceeded").error_code == "quota_exceeded"
+
+
+def test_one_addition_only_before_final_run_and_pinned_by_it(tmp_path):
+    path = tmp_path / "lock.json"
+    pinned = lock(manifest(ep("d1"), ep("t1", "test", hash="e" * 64)), path)
+    add_fresh_capture(path, ep("fresh", "test", hash="c" * 64), pinned)
+    with pytest.raises(ValueError, match="at most one"):
+        add_fresh_capture(path, ep("fresh2", "test", hash="1" * 64), pinned)
+    run = FinalRun(path, pinned)
+    assert (tmp_path / "lock.json.opened").read_text() == run.full_sha256 == verify_lock(path, pinned).full_sha256
+    with pytest.raises(HoldoutError, match="already opened"):
+        add_fresh_capture(path, ep("fresh2", "test", hash="1" * 64), pinned)
+    # Swapping the addition by hand keeps the core hash but breaks the pinned full hash.
+    data = json.loads(path.read_text())
+    data["additions"][0]["episode"]["episode_id"] = "swapped"
+    path.write_text(json.dumps(data))
+    assert verify_lock(path, pinned).sha256 == pinned
+    with pytest.raises(ValueError, match="additions changed"):
+        run.verify()
+    with pytest.raises(ValueError, match="additions changed"):
+        FinalRun(path, pinned)
 
 
 def test_baseline_is_single_hydrogen_call():
