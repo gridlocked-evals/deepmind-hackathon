@@ -135,6 +135,22 @@ describe('driver trace export', () => {
     expect(trace.steps[0].applied.end_speed_mps).toBeLessThan(trace.steps[0].applied.start_speed_mps);
   });
 
+  it('attributes braking to the guard that changes acceleration when a later cap is redundant', () => {
+    const scenario = { ...streetScene(), id: demoScenario.id };
+    const ego = scenario.actors[0];
+    scenario.actors.push({ ...ego, id: 'leader', role: 'traffic' });
+    scenario.frames[0].actors.push({ id: 'leader', x: ego.length + 10.2, y: 0, heading: 0, speed: 0, braking: true });
+    const initial = { ...createDriverSimulation(scenario), time: 15, progress: 0, speed: 7, stopProgress: 1 };
+    const withoutRedLine = advanceDriver({ ...initial, stopProgress: null }, accelerate, 0.1);
+    const withBothGuards = advanceDriver(initial, accelerate, 0.1);
+    expect(driverObservation(initial).signal).toBe('red');
+    expect(driverObservation(initial).lead_gap_m).toBeCloseTo(10.2);
+    expect(withBothGuards.speed).toBe(withoutRedLine.speed);
+    expect(withBothGuards.progress).toBe(withoutRedLine.progress);
+    expect(withoutRedLine.guard).toBe('leader_guard');
+    expect(withBothGuards.guard).toBe('leader_guard');
+  });
+
   it('reports no intervention on an open road', () => {
     const { trace } = runFixture(createDriverSimulation(streetScene()), [accelerate], { interruptAt: { step: 2, ticks: 0 } });
     expect(trace.steps[0].guard).toEqual({ intervened: false, reason: 'none', events: [] });

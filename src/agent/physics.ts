@@ -124,12 +124,19 @@ export function advanceDriver(state: DriverSimulation, decision: DriverDecision,
   // Slow near sharp polyline turns; these are route steering, not model-generated steering commands.
   const turn = Math.abs(observation.upcoming_turn_degrees);
   if (turn > 25) desired = Math.min(desired, Math.max(2.5, 8 * (1 - Math.min(150, turn) / 180)));
-  const proposed = desired;
+  const accelerationFor = (target: number) => Math.max(-COMFORTABLE_BRAKING, Math.min(MAX_ACCELERATION, (target - state.speed) * 1.8));
   let guard: GuardReason = 'none';
+  const applyGuard = (cap: number, reason: GuardReason) => {
+    if (cap >= desired) return;
+    // A later target cap may be redundant after braking has saturated. Preserve
+    // the earlier guard unless this cap changes the applied acceleration.
+    if (accelerationFor(cap) < accelerationFor(desired) - 1e-9) guard = reason;
+    desired = cap;
+  };
   if (observation.lead_gap_m !== null) {
     const room = Math.max(0, observation.lead_gap_m - MIN_GAP);
     const cap = Math.min(room / 1.8, Math.sqrt((observation.lead_speed_mps ?? 0) ** 2 + 2 * COMFORTABLE_BRAKING * room));
-    if (cap < desired) { desired = cap; guard = 'leader_guard'; }
+    applyGuard(cap, 'leader_guard');
   }
   let signalStop = state.signalStop;
   if (observation.signal === 'green') signalStop = false;
@@ -137,13 +144,10 @@ export function advanceDriver(state: DriverSimulation, decision: DriverDecision,
     || (observation.signal === 'amber' && observation.stop_distance_m > state.speed ** 2 / (2 * COMFORTABLE_BRAKING) + 1))) signalStop = true;
   if (signalStop && observation.stop_distance_m !== null) {
     const cap = Math.min(Math.sqrt(2 * 2 * observation.stop_distance_m), observation.stop_distance_m * 1.5);
-    if (cap < desired) { desired = cap; guard = 'red_line_guard'; }
+    applyGuard(cap, 'red_line_guard');
   }
 
-  const accelerationFor = (target: number) => Math.max(-COMFORTABLE_BRAKING, Math.min(MAX_ACCELERATION, (target - state.speed) * 1.8));
   const acceleration = accelerationFor(desired);
-  // A capped target only counts as an intervention when it changes the applied acceleration.
-  if (acceleration >= accelerationFor(proposed) - 1e-9) guard = 'none';
   let speed = Math.max(0, Math.min(SPEED_LIMIT_MPS, state.speed + acceleration * delta));
   let progress = state.progress + (state.speed + speed) * 0.5 * delta;
   let boundary = state.path.length;
