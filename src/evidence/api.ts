@@ -18,7 +18,7 @@ export interface FrameEvidence { captureId: string; sourceId: string; prefixSha2
 export interface EvidenceFact {
   id: string; kind: string; semanticClass: string; label: string; confidence: number; provenance: string;
   disposition: 'accepted' | 'abstained' | 'boundary_uncertain' | 'duplicate'; visibility: string; state: string;
-  time: { startS: number; endS: number }; evidence: FrameEvidence[];
+  time: { startS: number; endS: number }; evidence: FrameEvidence[]; count?: { lower: number | null; upper: number | null };
 }
 export interface ModelError { code?: string; message?: string; request_id?: string | null }
 export interface ExtractionReport {
@@ -129,6 +129,7 @@ export interface EvidenceApi {
   seal(cameraId: string, history: CaptureHistory, start: number, end: number): Promise<SavedCapture>;
   snapshot(cameraId: string): Promise<SavedCapture>;
   extract(capture: SavedCapture, token: string): Promise<ExtractionReport>;
+  extraction(capture: SavedCapture, extractionId: string, token: string): Promise<ExtractionReport>;
   options(): Promise<EditOptions>;
   edit(capture: SavedCapture, batchId: string, mayorRequest: string, preset: string, frameTimeS: number, token: string): Promise<EditBundle>;
   reference(edit: EditBundle, style: string, feedback: string | null, token: string): Promise<ReferenceAttempt>;
@@ -145,6 +146,13 @@ export const evidenceApi: EvidenceApi = {
   },
   async snapshot(cameraId) { return parseCapture(await request(`/api/captures/snapshots/${encodeURIComponent(cameraId)}`, { method: 'POST' }, '', 45000), cameraId); },
   async extract(saved, token) { requireToken(token); return parseExtraction(await post('/api/observations/extract', { cameraId: saved.capture.cameraId, captureId: saved.capture.id }, token), saved); },
+  async extraction(saved, extractionId, token) {
+    requireToken(token);
+    if (!id(extractionId)) throw new EvidenceError('The cached extraction identity is invalid.');
+    const report = parseExtraction(await request(`/api/observations/extractions/${encodeURIComponent(extractionId)}`, {}, token), saved);
+    if (report.id !== extractionId) throw new EvidenceError('The retained extraction does not match the requested identity.');
+    return report;
+  },
   async options() { return await request('/api/edits/options') as EditOptions; },
   async edit(saved, batchId, mayorRequest, preset, frameTimeS, token) {
     requireToken(token); const value = await post('/api/edits', { observationBatchId: batchId, mayorRequest, preset, frameTimeS }, token) as EditBundle;
