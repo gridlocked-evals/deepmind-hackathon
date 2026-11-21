@@ -1,6 +1,6 @@
 # Camera API and playback
 
-The camera service supplies a fixed 511NY live-video catalog, a cached NYC DOT snapshot directory, and an HLS proxy. It does not capture footage, run inference, or derive the demo simulation from video. No model credentials are required.
+The camera service supplies a fixed 511NY live-video catalog, a cached NYC DOT snapshot directory, an HLS proxy, and a bounded capture recorder that turns buffered footage into immutable episodes (see [Capture episodes](#capture-episodes)). It does not run inference or derive the demo simulation from video. No model credentials are required.
 
 Run `npm run dev:api` after installing `backend/requirements.txt` into `.venv`. Vite proxies `/api` to `http://127.0.0.1:8000`. If `dist/` exists when the backend starts, FastAPI also serves that build. Source code: [backend](../backend/main.py), [HLS registry](../backend/feeds.py), [proxy](../backend/proxy.py), and [browser player](../src/media/LiveFeed.tsx).
 
@@ -102,6 +102,31 @@ Errors before streaming begins use FastAPI JSON, for example `{"detail":"Unknown
 If an unknown-length media stream exceeds the byte cap or fails after headers have been sent, the stream terminates; it cannot change to a JSON 502 response at that point. Upstream 4xx/5xx responses are mapped to 502 rather than forwarded. Errors do not return upstream response bodies or credentials.
 
 Development CORS permits `http://localhost:5173` and `http://127.0.0.1:5173`, GET, and the Range header. Same-origin production requests do not require CORS. Source attribution and access terms are recorded in [third-party notices](../THIRD_PARTY_NOTICES.md).
+
+## Capture episodes
+
+Source: [backend/capture.py](../backend/capture.py) and [backend/capture_api.py](../backend/capture_api.py). Episodes are the evidence input of the Element 119 pipeline; their model-visible part is described by the `Capture` contract in [CONTRACTS.md](CONTRACTS.md).
+
+| Route | Behavior |
+| --- | --- |
+| `POST /api/captures/{camera_id}/recording` | Starts (or keeps) a ring recorder for a registered HLS camera. History begins now; a fresh selection has none. Returns buffer status. |
+| `GET /api/captures/{camera_id}/buffer` | `availability` (`not_recording`, `starting`, `recording`, `stale`, `unavailable`), `bufferedSeconds`, earliest/latest receipt times, earliest source time, `sourceClock`, repeated-segment count, and `history.maxSecondsAgo`. |
+| `POST /api/captures` `{cameraId, secondsAgo, durationS, holdoutS?, sceneCameraId?}` | Writes an episode from whole buffered segments covering `[now − secondsAgo, now − secondsAgo + durationS]`. Returns `{manifest, capture}`. |
+| `POST /api/captures/snapshots/{dot_camera_id}` | Stores one DOT still as a snapshot episode (zero duration, `no_motion_evidence`). |
+| `GET /api/captures`, `GET /api/captures/{episode_id}` | Manifests. |
+| `POST /api/captures/{episode_id}/pins` `{jobId}`, `DELETE .../pins/{jobId}` | Keep media while a job references it. |
+
+**Bounds.** The ring keeps the newest 180 s (and at most 96 MiB) per camera; recorders stop after 10 minutes without a status or capture request. `durationS` (prefix plus held-out) is capped at 120 s. Segments are limited to 16 MiB, snapshots to 2 MiB. Only MPEG-TS HLS is recorded; fMP4 (`EXT-X-MAP`) and encrypted streams are rejected.
+
+**Truthful history.** A request outside the buffered window returns 409 with `availableSecondsAgo`; the UI helper [captureHistory.ts](../src/media/captureHistory.ts) only offers choices like “30 seconds ago” inside that window.
+
+**Clocks.** Every segment records `receivedAt` (server receipt) and `sourceTime` (from `EXT-X-PROGRAM-DATE-TIME`, when the stream provides it). Without a source clock the manifest says `sourceClock: unknown` and lists `exposureTime` as an unknown.
+
+**Audits and labels.** Sequence gaps and discontinuities, playlist coverage shorter than requested (by more than one segment), and ffprobe-decoded duration shorter than the playlist claims all return 422 instead of a silently truncated file. Labels: `source_clock_unknown`, `repeated_segments`, `repeated_stills` (identical bytes), `low_effective_cadence` (< 5 decoded fps), `stale_source`, `snapshot_only`, `no_motion_evidence`, `repeated_still`. Without ffprobe, frame count and size are `null` and listed as unknown.
+
+**Immutability and isolation.** Each episode directory holds `prefix/media.ts` (model input), an optional physically separate `holdout/media.ts`, and a read-only `manifest.json` with byte counts and SHA-256 per file and per segment. `model_input()` returns only the prefix, re-verifies its hash on every call (so inference retries see the same moment), and refuses an episode from a different camera than the requesting scene. `holdout()` requires the `evaluation` role. Capturing again always creates a new episode ID.
+
+**Storage.** Episodes live under `CAPTURE_DIR` (default `var/captures`, git-ignored) and survive restarts. When usage exceeds `CAPTURE_BUDGET_BYTES` (default 2 GiB), the oldest **unpinned** episodes are deleted; pinned episodes are never removed.
 
 ## Browser lifecycle
 

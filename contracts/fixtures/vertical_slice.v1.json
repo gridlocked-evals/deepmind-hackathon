@@ -1,0 +1,464 @@
+{
+  "schemaVersion": "element119.v1",
+  "capture": {
+    "id": "cap_fixture-0001",
+    "cameraId": "511ny-32998",
+    "sourceKind": "hls",
+    "mediaSha256": "sha256:f680158cc474586d73cca7086be998a9f7ded5ed43c9a7c1d2a65169a3582811",
+    "mediaType": "video/mp2t",
+    "durationS": 30.0,
+    "frameCount": 450,
+    "width": 352,
+    "height": 240,
+    "retrievalStartedAt": "2026-11-21T15:00:00Z",
+    "retrievalEndedAt": "2026-11-21T15:00:31Z",
+    "captureClock": "unknown",
+    "provenance": "observed",
+    "unknowns": [
+      {
+        "field": "exposureTime",
+        "reason": "511NY does not report source capture time; only retrieval time is known."
+      }
+    ]
+  },
+  "observationBatch": {
+    "schemaVersion": "element119.v1",
+    "id": "obs_fixture-0001",
+    "captureId": "cap_fixture-0001",
+    "modelCall": {
+      "id": "call_fixture-0001",
+      "service": "hydrogen",
+      "modelId": "gemini-4-hydrogen",
+      "promptId": "hydrogen.fixture.v1",
+      "configId": "cfg_fixture-v1",
+      "requestId": null,
+      "inputHashes": [
+        "sha256:f680158cc474586d73cca7086be998a9f7ded5ed43c9a7c1d2a65169a3582811"
+      ],
+      "requestedAt": "2026-11-21T15:01:00Z",
+      "completedAt": "2026-11-21T15:01:04Z",
+      "latencyMs": 4000,
+      "inputTokens": null,
+      "outputTokens": null,
+      "costUsd": null,
+      "outcome": "ok"
+    },
+    "motionSupported": true,
+    "anchors": [
+      {
+        "id": "anc_fixture-curb",
+        "label": "east curb lane",
+        "semanticClass": "parking_lane",
+        "region": {
+          "kind": "polygon",
+          "points": [
+            [
+              0.55,
+              0.6
+            ],
+            [
+              0.95,
+              0.6
+            ],
+            [
+              0.98,
+              0.98
+            ],
+            [
+              0.6,
+              0.98
+            ]
+          ]
+        },
+        "provenance": "observed"
+      },
+      {
+        "id": "anc_fixture-xwalk",
+        "label": "south crosswalk",
+        "semanticClass": "crosswalk",
+        "region": {
+          "kind": "box",
+          "x": 0.1,
+          "y": 0.82,
+          "w": 0.8,
+          "h": 0.12
+        },
+        "provenance": "observed"
+      }
+    ],
+    "observations": [
+      {
+        "id": "ob_fixture-van",
+        "kind": "obstruction",
+        "semanticClass": "vehicle",
+        "label": "double-parked van",
+        "region": {
+          "kind": "box",
+          "x": 0.62,
+          "y": 0.55,
+          "w": 0.18,
+          "h": 0.2
+        },
+        "time": {
+          "startS": 2.0,
+          "endS": 28.5
+        },
+        "confidence": 0.8,
+        "provenance": "observed"
+      },
+      {
+        "id": "ob_fixture-flow",
+        "kind": "movement",
+        "semanticClass": "vehicle",
+        "label": "southbound through traffic",
+        "region": {
+          "kind": "box",
+          "x": 0.3,
+          "y": 0.3,
+          "w": 0.3,
+          "h": 0.6
+        },
+        "time": {
+          "startS": 0.0,
+          "endS": 30.0
+        },
+        "confidence": 0.6,
+        "provenance": "derived"
+      }
+    ],
+    "unknowns": [
+      {
+        "field": "signalState",
+        "reason": "No signal head is visible in frame."
+      }
+    ]
+  },
+  "streetEdit": {
+    "schemaVersion": "element119.v1",
+    "id": "edit_fixture-0001",
+    "observationBatchId": "obs_fixture-0001",
+    "mayorRequest": "Turn the curb lane into a protected bike lane with planters.",
+    "modelCall": {
+      "id": "call_fixture-0002",
+      "service": "carbon",
+      "modelId": "gemini-4-carbon",
+      "promptId": "carbon.fixture.v1",
+      "configId": "cfg_fixture-v1",
+      "requestId": null,
+      "inputHashes": [
+        "sha256:3bee311afac276342bc2b2918a98c0ceb028328d72669b35bf56c9b13ac28252"
+      ],
+      "requestedAt": "2026-11-21T15:01:05Z",
+      "completedAt": "2026-11-21T15:01:09Z",
+      "latencyMs": 3800,
+      "inputTokens": null,
+      "outputTokens": null,
+      "costUsd": null,
+      "outcome": "ok"
+    },
+    "status": "compiled",
+    "permissions": {
+      "allowed": [
+        "bike_lane",
+        "planter",
+        "parking_lane"
+      ],
+      "forbidden": [
+        "building_facade",
+        "pedestrian"
+      ]
+    },
+    "operations": [
+      {
+        "id": "op_fixture-bike",
+        "op": "modify",
+        "target": "parking_lane",
+        "region": {
+          "kind": "polygon",
+          "points": [
+            [
+              0.55,
+              0.6
+            ],
+            [
+              0.95,
+              0.6
+            ],
+            [
+              0.98,
+              0.98
+            ],
+            [
+              0.6,
+              0.98
+            ]
+          ]
+        },
+        "anchorIds": [
+          "anc_fixture-curb"
+        ],
+        "description": "Convert curb parking lane to a green protected bike lane.",
+        "provenance": "inserted"
+      },
+      {
+        "id": "op_fixture-plant",
+        "op": "add",
+        "target": "planter",
+        "region": {
+          "kind": "box",
+          "x": 0.52,
+          "y": 0.6,
+          "w": 0.04,
+          "h": 0.38
+        },
+        "anchorIds": [
+          "anc_fixture-curb"
+        ],
+        "description": "Add a planter buffer between traffic and the bike lane.",
+        "provenance": "inserted"
+      }
+    ],
+    "rejectionReason": null,
+    "unknowns": []
+  },
+  "referenceImage": {
+    "schemaVersion": "element119.v1",
+    "id": "ref_fixture-0001",
+    "captureId": "cap_fixture-0001",
+    "streetEditId": "edit_fixture-0001",
+    "style": "photoreal street level, overcast",
+    "attempt": 1,
+    "modelCall": {
+      "id": "call_fixture-0003",
+      "service": "nano_banana",
+      "modelId": "gemini-nano-banana-2.1",
+      "promptId": "nano_banana.fixture.v1",
+      "configId": "cfg_fixture-v1",
+      "requestId": null,
+      "inputHashes": [
+        "sha256:f680158cc474586d73cca7086be998a9f7ded5ed43c9a7c1d2a65169a3582811",
+        "sha256:d488e0e371464ba8913336c5186685ff4576ba6f1f8dbc1cea2710c40a377223"
+      ],
+      "requestedAt": "2026-11-21T15:01:10Z",
+      "completedAt": "2026-11-21T15:01:22Z",
+      "latencyMs": 12000,
+      "inputTokens": null,
+      "outputTokens": null,
+      "costUsd": null,
+      "outcome": "ok"
+    },
+    "imageSha256": "sha256:76830c39af56466ff035dafd9c9f6c9e4b8a2b7c09e9e86048272daf625dd087",
+    "width": 1280,
+    "height": 720,
+    "provenance": "generated"
+  },
+  "referenceGate": {
+    "schemaVersion": "element119.v1",
+    "id": "gate_fixture-ref",
+    "subject": {
+      "kind": "reference_image",
+      "id": "ref_fixture-0001",
+      "sessionTime": null
+    },
+    "modelCall": {
+      "id": "call_fixture-0004",
+      "service": "decisions",
+      "modelId": "gemini-decision-1",
+      "promptId": "decisions.fixture.v1",
+      "configId": "cfg_fixture-v1",
+      "requestId": null,
+      "inputHashes": [
+        "sha256:f680158cc474586d73cca7086be998a9f7ded5ed43c9a7c1d2a65169a3582811",
+        "sha256:76830c39af56466ff035dafd9c9f6c9e4b8a2b7c09e9e86048272daf625dd087"
+      ],
+      "requestedAt": "2026-11-21T15:01:23Z",
+      "completedAt": "2026-11-21T15:01:25Z",
+      "latencyMs": 2100,
+      "inputTokens": null,
+      "outputTokens": null,
+      "costUsd": null,
+      "outcome": "ok"
+    },
+    "checks": [
+      {
+        "question": "Is this recognizably the same corner as the capture?",
+        "answer": "pass",
+        "score": 0.78,
+        "rationale": "Building line and crosswalk position match."
+      },
+      {
+        "question": "Does the requested bike lane appear?",
+        "answer": "pass",
+        "score": null,
+        "rationale": "Green lane with planter buffer visible on the east curb."
+      },
+      {
+        "question": "Is this a clean 16:9 street-level view?",
+        "answer": "pass",
+        "score": null,
+        "rationale": "1280x720, no artifacts or text."
+      }
+    ],
+    "outcome": "accept",
+    "effect": "allow_world_creation"
+  },
+  "worldSession": {
+    "schemaVersion": "element119.v1",
+    "id": "world_fixture-0001",
+    "genieSessionId": null,
+    "referenceImageId": "ref_fixture-0001",
+    "gateDecisionId": "gate_fixture-ref",
+    "modelCall": {
+      "id": "call_fixture-0005",
+      "service": "genie",
+      "modelId": "genie-4",
+      "promptId": "genie.fixture.v1",
+      "configId": "cfg_fixture-v1",
+      "requestId": null,
+      "inputHashes": [
+        "sha256:76830c39af56466ff035dafd9c9f6c9e4b8a2b7c09e9e86048272daf625dd087"
+      ],
+      "requestedAt": "2026-11-21T15:01:26Z",
+      "completedAt": "2026-11-21T15:02:30Z",
+      "latencyMs": 64000,
+      "inputTokens": null,
+      "outputTokens": null,
+      "costUsd": 6.0,
+      "outcome": "ok"
+    },
+    "status": "terminated",
+    "startedAt": "2026-11-21T15:01:30Z",
+    "terminatedAt": "2026-11-21T15:02:30Z",
+    "terminationReason": "completed",
+    "budget": {
+      "maxSeconds": 90,
+      "maxUsd": 10,
+      "spentSeconds": 60,
+      "spentUsd": 6.0
+    },
+    "deterministicReplay": false
+  },
+  "navigationEvents": [
+    {
+      "schemaVersion": "element119.v1",
+      "id": "nav_fixture-0000",
+      "worldSessionId": "world_fixture-0001",
+      "sequence": 0,
+      "sessionTimeS": 1.0,
+      "driver": "human",
+      "action": "forward",
+      "durationS": 2.0,
+      "frameSha256": "sha256:59776a80df110e6bde5f314ca5ba01fd50099cf0993d37cba9f022242c5ccad3",
+      "modelCall": null,
+      "rationale": null
+    },
+    {
+      "schemaVersion": "element119.v1",
+      "id": "nav_fixture-0001",
+      "worldSessionId": "world_fixture-0001",
+      "sequence": 1,
+      "sessionTimeS": 3.5,
+      "driver": "hydrogen",
+      "action": "turn_left",
+      "durationS": 1.0,
+      "frameSha256": "sha256:2dbd53af3847232ff4defe2e6b91969db16d2a817c3897a1f9429272f544b1ec",
+      "modelCall": {
+        "id": "call_fixture-0006",
+        "service": "hydrogen",
+        "modelId": "gemini-4-hydrogen",
+        "promptId": "hydrogen.fixture.v1",
+        "configId": "cfg_fixture-v1",
+        "requestId": null,
+        "inputHashes": [
+          "sha256:2dbd53af3847232ff4defe2e6b91969db16d2a817c3897a1f9429272f544b1ec"
+        ],
+        "requestedAt": "2026-11-21T15:01:33Z",
+        "completedAt": "2026-11-21T15:01:34Z",
+        "latencyMs": 700,
+        "inputTokens": null,
+        "outputTokens": null,
+        "costUsd": null,
+        "outcome": "ok"
+      },
+      "rationale": "Bike lane ahead on the right; keep to the travel lane."
+    }
+  ],
+  "navigationGates": [
+    {
+      "schemaVersion": "element119.v1",
+      "id": "gate_fixture-nav1",
+      "subject": {
+        "kind": "navigation_window",
+        "id": "world_fixture-0001",
+        "sessionTime": [
+          0.0,
+          5.0
+        ]
+      },
+      "modelCall": {
+        "id": "call_fixture-0007",
+        "service": "decisions",
+        "modelId": "gemini-decision-1",
+        "promptId": "decisions.fixture.v1",
+        "configId": "cfg_fixture-v1",
+        "requestId": null,
+        "inputHashes": [
+          "sha256:59776a80df110e6bde5f314ca5ba01fd50099cf0993d37cba9f022242c5ccad3",
+          "sha256:2dbd53af3847232ff4defe2e6b91969db16d2a817c3897a1f9429272f544b1ec"
+        ],
+        "requestedAt": "2026-11-21T15:01:36Z",
+        "completedAt": "2026-11-21T15:01:37Z",
+        "latencyMs": 900,
+        "inputTokens": null,
+        "outputTokens": null,
+        "costUsd": null,
+        "outcome": "ok"
+      },
+      "checks": [
+        {
+          "question": "Did the ego vehicle enter the bike lane?",
+          "answer": "pass",
+          "score": null,
+          "rationale": "Vehicle stayed in the travel lane."
+        },
+        {
+          "question": "Was any pedestrian conflict visible?",
+          "answer": "unknown",
+          "score": null,
+          "rationale": "Crosswalk left the frame during the turn."
+        }
+      ],
+      "outcome": "unknown",
+      "effect": "flag_unknown"
+    }
+  ],
+  "evaluation": {
+    "schemaVersion": "element119.v1",
+    "id": "eval_fixture-0001",
+    "inputSetId": "fixture-set",
+    "inputSetSha256": "sha256:4e07b8233843176ad8972ffad8956d43d233a96f86b7aa15f0248f6749ce7554",
+    "condition": "element119-pipeline",
+    "isBaseline": false,
+    "captureIds": [
+      "cap_fixture-0001"
+    ],
+    "worldSessionIds": [
+      "world_fixture-0001"
+    ],
+    "attempts": 1,
+    "succeeded": 0,
+    "failed": 0,
+    "unknown": 1,
+    "metrics": [
+      {
+        "name": "edit_visible_rate",
+        "value": 1.0,
+        "unit": "fraction",
+        "n": 1,
+        "unknownCount": 0
+      }
+    ],
+    "provenance": "derived",
+    "notes": "Synthetic fixture for contract tests; not a measured result."
+  }
+}
