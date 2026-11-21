@@ -98,6 +98,22 @@ describe('scenario injection boundary', () => {
     expect(state.events!.applied).toHaveLength(1);
     expect(state.events!.log.filter(row => row.kind === 'applied')).toHaveLength(1);
   });
+  it.each(['constructor', '__proto__', 'toString'])('waits for an explicit request for manual event %s', id => {
+    const plan = preset();
+    plan.events[0] = { ...plan.events[0], id, trigger: { kind: 'manual' } };
+    let events = createEvents(parseScenario(plan), 'event');
+    events = advanceEvents(events, 0, 0, 200, true);
+    expect(events.applied).toHaveLength(0);
+    events = requestEvent(events, id, .5);
+    expect(events.log).toEqual([{ eventId: id, kind: 'requested', time: .5, frame: 5 }]);
+    expect(requestEvent(events, id, .5)).toBe(events);
+    events = advanceEvents(events, 1, 0, 200, false);
+    expect(events.applied).toHaveLength(0);
+    events = advanceEvents(events, 3, 0, 200, true);
+    expect(events.applied).toHaveLength(1);
+    expect(events.applied[0]).toMatchObject({ requestedAt: .5, appliedAt: 3 });
+    expect(advanceEvents(events, 6, 0, 200, true).applied).toHaveLength(1);
+  });
   it('supports frame triggers and deterministic resets with no stale event state', () => {
     const plan = preset(); plan.events[0].trigger = { kind: 'frame', frame: 7 };
     let state = createEvents(plan, 'event');
