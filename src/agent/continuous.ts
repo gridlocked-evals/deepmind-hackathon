@@ -52,6 +52,8 @@ export function runContinuousDriver(options: ContinuousDriverOptions): Promise<D
     let transport: AbortController | null = null;
     // Wall time spent inside barriers is excluded from command age and frame deltas.
     let pausedMs = 0, pausedAt: number | null = null, nextBarrier = initial.time;
+    // A driver response that arrives during a barrier is applied at resume, after the barrier's own state change.
+    let held: (() => void) | null = null;
     const atBarrier = (current: DriverSimulation) => !!barrier && nextBarrier <= barrier.until + 1e-9 && current.time >= nextBarrier - 1e-9;
     const wallNow = () => (pausedAt ?? clock.now()) - pausedMs;
     const pause = (work: Promise<void>) => {
@@ -62,6 +64,8 @@ export function runContinuousDriver(options: ContinuousDriverOptions): Promise<D
         pausedMs += clock.now() - pausedAt!; pausedAt = null;
         if (command) expiry = clock.timeout(stale, MAX_COMMAND_AGE_SECONDS * 1000 - (wallNow() - commandCapturedAt));
         if (pending) requestTimeout = clock.timeout(stale, MAX_COMMAND_AGE_SECONDS * 1000 - (wallNow() - lastRequestAt));
+        const apply = held; held = null;
+        try { apply?.(); } catch (failure) { finish(null, failure); }
       }, failure => finish(null, failure));
     };
 
@@ -96,18 +100,22 @@ export function runContinuousDriver(options: ContinuousDriverOptions): Promise<D
         return requestDecision(step, observation, controller.signal);
       }).then(response => {
         if (settled || !response) return;
-        const now = wallNow();
-        if (now - capturedAt >= MAX_COMMAND_AGE_SECONDS * 1000
-          || (command && now - commandCapturedAt >= MAX_COMMAND_AGE_SECONDS * 1000)) { stale(); return; }
-        command = response;
-        commandCapturedAt = capturedAt;
-        commandAppliedAt = now;
-        step++;
-        state = readState?.() ?? state;
-        onDecision(response, observation, state);
-        if (previousFrame === null) previousFrame = now;
-        clock.clearTimeout(expiry);
-        if (pausedAt === null) expiry = clock.timeout(stale, MAX_COMMAND_AGE_SECONDS * 1000 - (now - capturedAt));
+        const accept = () => {
+          if (settled) return;
+          const now = wallNow();
+          if (now - capturedAt >= MAX_COMMAND_AGE_SECONDS * 1000
+            || (command && now - commandCapturedAt >= MAX_COMMAND_AGE_SECONDS * 1000)) { stale(); return; }
+          command = response;
+          commandCapturedAt = capturedAt;
+          commandAppliedAt = now;
+          step++;
+          state = readState?.() ?? state;
+          onDecision(response, observation, state);
+          if (previousFrame === null) previousFrame = now;
+          clock.clearTimeout(expiry);
+          expiry = clock.timeout(stale, MAX_COMMAND_AGE_SECONDS * 1000 - (now - capturedAt));
+        };
+        if (pausedAt !== null) held = accept; else accept();
       }).catch(failure => finish(null, failure)).finally(() => {
         clock.clearTimeout(requestTimeout);
         requestTimeout = 0;
