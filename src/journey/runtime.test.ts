@@ -111,6 +111,25 @@ it('Stop during the opening cancels motion and prevents live API calls', async (
   expect(h.clock.frames.size).toBe(0);
 });
 
+it('cancellation at the completed opening handoff prevents the first paid request', async () => {
+  const fetch = carbon();
+  const h = harness({ scriptedOpening: true });
+  const retain = h.options.onTrace;
+  h.options.onTrace = trace => {
+    retain(trace);
+    if (trace.modelSource === 'scripted-demo') h.controller.abort();
+  };
+  await h.clock.advance(45_000);
+  expect((await h.done).name).toBe('AbortError');
+  expect(h.traces).toHaveLength(1);
+  expect(h.traces[0]).toMatchObject({ modelSource: 'scripted-demo', modelPolicy: { service: 'scripted', modelId: null },
+    terminal: { reason: 'scripted-complete' }, steps: [] });
+  expect(h.snapshot().opening?.complete).toBe(true);
+  expect(h.snapshot().attacks).toEqual([]);
+  expect(h.observations).toEqual([]); expect(fetch).not.toHaveBeenCalled();
+  expect(h.clock.frames.size).toBe(0);
+});
+
 it('restarts a stalled car from a different NYC start after 25 simulated seconds', async () => {
   const h = harness({ driver: async (run, step) => ({ run_id: run, step, model_id: 'gemini-decision-1', request_id: 'fixture-stop', max_steps: 60,
     decision: { action: 'stop', target_speed_mps: 0, confidence: 1, reason: 'Stopped fixture.' } }) });
