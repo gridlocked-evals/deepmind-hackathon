@@ -6,7 +6,6 @@ import secrets
 import time
 from urllib.parse import unquote, urljoin, urlsplit
 
-import anyio
 import httpx
 from fastapi import HTTPException, Request
 from fastapi.responses import Response, StreamingResponse
@@ -165,10 +164,19 @@ async def proxy_media(request: Request, camera_id: str, url: str) -> Response:
         finalized = True
         try:
             if response is not None:
-                # Starlette's disconnect listener cancels an AnyIO task group.
-                # Shield resource cleanup, but never hold a slot indefinitely.
-                with anyio.move_on_after(UPSTREAM_CLOSE_SECONDS, shield=True):
-                    await response.aclose()
+                # AnyIO shields do not stop Task.cancel(); close in a separate
+                # task and wait it out, but never hold a slot indefinitely.
+                close = asyncio.ensure_future(asyncio.wait_for(response.aclose(), UPSTREAM_CLOSE_SECONDS))
+                cancelled = None
+                while not close.done():
+                    try:
+                        await asyncio.wait([close])
+                    except asyncio.CancelledError as exc:
+                        cancelled = exc
+                if cancelled is not None:
+                    raise cancelled
+                if not isinstance(close.exception(), TimeoutError):
+                    close.result()
         finally:
             slots.release()
 

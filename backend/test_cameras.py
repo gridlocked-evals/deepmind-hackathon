@@ -143,6 +143,7 @@ class TrackedMediaStream(httpx.AsyncByteStream):
         self.started = asyncio.Event()
         self.close_calls = 0
         self.closed = False
+        self.close_started, self.close_gate = asyncio.Event(), None
 
     async def __aiter__(self):
         self.started.set()
@@ -154,6 +155,9 @@ class TrackedMediaStream(httpx.AsyncByteStream):
 
     async def aclose(self):
         self.close_calls += 1
+        self.close_started.set()
+        if self.close_gate:
+            await self.close_gate.wait()
         if self.stall_close:
             await asyncio.Event().wait()
         # Checkpoint makes cancellation during cleanup observable.
@@ -244,6 +248,31 @@ def test_media_task_cancellation_closes_upstream_and_releases_capacity(monkeypat
             task = asyncio.create_task(response(scope, receive, send))
             await stream.started.wait()
             task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            assert stream.closed and stream.close_calls == 1
+            assert slots._value == 8
+    asyncio.run(run())
+
+
+def test_media_task_cancellation_during_close_finishes_cleanup(monkeypatch):
+    async def run():
+        slots = asyncio.Semaphore(8)
+        monkeypatch.setattr(proxy, "_slots", slots)
+        stream = TrackedMediaStream()
+        stream.close_gate = asyncio.Event()
+        async with httpx.AsyncClient(transport=httpx.MockTransport(lambda _: httpx.Response(
+                200, stream=stream, headers={"Content-Type": "video/mp2t"}))) as client:
+            response, scope, receive = await media_response(client)
+
+            async def send(_message):
+                pass
+
+            task = asyncio.create_task(response(scope, receive, send))
+            await stream.close_started.wait()
+            task.cancel()
+            await asyncio.sleep(0)
+            stream.close_gate.set()
             with pytest.raises(asyncio.CancelledError):
                 await task
             assert stream.closed and stream.close_calls == 1
