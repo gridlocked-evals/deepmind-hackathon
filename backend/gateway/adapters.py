@@ -113,8 +113,9 @@ def validate_answers(raw: dict, questions: dict) -> dict:
                     or not math.isclose(sum(probabilities.values()), 1, abs_tol=.02)):
                 raise GatewayError(ErrorCode.INVALID_OUTPUT)
             if question["type"] == "choice":
-                if (answer.get("choice") not in probabilities
-                        or probabilities[answer["choice"]] < max(probabilities.values()) - .02):
+                choice = answer.get("choice")
+                if (not isinstance(choice, str) or choice not in probabilities
+                        or probabilities[choice] < max(probabilities.values()) - .02):
                     raise GatewayError(ErrorCode.INVALID_OUTPUT)
             else:
                 score = answer.get("score")

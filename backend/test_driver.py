@@ -357,6 +357,44 @@ def test_driver_calls_real_decisions_adapter_and_retains_ledger_provenance(tmp_p
     asyncio.run(scenario())
 
 
+@pytest.mark.parametrize("choice", [[], {}, None])
+def test_malformed_choice_finalizes_real_gateway_attempt_and_allows_next_call(tmp_path, choice):
+    requests = []
+
+    def handler(request):
+        requests.append(request)
+        answers = choice_output()
+        if len(requests) == 1:
+            answers["maneuver"]["choice"] = choice
+        return httpx.Response(200, json={"answers": answers, "usage": {
+            "total_input_tokens": 200, "total_output_tokens": 0, "total_tokens": 200}})
+
+    async def scenario():
+        config = GatewayConfig(data_dir=tmp_path / "ledger", rates_valid_through=date(2030, 1, 1),
+                               max_concurrency=1)
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+            gateway = ModelGateway(config, http, api_key="test-driver-key")
+            controller = DriverController(gateway)
+            body = DriverRequest.model_validate(request_body())
+            with pytest.raises(HTTPException) as failure:
+                await controller.decide(body)
+            assert failure.value.status_code == 502
+            assert failure.value.detail["code"] == "invalid_output"
+            record, = gateway.ledger.attempts()
+            assert failure.value.detail["request_id"] == record["request_id"]
+            assert record["outcome"] == "invalid_output" and record["finished_at"] is not None
+            assert record["dispatched"] == 1 and record["charged_tokens"] == 200
+            assert json.loads(record["usage"])["total_tokens"] == 200
+            assert gateway.slots._value == 1 and controller.in_flight == 0
+            with pytest.raises(HTTPException) as duplicate:
+                await controller.decide(body)
+            assert duplicate.value.detail == failure.value.detail and len(requests) == 1
+            result = await controller.decide(DriverRequest.model_validate(request_body(1)))
+            assert result.decision.action == "accelerate" and len(requests) == 2
+            assert all(row["outcome"] != "pending" for row in gateway.ledger.attempts())
+    asyncio.run(scenario())
+
+
 def test_driver_timeout_cancels_gateway_releases_slots_and_caches_failure(tmp_path, monkeypatch):
     monkeypatch.setattr("backend.driver.DRIVER_TIMEOUT_SECONDS", 0.02)
 
