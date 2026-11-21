@@ -13,6 +13,9 @@ import subprocess
 import pytest
 
 BENCH = pathlib.Path(__file__).parent / "worlds" / "cosmos3_h100" / "bench.py"
+POSIX_SHELL = pytest.mark.skipif(
+    os.name != "posix", reason="H100 shell wrappers require POSIX paths, executables, and process signals"
+)
 
 
 class Resp:
@@ -83,6 +86,7 @@ def test_unreadable_video_exits_nonzero_and_keeps_probe(monkeypatch, tmp_path, v
 
 
 @pytest.mark.parametrize("bench_rc,expected", [(1, 1), (0, 0)])
+@POSIX_SHELL
 def test_bench_running_wrapper_exit_code_reflects_bench(tmp_path, bench_rc, expected):
     root = tmp_path / "spike"
     (root / "logs").mkdir(parents=True)
@@ -97,6 +101,7 @@ def test_bench_running_wrapper_exit_code_reflects_bench(tmp_path, bench_rc, expe
     assert done.returncode == expected
 
 
+@POSIX_SHELL
 def test_serve_and_bench_fails_when_server_never_ready(tmp_path):
     here = tmp_path / "scripts"
     here.mkdir()
@@ -125,6 +130,7 @@ def test_serve_and_bench_fails_when_server_never_ready(tmp_path):
     assert "SERVER_NOT_READY" in log and "still loading" in log
 
 
+@POSIX_SHELL
 def test_serve_refuses_occupied_port_and_keeps_old_artifacts(tmp_path):
     root = tmp_path / "spike"
     (root / "logs").mkdir(parents=True)

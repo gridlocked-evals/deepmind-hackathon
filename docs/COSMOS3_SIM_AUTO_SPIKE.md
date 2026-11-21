@@ -103,3 +103,14 @@ backend/worlds/cosmos3_h100/bench_running.sh 1 30000 201 f201
 
 The server keeps running after the bench finishes; stop it with
 `kill $(cat $COSMOS3_ROOT/logs/serve_gpu1.pid)`.
+
+## Regression checks
+
+Run `python -m pytest backend/test_cosmos3_bench.py -q` on Linux to cover
+generation failures, unreadable or empty downloads, wrapper exit codes,
+readiness timeouts, and occupied-port protection without a GPU. The Python
+client tests also run on Windows. Four shell cases are explicitly skipped
+there: they require POSIX paths, executable permissions, and process signals;
+the Windows WSL launcher is not a substitute for running pytest inside Linux.
+
+These tests use local fixtures and do not repeat the H100 performance measurements.
