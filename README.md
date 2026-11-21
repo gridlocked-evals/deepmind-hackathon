@@ -25,9 +25,11 @@ Research and idea notes for the **Gemini 4 NYC Hackathon** (Cerebral Valley × G
 | [05-nyc-dot-cameras.md](05-nyc-dot-cameras.md) | NYC DOT traffic camera data (verified) and camera + agent ideas |
 | [06-nyc-traffic-twin-robotaxi.md](06-nyc-traffic-twin-robotaxi.md) | The robotaxi / traffic digital twin idea: iterations, stress tests, 5 directions |
 | [07-evals-benchmarks-research.md](07-evals-benchmarks-research.md) | Existing driving and multi-agent benchmarks, what to borrow, proposed scorecard |
+| [08-crash-test-nyc-mayor-mode.md](08-crash-test-nyc-mayor-mode.md) | ⭐ **Very strong idea:** Crash Test NYC, Mayor Mode (fun) + Robotaxi Test (useful) on Genie 4 |
 
 ## Where we landed
 
 - **What wins at these events:** a physical or visual domain, a score that visibly climbs on stage, and a "fix it" step that re-runs to prove the fix. Several pure-eval projects in SF didn't place, so evals need to be something judges can watch.
-- **Current lead:** **Gotham Gym**, a live driving benchmark built from NYC DOT intersection cameras. Scenarios are pulled from real camera moments in Midtown and replayed in a SUMO digital twin. Agent strategies (a robotaxi fleet dispatcher, or a traffic-signal swarm) compete on a safety / efficiency / coordination scorecard.
+- **⭐ Very strong idea (Nov 21):** **Crash Test NYC**. Pick a live NYC camera, redesign the street as the mayor (Mayor Mode), walk it in a Genie 4 world, then a robotaxi agent drives it while the Decisions API judges safety (Robotaxi Test). See [08-crash-test-nyc-mayor-mode.md](08-crash-test-nyc-mayor-mode.md).
+- **Earlier lead:** **Gotham Gym**, a live driving benchmark built from NYC DOT intersection cameras. Scenarios are pulled from real camera moments in Midtown and replayed in a SUMO digital twin. Agent strategies (a robotaxi fleet dispatcher, or a traffic-signal swarm) compete on a safety / efficiency / coordination scorecard.
 - **Runner-up:** **Signal Swarm**, where the agents are the traffic lights rather than the cars.
