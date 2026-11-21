@@ -8,6 +8,27 @@ Interactive NYC city map with the full public DOT camera directory across all fi
 
 Quick start after installing dependencies: run `npm run dev:api` and `npm run dev` in separate terminals. No model credentials are needed.
 
+## Hackathon provenance (Nov 21, 2026)
+
+The starting React/Vite shell, Vestry traffic scene, 3D vehicle rendering, and camera/HLS proxy have **mixed or uncertain build timing**, as reported by the maintainer. The exact boundary between work created before and during the event has not been verified; these foundations are not claimed as wholly event-built. The geographic map and camera playback architecture also adapt Pharos, as recorded in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+
+**Changes merged on the event day**
+
+The PRs below record integration on November 21. Merge dates establish when changes entered this repository, not when every part was originally written. This inventory is not a determination of demo eligibility.
+
+| Piece | Code | PRs |
+|---|---|---|
+| Model gateway, usage ledger, budgets, capability checks | `backend/gateway/` | #25, #39, #40 |
+| Genie session runtime, streaming, frame recording, explicit stop | `backend/worlds/` | #26, #40, #53 |
+| Bounded camera capture with immutable episode manifests | `backend/capture.py`, `backend/capture_api.py` | #35, #36, #49 |
+| Hydrogen street-evidence extraction | `backend/observation*.py` | #58 |
+| Carbon street edits, Nano Banana references, Decisions gate, gate → Genie binding | `backend/edits.py`, `backend/references.py`, `backend/gates.py` | #35, #52, #55 |
+| Evaluation core: temporal judge, locked eval set, breakpoints, Carbon repair, adversary scoring | `backend/evaluation/` | #27, #43, #44, #54 |
+| Citywide camera directory and street-route playback | `src/` | #34 |
+| Shared Element 119 contracts | `docs/CONTRACTS.md`, `contracts/` | #35 |
+
+**Third-party models and data:** Gemini 4, Decisions API, Nano Banana and Genie models (Google); NYC DOT and 511NY camera feeds; OpenStreetMap map and routing data. Attribution and adaptation details are in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+
 ---
 
 # DeepMind Hackathon: Gemini 4 NYC Hackathon Research
