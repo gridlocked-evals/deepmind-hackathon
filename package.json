@@ -8,7 +8,10 @@
     "dev:api": ".venv/bin/python -m uvicorn backend.main:app --host 127.0.0.1 --port 8000",
     "build": "tsc -b && vite build",
     "preview": "vite preview --host 127.0.0.1",
-    "test": "vitest run",
+    "test": "vitest run src",
+    "test:browser": "npm run build && npm run test:browser:types && playwright test",
+    "test:browser:types": "tsc -p tsconfig.browser.json",
+    "test:browser:report": "playwright show-report",
     "test:api": ".venv/bin/python -m pytest backend -q",
     "contracts:generate": ".venv/bin/python scripts/export_contracts.py",
     "contracts:check": ".venv/bin/python scripts/export_contracts.py --check",
@@ -24,6 +27,8 @@
     "three": "^0.182.0"
   },
   "devDependencies": {
+    "@playwright/test": "1.65.1",
+    "@types/node": "26.6.6",
     "@types/react": "^19.2.0",
     "@types/react-dom": "^19.2.0",
     "@types/three": "^0.182.0",

@@ -361,8 +361,14 @@ export function createSimulationLayer(scenario: ScenarioBundle, runtime: SceneRu
       _gl.bindFramebuffer(_gl.FRAMEBUFFER, framebuffer);
       renderer.setViewport(0, 0, map.getCanvas().width, map.getCanvas().height);
       renderer.render(scene, camera);
+      // Record the frame actually drawn, including the rendered ego transform in
+      // local metres. Keep these current when a drive pauses between decisions.
+      const canvas = map.getCanvas();
+      canvas.dataset.sceneScenarioId = scenario.id;
+      canvas.dataset.sceneFrameTime = String(frame.time);
+      canvas.dataset.sceneEgoX = egoGroup?.visible ? String(egoGroup.matrixWorld.elements[12]) : '';
+      canvas.dataset.sceneEgoY = egoGroup?.visible ? String(egoGroup.matrixWorld.elements[13]) : '';
       if (performance.now() - lastDiagnostic > 1000) {
-        const canvas = map.getCanvas();
         canvas.dataset.sceneDrawCalls = String(renderer.info.render.calls);
         canvas.dataset.sceneTriangles = String(renderer.info.render.triangles);
         canvas.dataset.sceneFramebuffer = framebuffer ? 'map-owned' : 'default';
