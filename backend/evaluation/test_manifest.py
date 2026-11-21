@@ -105,8 +105,8 @@ def test_ledger_keeps_failures_and_report_has_full_denominators(tmp_path):
     result = report(rows)
     full = result["full"]
     assert full["attempts"] == 8 and all(n == 1 for n in full["counts"].values())
-    assert full["eligible"] == 7 and full["success_rate"] == 1 / 7
-    assert full["ci95"][0] < 1 / 7 < full["ci95"][1]
+    assert full["eligible"] == 6 and full["success_rate"] == 1 / 6  # void and retry not scored
+    assert full["ci95"][0] < 1 / 6 < full["ci95"][1]
     assert result["baseline"]["counts"]["error"] == 0
     assert "not the same worlds" in result["baseline"]["trials"]
 

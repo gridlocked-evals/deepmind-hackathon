@@ -217,12 +217,13 @@ class ResultsLedger:
 
 
 def report(attempts: list[Attempt]) -> dict:
-    """Per system: count of every category, success rate over non-void attempts with Wilson 95% CI."""
+    """Per system: count of every category, success rate over non-void, non-retry attempts with Wilson 95% CI."""
     out = {}
     for system in sorted({a.system for a in attempts}):
         rows = [a for a in attempts if a.system == system]
         counts = Counter(a.outcome for a in rows)
-        eligible = len(rows) - counts[Outcome.VOID]  # void is reported, never counted as success or failure
+        # Void and retry are reported but not scored: a retry is followed by the attempt that counts.
+        eligible = len(rows) - counts[Outcome.VOID] - counts[Outcome.RETRY]
         successes = counts[Outcome.SUCCESS]
         stochastic = any(a.stochastic for a in rows)
         out[system] = {
