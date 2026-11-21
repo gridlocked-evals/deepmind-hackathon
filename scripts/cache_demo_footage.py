@@ -59,29 +59,42 @@ def latest_clip(status: dict, clip_s: float) -> tuple[float, float, str] | None:
 def cache_video(base: str, cameras: list[dict], args) -> tuple[dict, dict]:
     kept, dropped = {}, {}
     started = time.monotonic()
-    for camera in cameras:
-        call(base, f"/api/captures/{quote(camera['id'])}/recording", {})
-    print(f"Recording {len(cameras)} video cameras for {args.record_seconds:.0f} s…", flush=True)
     first_media: dict[str, tuple[float, float]] = {}  # camera -> (elapsed s, buffered s) when media first arrived
     statuses: dict[str, dict] = {}
-    while time.monotonic() - started < args.record_seconds:
-        time.sleep(2)
+    stopped_at: dict[str, float] = {}
+    attempted = []
+    stop_errors = {}
+    try:
         for camera in cameras:
-            status = call(base, f"/api/captures/{quote(camera['id'])}/buffer")
-            statuses[camera["id"]] = status
-            if status["bufferedSeconds"] > 0 and camera["id"] not in first_media:
-                first_media[camera["id"]] = (time.monotonic() - started, status["bufferedSeconds"])
-    elapsed = time.monotonic() - started
+            # A timed-out start may still have succeeded on the server.
+            attempted.append(camera["id"])
+            call(base, f"/api/captures/{quote(camera['id'])}/recording", {})
+        print(f"Recording {len(cameras)} video cameras for {args.record_seconds:.0f} s…", flush=True)
+        while time.monotonic() - started < args.record_seconds:
+            time.sleep(2)
+            for camera in cameras:
+                status = call(base, f"/api/captures/{quote(camera['id'])}/buffer")
+                if status["bufferedSeconds"] > 0 and camera["id"] not in first_media:
+                    first_media[camera["id"]] = (time.monotonic() - started, status["bufferedSeconds"])
+    finally:
+        # Stop every recorder before any slow decoding/sealing. The stop response
+        # holds the final boundaries and revision; a last poll can already be stale.
+        for cid in attempted:
+            try:
+                statuses[cid] = call(base, f"/api/captures/{quote(cid)}/stop", {})
+                stopped_at[cid] = time.monotonic() - started
+            except (RuntimeError, URLError, TimeoutError, ValueError) as exc:
+                stop_errors[cid] = f"stop failed: {exc}"
+                print(f"  warn: could not stop {cid}: {exc}", file=sys.stderr)
     for camera in cameras:
         cid, status = camera["id"], statuses.get(camera["id"], {})
-        try:
-            call(base, f"/api/captures/{quote(cid)}/stop", {})
-        except (RuntimeError, URLError) as exc:
-            print(f"  warn: could not stop {cid}: {exc}", file=sys.stderr)
+        if cid in stop_errors:
+            dropped[cid] = stop_errors[cid]
+            continue
         # Slow = media took too long to start, or arrived well below real time once it did.
         start_s, start_buffered = first_media.get(cid, (None, 0))
         # Measured after first arrival: the first playlist fetch returns a backlog that would inflate the rate.
-        rate = (status.get("bufferedSeconds", 0) - start_buffered) / max(1e-6, elapsed - start_s) if start_s is not None else 0
+        rate = (status.get("bufferedSeconds", 0) - start_buffered) / max(1e-6, stopped_at[cid] - start_s) if start_s is not None else 0
         reason = (status.get("lastError") or "no media received") if start_s is None \
             else f"first media after {start_s:.0f} s" if start_s > args.max_start_seconds \
             else f"media at {rate:.2f}x real time" if rate < args.min_realtime_ratio \
@@ -171,8 +184,9 @@ def main() -> int:
             capture_id = entry["saved"]["capture"]["id"]
             print(f"Hydrogen extraction for {cid} (paid)…", flush=True)
             try:
-                entry["extraction"] = call(base, "/api/observations/extract", {"cameraId": cid, "captureId": capture_id},
-                                           token=args.token, timeout=600)
+                report = call(base, "/api/observations/extract", {"cameraId": cid, "captureId": capture_id},
+                              token=args.token, timeout=600)
+                entry["extractionId"] = report["id"]
             except (RuntimeError, URLError, TimeoutError) as exc:
                 print(f"  extraction failed for {cid}: {exc}", file=sys.stderr)
     else:

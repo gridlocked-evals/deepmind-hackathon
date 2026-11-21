@@ -13,7 +13,7 @@ from urllib.parse import urlsplit
 import httpx
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from .capture_api import Recorders, make_store, router as capture_router
@@ -174,11 +174,27 @@ app.include_router(pipeline_router)
 
 @app.get("/api/demo-cache")
 async def demo_cache():
-    """Index written by scripts/cache_demo_footage.py; absent until that script runs."""
+    """Public capture index; extraction bodies retain their operator-authenticated route."""
     path = ROOT / "var" / "demo-cache.json"
     if not path.is_file():
         raise HTTPException(404, "No demo cache. Run scripts/cache_demo_footage.py.")
-    return FileResponse(path, media_type="application/json", headers={"Cache-Control": "no-store"})
+    try:
+        cached = json.loads(await asyncio.to_thread(path.read_text, "utf-8"))
+        cameras = {}
+        for camera_id, entry in cached["cameras"].items():
+            public = {key: entry[key] for key in ("kind", "saved", "firstMediaS", "realtimeRatio", "fetchS") if key in entry}
+            # Older cache files contain complete protected reports. Publish only
+            # their identifier, so loading them still uses /observations with auth.
+            report = entry.get("extraction")
+            extraction_id = entry.get("extractionId") or (report.get("id") if isinstance(report, dict) else None)
+            if isinstance(extraction_id, str):
+                public["extractionId"] = extraction_id
+            cameras[camera_id] = public
+        result = {"schemaVersion": cached["schemaVersion"], "createdAt": cached["createdAt"],
+                  "cameras": cameras, "dropped": cached["dropped"]}
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        raise HTTPException(503, "The demo cache is invalid; rebuild it before loading cached footage.") from None
+    return JSONResponse(result, headers={"Cache-Control": "no-store"})
 
 
 @app.get("/api/contracts/element119")
