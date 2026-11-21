@@ -209,6 +209,26 @@ describe('driver trace export', () => {
     expect(() => readDriverTrace(bare)).toThrow('malformed');
   });
 
+  it.each(['observation', 'proposed', 'guard', 'request_id'])('rejects a step missing %s', field => {
+    const { trace } = runFixture(createDriverSimulation(streetScene()), [accelerate], { interruptAt: { step: 0, ticks: 5 } });
+    const malformed = JSON.parse(JSON.stringify(trace));
+    delete malformed.steps[0][field];
+    expect(() => readDriverTrace(JSON.stringify(malformed))).toThrow('malformed');
+  });
+
+  it.each(['bounds', 'provenance', 'terminal', 'applied', 'signal', 'guard_reason', 'terminal_state'])('rejects malformed %s fields', field => {
+    const { trace } = runFixture(createDriverSimulation(streetScene()), [accelerate], { interruptAt: { step: 0, ticks: 5 } });
+    const malformed = JSON.parse(JSON.stringify(trace));
+    if (field === 'bounds') malformed.bounds = {};
+    if (field === 'provenance') malformed.provenance.route_length_m = '1000';
+    if (field === 'terminal') malformed.terminal = { state: 'error' };
+    if (field === 'applied') malformed.steps[0].applied.distance_m = null;
+    if (field === 'signal') malformed.steps[0].observation.signal = ['red'];
+    if (field === 'guard_reason') malformed.steps[0].guard.reason = ['none'];
+    if (field === 'terminal_state') malformed.terminal.state = ['stopped_by_user'];
+    expect(() => readDriverTrace(JSON.stringify(malformed))).toThrow('malformed');
+  });
+
   it('keeps only redacted or fixed error text in a trace', () => {
     let parseFailure: unknown;
     try { JSON.parse('<html>proxy error Authorization: Bearer secret123</html>'); } catch (failure) { parseFailure = failure; }

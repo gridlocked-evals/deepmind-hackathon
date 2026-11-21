@@ -111,18 +111,45 @@ export function finishTrace(trace: DriverTrace | null, terminal: TraceTerminal) 
 }
 
 const TERMINAL_STATES = new Set(['route_complete', 'decision_limit', 'stopped_by_user', 'interrupted', 'error']);
-const isObject = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null;
+const GUARDS = new Set(['leader_guard', 'red_line_guard']);
+const isObject = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value);
+const isFiniteNumber = (value: unknown): value is number => typeof value === 'number' && Number.isFinite(value);
+const numericFields = (value: Record<string, unknown>, fields: string[]) => fields.every(field => isFiniteNumber(value[field]));
+const stringFields = (value: Record<string, unknown>, fields: string[]) => fields.every(field => typeof value[field] === 'string');
+
+function validStep(value: unknown): boolean {
+  if (!isObject(value) || !Number.isInteger(value.step) || Number(value.step) < 0 || typeof value.request_id !== 'string') return false;
+  const { observation, proposed, applied, guard } = value;
+  return isObject(observation)
+    && stringFields(observation, ['scenario_id', 'route_label'])
+    && numericFields(observation, ['simulation_time', 'speed_mps', 'speed_limit_mps', 'remaining_m', 'upcoming_turn_degrees'])
+    && typeof observation.signal === 'string' && ['green', 'amber', 'red', 'unknown'].includes(observation.signal)
+    && ['stop_distance_m', 'lead_gap_m', 'lead_speed_mps'].every(field => observation[field] === null || isFiniteNumber(observation[field]))
+    && isObject(proposed) && typeof proposed.action === 'string' && ['accelerate', 'cruise', 'brake', 'stop'].includes(proposed.action)
+    && typeof proposed.reason === 'string' && numericFields(proposed, ['target_speed_mps', 'confidence'])
+    && isObject(applied) && numericFields(applied, ['start_time', 'end_time', 'start_speed_mps', 'end_speed_mps', 'distance_m'])
+    && isObject(guard) && typeof guard.intervened === 'boolean'
+    && typeof guard.reason === 'string' && (guard.reason === 'none' || GUARDS.has(guard.reason))
+    && Array.isArray(guard.events) && guard.events.every(event => isObject(event)
+      && typeof event.reason === 'string' && GUARDS.has(event.reason) && isFiniteNumber(event.simulation_time));
+}
 
 export function readDriverTrace(json: string): DriverTrace {
   const value = JSON.parse(json) as Partial<DriverTrace> | null;
   if (value?.schema !== DRIVER_TRACE_SCHEMA) throw new Error(`Unsupported driver trace schema: ${String(value?.schema)}`);
   if (value.provenance?.source !== 'synthetic_simulator_state') throw new Error('Driver trace is not synthetic simulator state.');
-  // Minimal structure, so downstream code can rely on the shape without a full schema validator.
-  const steps = value.steps as unknown;
-  if (typeof value.run_id !== 'string' || !isObject(value.bounds) || !Array.isArray(steps)
-    || !steps.every(step => isObject(step) && isObject(step.applied)
-      && typeof step.applied.start_time === 'number' && typeof step.applied.end_time === 'number')
-    || !(value.terminal === null || (isObject(value.terminal) && TERMINAL_STATES.has(String(value.terminal.state))))) {
+  // Validate every field exposed by DriverTrace before downstream readers use
+  // nested observations, decisions, motion, or guard events. This verifies shape,
+  // not the truth of the self-reported simulator provenance or measurements.
+  const { provenance, bounds, terminal } = value;
+  if (typeof value.run_id !== 'string' || !(value.model_id === null || typeof value.model_id === 'string')
+    || !isObject(provenance) || !stringFields(provenance, ['scenario_id', 'scenario_version', 'scenario_label'])
+    || !isFiniteNumber(provenance.route_length_m)
+    || !(provenance.motion_source === null || (typeof provenance.motion_source === 'string' && ['authored', 'street-preview', 'driving-route', 'location-preview'].includes(provenance.motion_source)))
+    || !isObject(bounds) || !numericFields(bounds, ['max_decisions', 'seconds_per_decision'])
+    || !Array.isArray(value.steps) || !value.steps.every(validStep)
+    || !(terminal === null || (isObject(terminal) && typeof terminal.state === 'string' && TERMINAL_STATES.has(terminal.state)
+      && (terminal.state !== 'error' || typeof terminal.error === 'string')))) {
     throw new Error('Driver trace is malformed.');
   }
   return value as DriverTrace;
