@@ -1,787 +1,850 @@
-"""Bounded, immutable camera evidence; capture clocks never imply exposure time."""
+"""Bounded camera recording and immutable capture episodes (issue #4).
+
+- ``HlsRecorder`` keeps a bounded in-memory ring of recent HLS media segments
+  for one registered 511NY camera. A camera that was never recorded has no
+  history: "30 seconds ago" is offered only inside the buffered window.
+- ``CaptureStore`` turns a buffered interval (or one DOT snapshot) into an
+  episode on disk: a model-input ``prefix`` file, an optional physically
+  separate ``holdout`` file, and a read-only ``manifest.json`` with exact
+  bytes, hashes, and both clocks (source-reported time, when the stream
+  carries one, and our server receipt time).
+- Episodes are immutable. Inference retries re-read the same bytes (and the
+  hashes are re-verified); capturing again always creates a new episode.
+- Pins keep media referenced by active jobs. Cleanup enforces a storage
+  budget on unpinned episodes only, and the index is rebuilt from disk on
+  restart.
+"""
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
+from collections import deque
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 import math
 import os
 from pathlib import Path
 import re
+import secrets
+import selectors
 import shutil
-import tempfile
+import subprocess
+import threading
 import time
 from typing import Awaitable, Callable
 from urllib.parse import urljoin
-from uuid import uuid4
 
-import httpx
-from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import Response
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from .contracts import MAX_EVIDENCE_SECONDS, Capture, Unknown
+from .feeds import HLS_SOURCES
 
-from .feeds import HLS_SOURCES, utc_now
-from .contracts import CaptureContext
-from .proxy import MAX_MEDIA, MAX_PLAYLIST, open_upstream, validate_url
+MANIFEST_VERSION = "capture-manifest.v1"
+MAX_SEGMENT_BYTES = 16 * 1024 * 1024
+MAX_SNAPSHOT_BYTES = 2 * 1024 * 1024
+DEFAULT_RING_SECONDS = 180.0
+DEFAULT_RING_BYTES = 96 * 1024 * 1024
+DEFAULT_BUDGET_BYTES = 2 * 1024 * 1024 * 1024
+RECORDER_IDLE_SECONDS = 600.0
 
-MAX_EPISODE_SECONDS = 120.0
-MAX_DECODER_ALLOCATION = 64 * 1024 * 1024
-MAX_IMAGE_PIXELS = 16 * 1024 * 1024
-MAX_IMAGE_DIMENSION = 8192
-MAX_MANIFEST_BYTES = 4 * 1024 * 1024
-_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{1,95}\Z")
-_SHA = re.compile(r"[a-f0-9]{64}\Z")
-_MEDIA_PATH = re.compile(r"(prefix|suffix)/[0-9]{4,6}\.(ts|image)\Z")
+Fetch = Callable[[str], Awaitable[tuple[bytes, str]]]
+Clock = Callable[[], datetime]
 
 
-def digest(data: bytes) -> str:
-    return hashlib.sha256(data).hexdigest()
+def utcnow() -> datetime:
+    return datetime.now(timezone.utc)
 
 
-def canonical(value: object) -> bytes:
-    return json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
+def sha256(data: bytes) -> str:
+    return "sha256:" + hashlib.sha256(data).hexdigest()
 
 
-def atomic_json(path: Path, value: object) -> None:
-    data = canonical(value)
-    temporary = path.with_suffix(".tmp")
-    with temporary.open("wb") as stream:
-        stream.write(data)
-        stream.flush()
-        os.fsync(stream.fileno())
-    temporary.replace(path)
+class CaptureError(Exception):
+    """A capture request that cannot be satisfied truthfully."""
+    status = 400
+
+    def __init__(self, message: str, **detail):
+        super().__init__(message)
+        self.detail = {"error": message, **detail}
 
 
-def fail(code: int, detail: str) -> HTTPException:
-    return HTTPException(code, detail)
+class HistoryUnavailable(CaptureError):
+    status = 409
 
 
-def read_json(path: Path, maximum: int = MAX_MANIFEST_BYTES) -> dict:
+class TruncatedCapture(CaptureError):
+    status = 422
+
+
+class SceneMismatch(CaptureError):
+    status = 409
+
+
+class AccessDenied(CaptureError):
+    status = 403
+
+
+class CaptureIntegrityError(CaptureError):
+    status = 409
+
+
+class CaptureNotFound(CaptureError):
+    status = 404
+
+
+class CaptureBusy(CaptureError):
+    status = 503
+
+
+# --------------------------------------------------------------- HLS parsing
+
+@dataclass(frozen=True)
+class PlaylistSegment:
+    sequence: int
+    duration: float
+    uri: str
+    program_time: datetime | None
+    discontinuity: bool
+
+
+@dataclass(frozen=True)
+class MediaPlaylist:
+    target_duration: float
+    media_sequence: int
+    segments: list[PlaylistSegment]
+    variant_uri: str | None = None
+    ended: bool = False
+
+
+def _parse_time(value: str) -> datetime | None:
     try:
-        with path.open("rb") as stream:
-            raw = stream.read(maximum + 1)
-        if len(raw) > maximum:
-            raise ValueError()
-        value = json.loads(raw)
-        if not isinstance(value, dict):
-            raise ValueError()
-        return value
-    except (OSError, ValueError, TypeError):
-        raise fail(409, "Stored capture metadata is missing, corrupted, or exceeds its size limit.") from None
+        parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else None
 
 
-def valid_dimensions(width: int, height: int) -> bool:
-    return 0 < width <= MAX_IMAGE_DIMENSION and 0 < height <= MAX_IMAGE_DIMENSION and width * height <= MAX_IMAGE_PIXELS
-
-
-async def run_decoder(command: list[str], *, output_limit: int, timeout: float) -> tuple[bytes, bytes, int]:
-    """Bound both pipes and the full process lifetime, including after pipe closure."""
-    try:
-        process = await asyncio.create_subprocess_exec(*command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-    except OSError:
-        raise fail(503, "Required media decoding tools could not be started.") from None
-
-    async def read_bounded(stream, limit):
-        data = bytearray()
-        while chunk := await stream.read(64 * 1024):
-            if len(data) + len(chunk) > limit:
-                raise fail(413, "Media decoder output exceeds its preparation budget.")
-            data.extend(chunk)
-        return bytes(data)
-
-    tasks = [asyncio.create_task(read_bounded(process.stdout, output_limit)),
-             asyncio.create_task(read_bounded(process.stderr, 256 * 1024)),
-             asyncio.create_task(process.wait())]
-    try:
-        output, errors, code = await asyncio.wait_for(asyncio.gather(*tasks), timeout)
-        return output, errors, code
-    except BaseException:
-        if process.returncode is None:
-            try:
-                process.kill()
-            except ProcessLookupError:
-                pass
-        for task in tasks:
-            task.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
-        await process.wait()
-        raise
-
-
-async def audit_video(data: bytes, expected_duration: float) -> dict:
-    """Decode/count every frame. Reject unavailable tooling and truncated captures."""
-    if not shutil.which("ffprobe"):
-        raise fail(503, "ffprobe is required to audit continuous capture.")
-    with tempfile.TemporaryDirectory(prefix="element119-audit-") as directory:
-        path = Path(directory) / "segment.ts"
-        path.write_bytes(data)
-        output, errors, code = await run_decoder([
-            "ffprobe", "-v", "error", "-max_alloc", str(MAX_DECODER_ALLOCATION), "-protocol_whitelist", "file,pipe",
-            "-select_streams", "v:0", "-count_frames",
-            "-show_entries", "stream=nb_read_frames,duration,width,height:format=duration",
-            "-of", "json", str(path)], output_limit=64 * 1024, timeout=20)
-        try:
-            value = json.loads(output)
-            stream = value["streams"][0]
-            measured = float(stream.get("duration") or value["format"]["duration"])
-            count = int(stream["nb_read_frames"])
-            width, height = int(stream["width"]), int(stream["height"])
-            if (code or errors.strip() or not 0 < count <= 100_000 or not valid_dimensions(width, height) or not math.isfinite(measured)
-                    or abs(measured - expected_duration) > max(0.25, expected_duration * 0.05)):
-                raise ValueError()
-        except (ValueError, KeyError, IndexError, TypeError):
-            raise fail(502, "Video duration/frame audit failed; incomplete media was not retained.") from None
-        return {"durationSeconds": measured, "frameCount": count,
-                "width": width, "height": height}
-
-
-async def audit_snapshot(data: bytes) -> None:
-    if not shutil.which("ffprobe"):
-        raise fail(503, "ffprobe is required to audit snapshot capture.")
-    with tempfile.TemporaryDirectory(prefix="element119-image-") as directory:
-        path = Path(directory) / "snapshot.image"
-        path.write_bytes(data)
-        output, errors, code = await run_decoder([
-            "ffprobe", "-v", "error", "-max_alloc", str(MAX_DECODER_ALLOCATION), "-protocol_whitelist", "file,pipe",
-            "-select_streams", "v:0", "-count_frames",
-            "-show_entries", "stream=nb_read_frames,width,height", "-of", "json", str(path),
-        ], output_limit=64 * 1024, timeout=10)
-        try:
-            stream = json.loads(output)["streams"][0]
-            if code or errors.strip() or int(stream["nb_read_frames"]) != 1 or not valid_dimensions(int(stream["width"]), int(stream["height"])):
-                raise ValueError()
-        except (ValueError, KeyError, IndexError, TypeError):
-            raise fail(502, "Snapshot decoding audit failed; incomplete image was not retained.") from None
-
-
-def parse_playlist(camera_id: str, url: str, text: str) -> dict:
-    if not text.lstrip("\ufeff \r\n").startswith("#EXTM3U"):
-        raise fail(502, "Capture source did not return an HLS playlist.")
-    sequence = 0
-    pending_duration = None
-    pending_variant = False
-    source_date = None
-    variants, segments = [], []
-    for raw in text.splitlines():
-        line = raw.strip()
-        if line.startswith("#EXT-X-MEDIA-SEQUENCE:"):
-            try:
-                sequence = int(line.split(":", 1)[1])
-                if sequence < 0:
-                    raise ValueError()
-            except ValueError:
-                raise fail(502, "Invalid HLS media sequence.") from None
-        elif line.startswith("#EXT-X-STREAM-INF:"):
-            pending_variant = True
-        elif line.startswith("#EXT-X-PROGRAM-DATE-TIME:"):
-            try:
-                parsed = datetime.fromisoformat(line.split(":", 1)[1].replace("Z", "+00:00"))
-                if parsed.tzinfo is None:
-                    raise ValueError()
-                source_date = parsed.astimezone(timezone.utc).isoformat()
-            except ValueError:
-                raise fail(502, "Invalid source program clock.") from None
-        elif line.startswith(("#EXT-X-MAP:", "#EXT-X-BYTERANGE:")) or line == "#EXT-X-DISCONTINUITY":
-            raise fail(422, "Capture currently supports continuous MPEG-TS HLS without maps, ranges, or discontinuities.")
-        elif line.startswith("#EXT-X-KEY:") and "METHOD=NONE" not in line:
-            raise fail(422, "Encrypted HLS capture is not supported.")
+def parse_playlist(text: str, base_url: str) -> MediaPlaylist:
+    """Parse a master (first variant only) or media playlist."""
+    lines = [line.strip() for line in text.lstrip("﻿").splitlines() if line.strip()]
+    if not lines or lines[0] != "#EXTM3U":
+        raise CaptureError("The camera did not return an HLS playlist.")
+    for i, line in enumerate(lines):
+        if line.startswith("#EXT-X-STREAM-INF") and i + 1 < len(lines):
+            return MediaPlaylist(0, 0, [], variant_uri=urljoin(base_url, lines[i + 1]))
+        if line.startswith("#EXT-X-MAP"):
+            raise CaptureError("Fragmented-MP4 HLS (EXT-X-MAP) is not supported by the recorder.")
+        if line.startswith("#EXT-X-KEY") and "METHOD=NONE" not in line:
+            raise CaptureError("Encrypted HLS media is not supported by the recorder.")
+        if line.startswith("#EXT-X-BYTERANGE"):
+            raise CaptureError("Byte-range HLS is not supported by the recorder.")
+    target, sequence, segments = 0.0, 0, []
+    duration: float | None = None
+    program_time: datetime | None = None
+    discontinuity = False
+    ended = False
+    for line in lines[1:]:
+        if line.startswith("#EXT-X-TARGETDURATION:"):
+            target = float(line.split(":", 1)[1])
+            if not math.isfinite(target) or not 0 < target <= MAX_EVIDENCE_SECONDS:
+                raise CaptureError("Invalid HLS target duration.")
+        elif line.startswith("#EXT-X-MEDIA-SEQUENCE:"):
+            sequence = int(line.split(":", 1)[1])
         elif line.startswith("#EXTINF:"):
-            try:
-                pending_duration = float(line.split(":", 1)[1].split(",", 1)[0])
-                if not math.isfinite(pending_duration) or not 0 < pending_duration <= MAX_EPISODE_SECONDS:
-                    raise ValueError()
-            except ValueError:
-                raise fail(502, "Invalid HLS segment duration.") from None
-        elif line and not line.startswith("#"):
-            target = validate_url(camera_id, urljoin(url, line))
-            if pending_variant:
-                variants.append(target)
-                pending_variant = False
-            elif pending_duration is not None:
-                segments.append({"sequence": sequence, "url": target, "durationSeconds": pending_duration,
-                                 "sourceCapturedAt": source_date})
-                sequence += 1
-                if source_date:
-                    from datetime import timedelta
-                    source_date = (datetime.fromisoformat(source_date) + timedelta(seconds=pending_duration)).isoformat()
-                pending_duration = None
-            else:
-                raise fail(502, "HLS segment is missing its duration.")
-    if pending_duration is not None or pending_variant or not (variants or segments):
-        raise fail(502, "Incomplete HLS playlist.")
-    return {"variants": variants, "segments": segments}
+            duration = float(line.split(":", 1)[1].split(",", 1)[0])
+            if not math.isfinite(duration) or not 0 < duration <= MAX_EVIDENCE_SECONDS:
+                raise CaptureError("Invalid HLS segment duration.")
+        elif line.startswith("#EXT-X-PROGRAM-DATE-TIME:"):
+            program_time = _parse_time(line.split(":", 1)[1])
+        elif line.startswith("#EXT-X-DISCONTINUITY") and not line.startswith("#EXT-X-DISCONTINUITY-SEQUENCE"):
+            discontinuity = True
+        elif line.startswith("#EXT-X-ENDLIST"):
+            ended = True
+        elif not line.startswith("#"):
+            if duration is None:
+                raise CaptureError("HLS segment without EXTINF duration.")
+            seq = sequence + len(segments)
+            segments.append(PlaylistSegment(seq, duration, urljoin(base_url, line), program_time, discontinuity))
+            # A program date applies to its segment; later ones advance by duration.
+            program_time = program_time + timedelta(seconds=duration) if program_time else None
+            duration, discontinuity = None, False
+    return MediaPlaylist(target, sequence, segments, ended=ended)
 
 
-class CaptureService:
-    def __init__(self, root: str | Path, client: httpx.AsyncClient, *,
-                 max_bytes: int = 1024 * 1024 * 1024, ring_seconds: float = 180,
-                 auditor: Callable[[bytes, float], Awaitable[dict]] = audit_video,
-                 snapshot_loader: Callable[[], Awaitable[list[dict]]] | None = None):
-        if max_bytes <= 0 or not math.isfinite(ring_seconds) or ring_seconds < 120:
-            raise ValueError("Invalid capture storage limits")
-        self.root = Path(root)
-        self.root.mkdir(parents=True, exist_ok=True)
-        for name in ("rings", "episodes"):
-            (self.root / name).mkdir(exist_ok=True)
-        self.client, self.max_bytes, self.ring_seconds = client, max_bytes, ring_seconds
-        self.auditor, self.snapshot_loader = auditor, snapshot_loader
-        self.tasks: dict[str, asyncio.Task] = {}
+# ------------------------------------------------------------------ recorder
+
+@dataclass
+class Segment:
+    sequence: int
+    duration: float
+    data: bytes
+    sha: str
+    received_at: datetime
+    program_time: datetime | None
+    discontinuity: bool
+    repeated: bool  # identical bytes to the previous segment
+
+
+@dataclass
+class RecorderHealth:
+    started_at: datetime
+    last_attempt: datetime | None = None
+    last_success: datetime | None = None
+    last_new_segment: datetime | None = None
+    consecutive_failures: int = 0
+    last_error: str | None = None
+    target_duration: float = 0.0
+
+
+class HlsRecorder:
+    """Bounded ring of recent segments for one registered camera."""
+
+    def __init__(self, camera_id: str, fetch: Fetch, clock: Clock = utcnow,
+                 max_seconds: float = DEFAULT_RING_SECONDS, max_bytes: int = DEFAULT_RING_BYTES):
+        if camera_id not in HLS_SOURCES:
+            raise CaptureError("Unknown camera source.", cameraId=camera_id)
+        self.camera_id = camera_id
+        self.fetch = fetch
+        self.clock = clock
+        self.max_seconds = max(max_seconds, MAX_EVIDENCE_SECONDS)
+        self.max_bytes = max_bytes
+        self.segments: deque[Segment] = deque()
+        self.bytes = 0
+        self.last_sequence: int | None = None
+        self.media_url: str | None = None
+        self.health = RecorderHealth(started_at=clock())
+        self.touched = time.monotonic()
         self.lock = asyncio.Lock()
-        pins_path = self.root / "pins.json"
-        self.pins: dict[str, list[str]] = {}
-        rebuild = not pins_path.exists()
-        if not rebuild:
-            try:
-                pins = read_json(pins_path)
-                if any(not _ID.fullmatch(key) or not isinstance(jobs, list)
-                       or any(not isinstance(job, str) or not _ID.fullmatch(job) for job in jobs)
-                       for key, jobs in pins.items()):
-                    raise ValueError()
-                self.pins = pins
-            except (HTTPException, ValueError, TypeError):
-                # Preserve the damaged ledger for audit; never interpret damage as
-                # authorization to evict previously sealed evidence.
-                pins_path.replace(self.root / f"pins.corrupt-{uuid4().hex}.json")
-                rebuild = True
-        if rebuild:
-            self.pins = {path.name: ["capture-retention"] for path in (self.root / "episodes").iterdir()
-                         if path.is_dir() and _ID.fullmatch(path.name)}
-        # Preparation jobs are local and do not survive process restart. Persisted
-        # episode/observation ownership remains untouched.
-        cleaned = {capture: [job for job in jobs if not job.startswith("prepare_")]
-                   for capture, jobs in self.pins.items()}
-        if rebuild or cleaned != self.pins:
-            self.pins = cleaned
-            atomic_json(pins_path, self.pins)
 
-    def _path(self, category: str, identifier: str) -> Path:
-        if not _ID.fullmatch(identifier):
-            raise fail(422, "Malformed capture or source ID.")
-        return self.root / category / identifier
+    async def poll_once(self) -> int:
+        """Fetch the playlist and any new segments. Returns segments added."""
+        self.health.last_attempt = self.clock()
+        try:
+            url = self.media_url or HLS_SOURCES[self.camera_id]["_upstream"]
+            data, final = await self.fetch(url)
+            playlist = parse_playlist(data.decode("utf-8-sig"), final)
+            if playlist.variant_uri:
+                self.media_url = playlist.variant_uri
+                data, final = await self.fetch(self.media_url)
+                playlist = parse_playlist(data.decode("utf-8-sig"), final)
+            self.health.target_duration = playlist.target_duration
+            if self.last_sequence is not None and playlist.segments and playlist.segments[-1].sequence < self.last_sequence:
+                raise CaptureError("Source sequence reset; start a fresh recording.")
+            added = 0
+            for item in playlist.segments:
+                if self.last_sequence is not None and item.sequence <= self.last_sequence:
+                    continue
+                gap = self.last_sequence is not None and item.sequence != self.last_sequence + 1
+                body, _ = await self.fetch(item.uri)
+                if not body or len(body) > MAX_SEGMENT_BYTES:
+                    raise CaptureError("Camera segment exceeded the byte limit.")
+                await self._append(item, body, discontinuity=item.discontinuity or gap)
+                added += 1
+            self.health.last_success = self.clock()
+            self.health.consecutive_failures = 0
+            self.health.last_error = None
+            if added:
+                self.health.last_new_segment = self.clock()
+            return added
+        except Exception as exc:  # recorded, never raised into the poll loop
+            self.health.consecutive_failures += 1
+            self.health.last_error = str(exc) if isinstance(exc, CaptureError) else "Camera retrieval failed."
+            return 0
 
-    def _load_ring(self, source_id: str) -> dict:
-        path = self._path("rings", source_id) / "index.json"
-        if path.exists():
-            value = read_json(path)
-            if (value.get("sourceId") != source_id or not isinstance(value.get("recordingId"), str)
-                    or not _ID.fullmatch(value["recordingId"]) or not isinstance(value.get("segments"), list)
-                    or value.get("state") not in {"unverified", "connected", "unavailable"}):
-                raise fail(409, "Stored recording metadata failed its identity audit.")
-            try:
-                previous = None
-                for item in value["segments"]:
-                    if (type(item["sequence"]) is not int or item["sequence"] < 0
-                            or not isinstance(item["sha256"], str) or not _SHA.fullmatch(item["sha256"])
-                            or type(item["byteLength"]) is not int or not 0 < item["byteLength"] <= MAX_MEDIA
-                            or type(item["frameCount"]) is not int or item["frameCount"] <= 0):
-                        raise ValueError()
-                    for key in ("startSeconds", "endSeconds", "durationSeconds", "auditedDurationSeconds"):
-                        if type(item[key]) not in (int, float) or not math.isfinite(item[key]):
-                            raise ValueError()
-                    if item["endSeconds"] <= item["startSeconds"] or item["auditedDurationSeconds"] <= 0:
-                        raise ValueError()
-                    if previous and (item["sequence"] != previous["sequence"] + 1
-                                     or not math.isclose(item["startSeconds"], previous["endSeconds"], abs_tol=1e-8, rel_tol=0)):
-                        raise ValueError()
-                    if datetime.fromisoformat(item["receivedAt"]).tzinfo is None:
-                        raise ValueError()
-                    previous = item
-            except (KeyError, TypeError, ValueError):
-                raise fail(409, "Stored recording segment metadata failed its continuity audit.") from None
-            return value
+    async def _append(self, item: PlaylistSegment, body: bytes, discontinuity: bool):
+        async with self.lock:
+            digest = sha256(body)
+            previous = self.segments[-1] if self.segments else None
+            self.segments.append(Segment(item.sequence, item.duration, body, digest, self.clock(),
+                                         item.program_time, discontinuity,
+                                         repeated=bool(previous and previous.sha == digest)))
+            self.bytes += len(body)
+            self.last_sequence = item.sequence
+            while self.segments and (self.buffered_seconds() > self.max_seconds or self.bytes > self.max_bytes):
+                self.bytes -= len(self.segments.popleft().data)
+
+    def buffered_seconds(self) -> float:
+        return sum(s.duration for s in self.segments)
+
+    def availability(self) -> str:
+        h = self.health
+        if h.consecutive_failures and (not h.last_success or h.consecutive_failures >= 3):
+            return "unavailable"
+        if not self.segments:
+            return "starting"
+        stale_after = max(3 * (h.target_duration or 2.0), 10.0)
+        if h.last_new_segment and (self.clock() - h.last_new_segment).total_seconds() > stale_after:
+            return "stale"
+        return "recording"
+
+    def status(self) -> dict:
+        self.touched = time.monotonic()
+        segs = list(self.segments)
+        repeated = sum(s.repeated for s in segs)
+        boundaries = [0.0]
+        for segment in segs:
+            boundaries.append(boundaries[-1] + segment.duration)
         return {
-            "sourceId": source_id, "recordingId": f"rec_{uuid4().hex}", "segments": [],
-            "state": "unverified", "checkedAt": None, "error": None,
+            "cameraId": self.camera_id,
+            "coordinates": HLS_SOURCES[self.camera_id]["coordinates"],
+            "availability": self.availability(),
+            "recordingSince": self.health.started_at.isoformat(),
+            "bufferedSeconds": round(self.buffered_seconds(), 3),
+            "segments": len(segs),
+            "earliestReceivedAt": segs[0].received_at.isoformat() if segs else None,
+            "latestReceivedAt": segs[-1].received_at.isoformat() if segs else None,
+            "earliestSourceTime": segs[0].program_time.isoformat() if segs and segs[0].program_time else None,
+            "sourceClock": "source_reported" if segs and all(s.program_time for s in segs) else "unknown",
+            "repeatedSegments": repeated,
+            "lastError": self.health.last_error,
+            # Offsets measure back from the end of the newest buffered segment.
+            "history": {"maxSecondsAgo": round(sum(s.duration for s in segs), 6), "maxDurationS": MAX_EVIDENCE_SECONDS,
+                        "segmentBoundariesS": boundaries, "bufferRevision": self._revision(segs)},
         }
 
-    def _save_ring(self, ring: dict) -> None:
-        directory = self._path("rings", ring["sourceId"])
-        directory.mkdir(exist_ok=True)
-        atomic_json(directory / "index.json", ring)
+    def _revision(self, segments: list[Segment]) -> str:
+        return sha256(json.dumps([self.camera_id, self.health.started_at.isoformat(),
+                                  [(s.sequence, s.sha) for s in segments]], separators=(",", ":")).encode())
 
-    def _usage(self) -> int:
-        return sum(path.stat().st_size for path in self.root.rglob("*") if path.is_file())
+    def select(self, seconds_ago: float, duration_s: float, buffer_revision: str | None = None) -> list[Segment]:
+        """Whole segments covering [now - seconds_ago, now - seconds_ago + duration]."""
+        if not math.isfinite(duration_s) or not math.isfinite(seconds_ago) or duration_s <= 0 or duration_s > MAX_EVIDENCE_SECONDS:
+            raise CaptureError(f"Duration must be within (0, {MAX_EVIDENCE_SECONDS:g}] seconds.")
+        if seconds_ago < duration_s:
+            raise CaptureError("The interval would end in the future; secondsAgo must be at least durationS.")
+        segs = list(self.segments)
+        if buffer_revision is not None and buffer_revision != self._revision(segs):
+            raise HistoryUnavailable("The recording buffer changed; refresh the selected boundaries.")
+        total = sum(s.duration for s in segs)
+        if seconds_ago > total + 1e-6:
+            raise HistoryUnavailable("Requested history is not buffered for this camera.",
+                                     availableSecondsAgo=round(total, 3), cameraId=self.camera_id)
+        start, end = total - seconds_ago, total - seconds_ago + duration_s
+        chosen, cursor = [], 0.0
+        for s in segs:
+            if cursor < end - 1e-6 and cursor + s.duration > start + 1e-6:
+                chosen.append(s)
+            cursor += s.duration
+        return chosen
 
-    def _reserve(self, size: int) -> None:
-        # Accepted captures are pinned. Only explicitly unpinned episodes may be removed.
-        if self._usage() + size <= self.max_bytes:
-            return
-        candidates = sorted((self.root / "episodes").iterdir(), key=lambda item: item.stat().st_mtime)
-        for directory in candidates:
-            if directory.is_dir() and not self.pins.get(directory.name):
-                shutil.rmtree(directory)
-                if self._usage() + size <= self.max_bytes:
-                    return
-        raise fail(507, "Capture storage budget is full; pinned evidence has been preserved.")
 
-    async def _fetch(self, source_id: str, url: str, limit: int) -> tuple[bytes, str]:
-        response = None
+# --------------------------------------------------------------- probing
+
+def _bounded_probe(command: list[str], timeout: float = 20.0) -> bytes:
+    """Bound both decoder output and its entire process lifetime."""
+    process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    selector = selectors.DefaultSelector()
+    output = {"stdout": bytearray(), "stderr": bytearray()}
+    deadline = time.monotonic() + timeout
+    try:
+        for name in output:
+            pipe = getattr(process, name)
+            os.set_blocking(pipe.fileno(), False)
+            selector.register(pipe, selectors.EVENT_READ, name)
+        while selector.get_map() or process.poll() is None:
+            if time.monotonic() >= deadline:
+                raise TruncatedCapture("Media decoding exceeded its time limit.")
+            for key, _ in selector.select(min(.1, max(0, deadline - time.monotonic()))):
+                chunk = os.read(key.fileobj.fileno(), 8192)
+                if not chunk:
+                    selector.unregister(key.fileobj)
+                    continue
+                output[key.data].extend(chunk)
+                if len(output[key.data]) > (65536 if key.data == "stdout" else 262144):
+                    raise TruncatedCapture("Media decoding exceeded its output limit.")
+        if process.returncode or output["stderr"]:
+            raise TruncatedCapture("Media could not be decoded completely.")
+        return bytes(output["stdout"])
+    finally:
+        if process.poll() is None:
+            process.kill()
+        process.wait()
+        selector.close()
+        process.stdout.close()
+        process.stderr.close()
+
+
+def probe_media(path: Path) -> dict:
+    """Mandatory actual decoded frame and duration audit, including snapshots."""
+    if not shutil.which("ffprobe"):
+        raise TruncatedCapture("ffprobe is required to audit capture media.")
+    try:
+        info = json.loads(_bounded_probe(
+            ["ffprobe", "-v", "error", "-max_alloc", "67108864", "-protocol_whitelist", "file,pipe",
+             "-f", "mpegts" if path.suffix == ".ts" else "png_pipe" if path.suffix == ".png" else "jpeg_pipe",
+             "-select_streams", "v:0", "-count_frames", "-show_entries",
+             "stream=width,height,nb_read_frames:format=duration", "-of", "json", str(path)]))
+        stream = (info.get("streams") or [{}])[0]
+        return {"frames": int(stream["nb_read_frames"]), "width": int(stream["width"]),
+                "height": int(stream["height"]), "duration": float(info.get("format", {}).get("duration", 0))}
+    except (subprocess.SubprocessError, OSError, KeyError, ValueError, IndexError, TypeError):
+        raise TruncatedCapture("Media could not be decoded completely.") from None
+
+
+# ------------------------------------------------------------------- store
+
+_EPISODE_ID = re.compile(r"^cap_[A-Za-z0-9-]{4,64}$")
+_JOB_ID = re.compile(r"^[A-Za-z0-9_.:-]{1,100}$")
+
+
+@dataclass
+class CaptureStore:
+    root: Path
+    budget_bytes: int = DEFAULT_BUDGET_BYTES
+    clock: Clock = utcnow
+    probe: Callable[[Path], dict | None] = probe_media
+    _last_snapshot: dict[str, str] = field(default_factory=dict)
+    # Guards pins and eviction: episodes are written in to_thread, so a pin can race the check-then-delete.
+    # Reentrant because _write_episode holds it across its fit check and enforce_budget. Disk only, no network.
+    _lock: threading.RLock = field(default_factory=threading.RLock, repr=False, compare=False)
+    _admission: threading.BoundedSemaphore = field(default_factory=lambda: threading.BoundedSemaphore(2), repr=False, compare=False)
+
+    def __post_init__(self):
+        self.root = Path(self.root)
+        self.root.mkdir(parents=True, exist_ok=True)
+        # Rebuild the index from disk; discard half-written episodes.
+        for tmp in self.root.glob(".tmp-*"):
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    # -- creation ---------------------------------------------------------
+
+    def create_hls_episode(self, recorder: HlsRecorder, seconds_ago: float, duration_s: float,
+                           holdout_s: float = 0.0, scene_camera_id: str | None = None,
+                           buffer_revision: str | None = None) -> dict:
+        if scene_camera_id and scene_camera_id != recorder.camera_id:
+            raise SceneMismatch("The selected scene belongs to a different camera.",
+                                sceneCameraId=scene_camera_id, cameraId=recorder.camera_id)
+        if holdout_s < 0 or holdout_s >= duration_s:
+            raise CaptureError("holdoutS must be at least 0 and shorter than durationS.")
+        if recorder.availability() == "unavailable":
+            raise HistoryUnavailable("The camera is unavailable.", cameraId=recorder.camera_id,
+                                     lastError=recorder.health.last_error)
+        segments = recorder.select(seconds_ago, duration_s, buffer_revision)
+        self._audit(segments, duration_s, recorder.health.target_duration)
+        split = len(segments)
+        if holdout_s > 0:
+            acc = 0.0
+            for i in range(len(segments) - 1, -1, -1):
+                acc += segments[i].duration
+                if acc >= holdout_s - 1e-6:
+                    split = i
+                    break
+            if split <= 0 or split == len(segments):
+                raise TruncatedCapture("The interval is too short to split into prefix and held-out files.")
+        prefix, holdout = segments[:split], segments[split:]
+        labels = self._labels(segments, recorder)
+        return self._write_episode(
+            camera_id=recorder.camera_id, source_kind="hls", media_type="video/mp2t", ext="ts",
+            prefix_bytes=b"".join(s.data for s in prefix),
+            holdout_bytes=b"".join(s.data for s in holdout) if holdout else None,
+            segments={"prefix": [self._seg(s) for s in prefix], "holdout": [self._seg(s) for s in holdout]},
+            prefix_duration=sum(s.duration for s in prefix), holdout_duration=sum(s.duration for s in holdout),
+            received=(prefix[0].received_at, segments[-1].received_at),
+            source_clock="source_reported" if all(s.program_time for s in segments) else "unknown",
+            request={"secondsAgo": seconds_ago, "durationS": duration_s, "holdoutS": holdout_s},
+            labels=labels)
+
+    def create_snapshot_episode(self, camera_id: str, image: bytes, content_type: str,
+                                received_at: datetime, source_url: str, coordinates: list[float] | None = None) -> dict:
+        if content_type not in {"image/jpeg", "image/png"}:
+            raise CaptureError("The snapshot was not a JPEG or PNG image.")
+        if not image or len(image) > MAX_SNAPSHOT_BYTES:
+            raise CaptureError("The snapshot was empty or exceeded the size limit.")
+        if (content_type == "image/jpeg" and not image.startswith(b"\xff\xd8\xff")) or (
+                content_type == "image/png" and not image.startswith(b"\x89PNG\r\n\x1a\n")):
+            raise TruncatedCapture("Snapshot bytes disagree with the declared image format.")
+        digest = sha256(image)
+        labels = ["snapshot_only", "no_motion_evidence", "source_clock_unknown"]
+        if self._last_snapshot.get(camera_id) == digest:
+            labels.append("repeated_still")
+        self._last_snapshot[camera_id] = digest
+        return self._write_episode(
+            camera_id=camera_id, source_kind="snapshot", media_type=content_type,
+            ext="jpg" if content_type == "image/jpeg" else "png",
+            prefix_bytes=image, holdout_bytes=None, segments={"prefix": [], "holdout": []},
+            prefix_duration=0.0, holdout_duration=0.0, received=(received_at, received_at),
+            source_clock="unknown", request={"snapshotUrl": source_url}, labels=labels, coordinates=coordinates)
+
+    def _audit(self, segments: list[Segment], requested: float, target: float):
+        if not segments:
+            raise TruncatedCapture("No buffered segments fall inside the requested interval.")
+        got = sum(s.duration for s in segments)
+        tolerance = max(target, max(s.duration for s in segments))
+        if got > MAX_EVIDENCE_SECONDS + 1e-6:
+            raise CaptureError("Selection exceeds the 120-second evidence cap.", selectedS=round(got, 3))
+        if got < requested - tolerance:
+            raise TruncatedCapture("Buffered media covers less than the requested duration.",
+                                   requestedS=requested, availableS=round(got, 3))
+        for a, b in zip(segments, segments[1:]):
+            if b.sequence != a.sequence + 1 or b.discontinuity:
+                raise TruncatedCapture("The interval contains a gap or discontinuity in the source stream.",
+                                       afterSequence=a.sequence, nextSequence=b.sequence)
+
+    @staticmethod
+    def _labels(segments: list[Segment], recorder: HlsRecorder) -> list[str]:
+        labels = []
+        if not all(s.program_time for s in segments):
+            labels.append("source_clock_unknown")
+        repeated = sum(s.repeated for s in segments)
+        if len(segments) > 1 and repeated >= len(segments) - 1:
+            labels.append("repeated_stills")
+        elif repeated:
+            labels.append("repeated_segments")
+        if recorder.availability() == "stale":
+            labels.append("stale_source")
+        return labels
+
+    @staticmethod
+    def _seg(s: Segment) -> dict:
+        return {"sequence": s.sequence, "durationS": s.duration, "bytes": len(s.data), "sha256": s.sha,
+                "receivedAt": s.received_at.isoformat(),
+                "sourceTime": s.program_time.isoformat() if s.program_time else None, "repeated": s.repeated}
+
+    def _write_episode(self, **kwargs) -> dict:
+        if not self._admission.acquire(blocking=False):
+            raise CaptureBusy("Capture decoding is busy; retry this retained interval later.")
         try:
-            response, resolved_url = await open_upstream(self.client, source_id, url, {"Accept-Encoding": "identity"})
-            if response.status_code != 200:
-                raise fail(502, "Partial camera media was rejected.")
-            if response.headers.get("content-encoding", "identity").lower() not in {"identity", ""}:
-                raise fail(502, "Unexpectedly encoded camera media was rejected.")
-            data = bytearray()
-            async for chunk in response.aiter_bytes():
-                data.extend(chunk)
-                if len(data) > limit:
-                    raise fail(502, "Camera media exceeded the capture byte limit.")
-            declared = response.headers.get("content-length")
-            if not data or (declared is not None and int(declared) != len(data)):
-                raise fail(502, "Incomplete camera media was rejected.")
-            return bytes(data), resolved_url
-        except (httpx.HTTPError, ValueError):
-            raise fail(502, "Camera capture could not fetch complete media.") from None
+            return self._persist_episode(**kwargs)
         finally:
-            if response is not None:
-                await response.aclose()
+            self._admission.release()
 
-    async def poll_once(self, source_id: str) -> dict:
-        source = HLS_SOURCES.get(source_id)
-        if not source:
-            raise fail(404, "Unknown continuous camera source.")
-        url = source["_upstream"]
-        for depth in range(3):
-            body, resolved_url = await self._fetch(source_id, url, MAX_PLAYLIST)
-            try:
-                playlist = parse_playlist(source_id, resolved_url, body.decode("utf-8-sig"))
-            except UnicodeDecodeError:
-                raise fail(502, "Unreadable HLS playlist.") from None
-            if playlist["segments"]:
-                break
-            url = playlist["variants"][0]
-        else:
-            raise fail(502, "HLS variant nesting exceeded the capture limit.")
-        async with self.lock:
-            prior = self._load_ring(source_id)["segments"]
-            if prior and playlist["segments"][-1]["sequence"] < prior[-1]["sequence"]:
-                raise fail(409, "Source sequence moved backwards. Restart recording to begin a new history.")
-        for item in playlist["segments"]:
-            async with self.lock:
-                ring = self._load_ring(source_id)
-                prior = ring["segments"][-1] if ring["segments"] else None
-                if prior and item["sequence"] <= prior["sequence"]:
-                    continue
-                if prior and item["sequence"] != prior["sequence"] + 1:
-                    raise fail(409, "Source history has a gap. Stop and restart recording before a new episode.")
-            media, _ = await self._fetch(source_id, item["url"], MAX_MEDIA)
-            received_at = utc_now()
-            audit = await self.auditor(media, item["durationSeconds"])
-            async with self.lock:
-                ring = self._load_ring(source_id)
-                prior = ring["segments"][-1] if ring["segments"] else None
-                if prior and item["sequence"] <= prior["sequence"]:
-                    continue
-                start = prior["endSeconds"] if prior else 0.0
-                entry = {key: value for key, value in item.items() if key != "url"}
-                entry.update({"sha256": digest(media), "byteLength": len(media), "receivedAt": received_at,
-                              "startSeconds": start, "endSeconds": start + item["durationSeconds"],
-                              "frameCount": audit["frameCount"], "auditedDurationSeconds": audit["durationSeconds"]})
-                directory = self._path("rings", source_id)
-                directory.mkdir(exist_ok=True)
-                # Evict ring bytes before admitting the next segment; episode bytes are independent copies.
-                while ring["segments"] and entry["endSeconds"] - ring["segments"][0]["startSeconds"] > self.ring_seconds:
-                    removed = ring["segments"].pop(0)
-                    if not any(x["sha256"] == removed["sha256"] for x in ring["segments"]):
-                        (directory / (removed["sha256"] + ".ts")).unlink(missing_ok=True)
-                # Persist evictions even if the subsequent storage reservation fails.
-                self._save_ring(ring)
-                self._reserve(len(media) + 4096)
-                (directory / (entry["sha256"] + ".ts")).write_bytes(media)
-                ring["segments"].append(entry)
-                ring.update(state="connected", checkedAt=utc_now(), error=None)
-                self._save_ring(ring)
-        return self.history(source_id)
-
-    def history(self, source_id: str) -> dict:
-        if source_id not in HLS_SOURCES:
-            raise fail(404, "Unknown continuous camera source.")
-        ring = self._load_ring(source_id)
-        segments = ring["segments"]
-        state = ring["state"]
-        if segments and state == "connected":
-            age = time.time() - datetime.fromisoformat(segments[-1]["receivedAt"]).timestamp()
-            if age > max(30, segments[-1]["durationSeconds"] * 3):
-                state = "stale"
-        return {"sourceId": source_id, "recordingId": ring["recordingId"], "modality": "video",
-                "state": state, "recording": source_id in self.tasks and not self.tasks[source_id].done(),
-                "earliestSeconds": segments[0]["startSeconds"] if segments else None,
-                "latestSeconds": segments[-1]["endSeconds"] if segments else None,
-                "segmentBoundaries": ([segments[0]["startSeconds"]] + [x["endSeconds"] for x in segments]) if segments else [],
-                "clock": "recording_relative", "sourceClock": "program_date_time" if segments and segments[0]["sourceCapturedAt"] else "unknown",
-                "clockUncertaintySeconds": None, "error": ring["error"],
-                "notice": "Only buffered segment boundaries are selectable. Program time is not verified exposure time."}
-
-    async def start(self, source_id: str) -> dict:
-        if source_id not in HLS_SOURCES:
-            raise fail(404, "Unknown continuous camera source.")
-        if source_id not in self.tasks or self.tasks[source_id].done():
-            async with self.lock:
-                try:
-                    ring = self._load_ring(source_id)
-                except HTTPException as error:
-                    if error.status_code != 409:
-                        raise
-                    # Only the disposable live ring is reset. Sealed episodes and
-                    # their original source bytes remain independent and pinned.
-                    shutil.rmtree(self._path("rings", source_id), ignore_errors=True)
-                    ring = self._load_ring(source_id)
-                # A new recording may begin after a missed sequence; sealed episodes
-                # have independent bytes and survive clearing the bounded ring.
-                if ring["state"] == "unavailable":
-                    shutil.rmtree(self._path("rings", source_id), ignore_errors=True)
-                    ring = self._load_ring(source_id)
-                self._save_ring(ring)
-            async def loop():
-                while True:
-                    try:
-                        await self.poll_once(source_id)
-                    except asyncio.CancelledError:
-                        raise
-                    except (HTTPException, TimeoutError, OSError):
-                        async with self.lock:
-                            try:
-                                ring = self._load_ring(source_id)
-                            except HTTPException:
-                                return
-                            ring.update(state="unavailable", checkedAt=utc_now(), error="Recording paused after an upstream or audit failure.")
-                            self._save_ring(ring)
-                        return
-                    await asyncio.sleep(2)
-            self.tasks[source_id] = asyncio.create_task(loop())
-        return self.history(source_id)
-
-    async def stop(self, source_id: str) -> dict:
-        task = self.tasks.pop(source_id, None)
-        if task:
-            task.cancel()
-            await asyncio.gather(task, return_exceptions=True)
-        return self.history(source_id)
-
-    async def close(self) -> None:
-        tasks = list(self.tasks.values())
-        for task in tasks:
-            task.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
-        self.tasks.clear()
-
-    def manifest(self, capture_id: str) -> dict:
-        path = self._path("episodes", capture_id) / "manifest.json"
-        if not path.is_file():
-            raise fail(404, "Capture was not found.")
-        manifest = read_json(path)
-        stored_hash = manifest.pop("manifestSha256", None)
+    def _persist_episode(self, *, camera_id, source_kind, media_type, ext, prefix_bytes, holdout_bytes, segments,
+                       prefix_duration, holdout_duration, received, source_clock, request, labels,
+                       coordinates=None) -> dict:
+        episode_id = f"cap_{self.clock().strftime('%Y%m%dT%H%M%S')}-{secrets.token_hex(4)}"
+        tmp = self.root / f".tmp-{episode_id}"
+        (tmp / "prefix").mkdir(parents=True)
+        prefix_path = tmp / "prefix" / f"media.{ext}"
+        prefix_path.write_bytes(prefix_bytes)
+        files = {"prefix": {"path": f"prefix/media.{ext}", "bytes": len(prefix_bytes), "sha256": sha256(prefix_bytes),
+                            "durationS": round(prefix_duration, 6)}}
+        if holdout_bytes is not None:
+            (tmp / "holdout").mkdir()
+            (tmp / "holdout" / f"media.{ext}").write_bytes(holdout_bytes)
+            files["holdout"] = {"path": f"holdout/media.{ext}", "bytes": len(holdout_bytes),
+                                "sha256": sha256(holdout_bytes), "durationS": round(holdout_duration, 6)}
+        audited = {}
         try:
-            valid_hash = isinstance(stored_hash, str) and _SHA.fullmatch(stored_hash) and digest(canonical(manifest)) == stored_hash
-        except (ValueError, TypeError):
-            valid_hash = False
-        if not valid_hash:
-            raise fail(409, "Capture manifest integrity check failed.")
-        manifest["manifestSha256"] = stored_hash
-        self._validate_manifest(manifest, capture_id)
+            deadline = time.monotonic() + 90
+            if sum(len(s) for s in segments.values()) > 1000:
+                raise TruncatedCapture("Capture contains too many segments for a bounded audit.")
+            for partition, raw in (("prefix", prefix_bytes), ("holdout", holdout_bytes)):
+                if raw is None:
+                    continue
+                if source_kind == "snapshot":
+                    audited[partition] = self._validate_probe(self.probe(prefix_path), snapshot=True)
+                    continue
+                offset, results = 0, []
+                for index, segment in enumerate(segments[partition]):
+                    if time.monotonic() >= deadline:
+                        raise TruncatedCapture("Capture decoding exceeded its overall time limit.")
+                    data = raw[offset:offset + segment["bytes"]]
+                    if len(data) != segment["bytes"] or sha256(data) != segment["sha256"]:
+                        raise CaptureIntegrityError("Segment bytes do not match their source hash.")
+                    audit_path = tmp / f"audit-{partition}-{index}.ts"
+                    audit_path.write_bytes(data)
+                    result = self._validate_probe(self.probe(audit_path))
+                    audit_path.unlink()
+                    tolerance = max(.25, segment["durationS"] * .05)
+                    if abs(result["duration"] - segment["durationS"]) > tolerance:
+                        raise TruncatedCapture("Decoded media duration disagrees with the playlist.")
+                    segment["auditedDurationS"] = result["duration"]
+                    segment["frameCount"] = result["frames"]
+                    results.append(result)
+                    offset += segment["bytes"]
+                if offset != len(raw) or not results:
+                    raise CaptureIntegrityError("Segment byte boundaries are incomplete.")
+                if len({(r["width"], r["height"]) for r in results}) != 1:
+                    raise TruncatedCapture("Video dimensions changed inside the capture.")
+                audited[partition] = {**results[0], "duration": sum(r["duration"] for r in results),
+                                      "frames": sum(r["frames"] for r in results)}
+            if sum(p["duration"] for p in audited.values()) > MAX_EVIDENCE_SECONDS + 1e-6:
+                raise TruncatedCapture("Decoded original media exceeds the 120-second evidence cap.")
+            if sum(p["frames"] for p in audited.values()) > 100000:
+                raise TruncatedCapture("Decoded original media exceeds the frame audit limit.")
+        except BaseException:
+            shutil.rmtree(tmp, ignore_errors=True)
+            raise
+        probe = audited["prefix"]
+        unknowns = []
+        if source_clock == "unknown":
+            unknowns.append({"field": "exposureTime", "reason": "The source does not report capture time; only server receipt time is known."})
+        frames = {"frameCount": probe["frames"], "width": probe["width"], "height": probe["height"]}
+        cadence = None
+        if probe and prefix_duration > 0:
+            cadence = round(probe["frames"] / prefix_duration, 3)
+            if cadence < 5:
+                labels = [*labels, "low_effective_cadence"]
+        manifest = {
+            "manifestVersion": MANIFEST_VERSION,
+            "id": episode_id,
+            "cameraId": camera_id,
+            "coordinates": coordinates or HLS_SOURCES.get(camera_id, {}).get("coordinates"),
+            "sourceKind": source_kind,
+            "mediaType": media_type,
+            "createdAt": self.clock().isoformat(),
+            "request": request,
+            "clocks": {
+                "sourceClock": source_clock,
+                "retrievalStartedAt": received[0].isoformat(),
+                "retrievalEndedAt": received[1].isoformat(),
+                "meaning": "retrieval* = server receipt time; segments[].sourceTime = stream-reported time when present",
+            },
+            "files": files,
+            "segments": segments,
+            "totalDurationS": round(prefix_duration + holdout_duration, 6),
+            "auditedTotalDurationS": sum(p["duration"] for p in audited.values()),
+            "auditedPrefixDurationS": probe["duration"],
+            "integrityVersion": 1,
+            "effectiveFps": cadence,
+            **frames,
+            "labels": labels,
+            "unknowns": unknowns,
+        }
+        manifest["manifestSha256"] = self._manifest_hash(manifest)
+        (tmp / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True))
+        (tmp / "pins.json").write_text("[]")
+        for path in tmp.rglob("*"):
+            if path.is_file():
+                path.chmod(0o444)
+        with self._lock:
+            os.replace(tmp, self.root / episode_id)  # publish under the lock: a pin can't land before the fit check
+            # Check fit before evicting: evicting and then rejecting this episode anyway would lose data for nothing.
+            evictable = sum(self._size(p) for p in self.root.iterdir()
+                            if _EPISODE_ID.match(p.name) and p.name != episode_id and not self.pins(p.name))
+            if self.usage_bytes() - evictable > self.budget_bytes:
+                self._remove(self.root / episode_id)
+                raise CaptureError("Capture budget is exhausted by pinned episodes.", budgetBytes=self.budget_bytes)
+            self.enforce_budget(protect=episode_id)
         return manifest
 
     @staticmethod
-    def _context(manifest: dict) -> CaptureContext:
-        fields = {name: manifest[name] for name in CaptureContext.model_fields}
-        for name in ("receivedAt", "sourceCapturedAt"):
-            if fields[name] is not None:
-                parsed = datetime.fromisoformat(fields[name].replace("Z", "+00:00"))
-                if parsed.tzinfo is None:
-                    raise ValueError("Capture timestamps must carry their UTC offset")
-                fields[name] = parsed.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
-        return CaptureContext.model_validate(fields)
-
-    @classmethod
-    def _validate_manifest(cls, manifest: dict, capture_id: str) -> None:
+    def _validate_probe(probe: dict | None, snapshot: bool = False) -> dict:
         try:
-            context = cls._context(manifest)
-            if context.captureId != capture_id or manifest["schemaVersion"] != "1.0":
-                raise ValueError()
-            items = manifest["media"]
-            if not isinstance(items, list) or not items:
-                raise ValueError()
-            paths, end, saw_suffix = set(), 0.0, False
-            for item in items:
-                path = item["path"]
-                match = _MEDIA_PATH.fullmatch(path) if isinstance(path, str) else None
-                if (not match or match[1] != item["partition"] or path in paths
-                        or not isinstance(item["sha256"], str) or not _SHA.fullmatch(item["sha256"])
-                        or type(item["byteLength"]) is not int or not 0 < item["byteLength"] <= MAX_MEDIA
-                        or type(item["frameCount"]) is not int or item["frameCount"] <= 0):
-                    raise ValueError()
-                paths.add(path)
-                start, stop = item["startSeconds"], item["endSeconds"]
-                if any(type(value) not in (int, float) or not math.isfinite(value) for value in (start, stop)):
-                    raise ValueError()
-                if not math.isclose(start, end, abs_tol=1e-8, rel_tol=0) or stop < start:
-                    raise ValueError()
-                if context.modality == "snapshot":
-                    if len(items) != 1 or start != 0 or stop != 0 or item["frameCount"] != 1 or item["partition"] != "prefix":
-                        raise ValueError()
-                elif stop <= start:
-                    raise ValueError()
-                if item["partition"] == "suffix":
-                    saw_suffix = True
-                    if start < context.allowedInterval.endSeconds - 1e-8:
-                        raise ValueError()
-                elif saw_suffix or stop > context.allowedInterval.endSeconds + 1e-8:
-                    raise ValueError()
-                end = stop
-            prefix_end = max(item["endSeconds"] for item in items if item["partition"] == "prefix")
-            if (context.allowedInterval.startSeconds != 0 or not math.isclose(end, context.durationSeconds, abs_tol=1e-8, rel_tol=0)
-                    or not math.isclose(prefix_end, context.allowedInterval.endSeconds, abs_tol=1e-8, rel_tol=0)):
-                raise ValueError()
-        except (ValueError, ValidationError, TypeError, KeyError, AttributeError):
-            raise fail(409, "Capture manifest fields, media paths, or source boundaries failed their integrity audit.") from None
+            valid = (probe and all(type(probe[key]) is int for key in ("frames", "width", "height"))
+                     and 0 < probe["frames"] <= 100000 and 0 < probe["width"] <= 8192
+                     and 0 < probe["height"] <= 8192 and probe["width"] * probe["height"] <= 16_000_000
+                     and math.isfinite(probe["duration"]))
+            if not valid or (snapshot and (probe["frames"] != 1 or probe["duration"] != 0)) or (
+                    not snapshot and probe["duration"] <= 0):
+                raise ValueError("invalid decoded metadata")
+            return probe
+        except (KeyError, TypeError, ValueError):
+            raise TruncatedCapture("Media failed the required decoded frame/duration audit.") from None
 
-    def capture_context(self, capture_id: str) -> CaptureContext:
-        """Only the allowed source interval crosses into model jobs; no suffix facts."""
-        manifest = self.manifest(capture_id)
-        return self._context(manifest)
+    @staticmethod
+    def _manifest_hash(manifest: dict) -> str:
+        return sha256(json.dumps({k: v for k, v in manifest.items() if k != "manifestSha256"},
+                                 sort_keys=True, separators=(",", ":"), allow_nan=False).encode())
 
-    def pin(self, capture_id: str, job_id: str) -> None:
-        self.manifest(capture_id)
-        if not _ID.fullmatch(job_id):
-            raise fail(422, "Malformed job ID.")
-        self.pins[capture_id] = sorted(set(self.pins.get(capture_id, [])) | {job_id})
-        atomic_json(self.root / "pins.json", self.pins)
+    # -- access -----------------------------------------------------------
 
-    def unpin(self, capture_id: str, job_id: str) -> None:
-        self.pins[capture_id] = [x for x in self.pins.get(capture_id, []) if x != job_id]
-        atomic_json(self.root / "pins.json", self.pins)
+    def _dir(self, episode_id: str) -> Path:
+        if not _EPISODE_ID.match(episode_id or "") or not (self.root / episode_id / "manifest.json").is_file():
+            raise CaptureNotFound("Unknown capture episode.", episodeId=episode_id)
+        directory = self.root / episode_id
+        if directory.is_symlink() or (directory / "manifest.json").is_symlink():
+            raise CaptureIntegrityError("Capture paths must be regular retained files.")
+        return directory
 
-    def _persist_episode(self, manifest: dict, blobs: list[tuple[str, bytes]]) -> dict:
-        # Hash exact source bytes in capture order. Per-file lengths/hashes below
-        # retain boundaries; the separate manifest hash binds those to provenance.
-        original_hash = hashlib.sha256()
-        for _, data in blobs:
-            original_hash.update(data)
-        manifest["originalMediaSha256"] = original_hash.hexdigest()
-        manifest["manifestSha256"] = digest(canonical(manifest))
-        self._validate_manifest(manifest, manifest["captureId"])
-        if len(blobs) != len(manifest["media"]) or any(
-                path != item["path"] or len(data) != item["byteLength"] or digest(data) != item["sha256"]
-                for (path, data), item in zip(blobs, manifest["media"])):
-            raise fail(409, "Source file order, lengths, or hashes disagree with the capture manifest.")
-        self._reserve(sum(len(data) for _, data in blobs) + len(canonical(manifest)) + 4096)
-        directory = self._path("episodes", manifest["captureId"])
-        directory.mkdir()
+    def get(self, episode_id: str, verify: bool = False) -> dict:
+        directory = self._dir(episode_id)
         try:
-            for relative, data in blobs:
-                target = directory / relative
-                target.parent.mkdir(exist_ok=True)
-                target.write_bytes(data)
-            atomic_json(directory / "manifest.json", manifest)
-            self.pin(manifest["captureId"], "capture-retention")
-        except BaseException:
-            shutil.rmtree(directory)
-            raise
+            path = directory / "manifest.json"
+            if path.stat().st_size > 4 * 1024 * 1024:
+                raise ValueError("large manifest")
+            manifest = json.loads(path.read_text())
+            if manifest["id"] != episode_id or manifest["manifestVersion"] != MANIFEST_VERSION:
+                raise ValueError("identity")
+            if manifest.get("integrityVersion") is not None and (
+                    manifest["integrityVersion"] != 1 or manifest.get("manifestSha256") != self._manifest_hash(manifest)):
+                raise ValueError("manifest hash")
+            files = manifest["files"]
+            if not isinstance(files, dict) or "prefix" not in files or set(files) - {"prefix", "holdout"}:
+                raise ValueError("partitions")
+            for partition, info in files.items():
+                expected = f"{partition}/media."
+                if info["path"] not in {expected + ext for ext in ("ts", "jpg", "png")}:
+                    raise ValueError("path")
+                if not isinstance(info["bytes"], int) or not 0 < info["bytes"] <= DEFAULT_RING_BYTES:
+                    raise ValueError("bytes")
+                if not re.fullmatch(r"sha256:[0-9a-f]{64}", info["sha256"]):
+                    raise ValueError("hash")
+                if not math.isfinite(info["durationS"]) or not 0 <= info["durationS"] <= MAX_EVIDENCE_SECONDS:
+                    raise ValueError("duration")
+                segments = manifest["segments"][partition]
+                if manifest["sourceKind"] == "hls":
+                    if not segments or sum(s["bytes"] for s in segments) != info["bytes"]:
+                        raise ValueError("segments")
+                    if abs(sum(s["durationS"] for s in segments) - info["durationS"]) > 1e-5:
+                        raise ValueError("segment duration")
+                    if any(not isinstance(s["bytes"], int) or s["bytes"] <= 0 or
+                           not math.isfinite(s["durationS"]) or s["durationS"] <= 0 or
+                           not re.fullmatch(r"sha256:[0-9a-f]{64}", s["sha256"]) for s in segments):
+                        raise ValueError("segment metadata")
+            total = sum(info["durationS"] for info in files.values())
+            if total > MAX_EVIDENCE_SECONDS or not math.isfinite(manifest["totalDurationS"]) or abs(total - manifest["totalDurationS"]) > 1e-5:
+                raise ValueError("total duration")
+        except (OSError, ValueError, KeyError, TypeError, OverflowError):
+            raise CaptureIntegrityError("Capture manifest is missing, damaged, or inconsistent.") from None
+        if verify:
+            for name in manifest["files"]:
+                self._read_partition(manifest, name)
         return manifest
 
-    async def create_episode(self, source_id: str, start: float, end: float, *,
-                             split: float | None = None, scene_id: str | None = None,
-                             recording_id: str | None = None) -> dict:
-        if source_id not in HLS_SOURCES:
-            raise fail(404, "Unknown continuous camera source.")
-        if scene_id is not None and scene_id != source_id:
-            raise fail(422, "Source/scene mismatch: capture location is the selected source location.")
-        if not all(math.isfinite(x) for x in (start, end)) or not 0 < end - start <= MAX_EPISODE_SECONDS:
-            raise fail(422, "Episode source duration must be greater than zero and at most 120 seconds.")
-        if split is not None and (not math.isfinite(split) or not start < split < end):
-            raise fail(422, "Held-out split must be inside the episode.")
-        async with self.lock:
-            ring = self._load_ring(source_id)
-            if recording_id is not None and recording_id != ring["recordingId"]:
-                raise fail(409, "Recording identity changed; refresh available history.")
-            selected = [x for x in ring["segments"] if x["startSeconds"] >= start and x["endSeconds"] <= end]
-            if not selected or selected[0]["startSeconds"] != start or selected[-1]["endSeconds"] != end:
-                raise fail(409, "Requested interval is unavailable; choose existing segment boundaries.")
-            audited_duration = math.fsum(item["auditedDurationSeconds"] for item in selected)
-            if not math.isfinite(audited_duration) or audited_duration > MAX_EPISODE_SECONDS + 1e-9:
-                raise fail(422, "Decoded original media duration exceeds the 120-second episode limit.")
-            if split is not None and split not in [x["endSeconds"] for x in selected[:-1]]:
-                raise fail(422, "Held-out split must be an existing segment boundary; no hidden trimming is performed.")
-            items, blobs = [], []
-            for index, segment in enumerate(selected):
-                partition = "suffix" if split is not None and segment["startSeconds"] >= split else "prefix"
-                path = f"{partition}/{index:04d}.ts"
-                data = (self._path("rings", source_id) / (segment["sha256"] + ".ts")).read_bytes()
-                if digest(data) != segment["sha256"] or len(data) != segment["byteLength"]:
-                    raise fail(409, "Buffered source media failed its integrity check.")
-                items.append({**segment, "path": path, "partition": partition,
-                              "startSeconds": segment["startSeconds"] - start, "endSeconds": segment["endSeconds"] - start})
-                blobs.append((path, data))
-            source = HLS_SOURCES[source_id]
-            manifest = {"schemaVersion": "1.0", "captureId": f"cap_{uuid4().hex}", "sourceId": source_id,
-                        "sceneId": source_id, "recordingId": ring["recordingId"], "sourceUrl": source["sourceUrl"],
-                        "coordinates": source["coordinates"], "modality": "video", "provenance": "observed",
-                        "durationSeconds": end - start, "allowedInterval": {"startSeconds": 0, "endSeconds": (split or end) - start},
-                        "auditedDurationSeconds": audited_duration, "timelineBasis": "hls_declared_segment_duration",
-                        "auditedPrefixDurationSeconds": math.fsum(item["auditedDurationSeconds"] for item in items if item["partition"] == "prefix"),
-                        "receivedAt": selected[-1]["receivedAt"], "sourceCapturedAt": selected[0]["sourceCapturedAt"],
-                        "sourceClock": "program_date_time" if selected[0]["sourceCapturedAt"] else "unknown",
-                        "clockUncertaintySeconds": None, "createdAt": utc_now(), "media": items,
-                        "frameCount": sum(x["frameCount"] for x in items), "byteLength": sum(x["byteLength"] for x in items),
-                        "motionClaimsAllowed": True, "cadence": {"kind": "continuous_video", "uniqueFramesPerSecond": None}}
-            return self._persist_episode(manifest, blobs)
-
-    async def capture_snapshot(self, source_id: str, scene_id: str | None = None) -> dict:
-        if not _ID.fullmatch(source_id) or scene_id not in (None, source_id):
-            raise fail(422, "Malformed source ID or source/scene mismatch.")
-        if self.snapshot_loader is None:
-            raise fail(503, "Snapshot registry is unavailable.")
-        sources = await self.snapshot_loader()
-        source = next((row for row in sources if row["id"] == source_id and row["kind"] == "snapshot"), None)
-        if source is None:
-            raise fail(404, "Unknown snapshot source.")
-        # Use only the official camera-ID endpoint; no client or directory URL is fetched.
+    def _read_partition(self, manifest: dict, partition: str) -> bytes:
+        info = manifest["files"][partition]
+        path = self._dir(manifest["id"]) / info["path"]
         try:
-            async with self.client.stream("GET", f"https://webcams.nyctmc.org/api/cameras/{source_id}/image", follow_redirects=False) as response:
-                if response.status_code != 200 or response.headers.get("content-type", "").split(";")[0] not in {"image/jpeg", "image/png"}:
-                    raise fail(502, "Snapshot source returned no supported image.")
-                if response.headers.get("content-encoding", "identity").lower() not in {"identity", ""}:
-                    raise fail(502, "Unexpectedly encoded snapshot was rejected.")
-                data = bytearray()
-                async for chunk in response.aiter_bytes():
-                    data.extend(chunk)
-                    if len(data) > MAX_MEDIA:
-                        raise fail(502, "Snapshot exceeds the capture byte limit.")
-                declared = response.headers.get("content-length")
-                if declared is not None and int(declared) != len(data):
-                    raise fail(502, "Incomplete snapshot was rejected.")
-                mime = response.headers["content-type"].split(";")[0]
-        except (httpx.HTTPError, ValueError):
-            raise fail(502, "Snapshot capture could not fetch complete media.") from None
-        received = utc_now()
-        image_data = bytes(data)
-        if not ((mime == "image/jpeg" and image_data.startswith(b"\xff\xd8") and image_data.endswith(b"\xff\xd9")) or
-                (mime == "image/png" and image_data.startswith(b"\x89PNG\r\n\x1a\n") and image_data.endswith(b"IEND\xaeB`\x82"))):
-            raise fail(502, "Snapshot image framing audit failed.")
-        await audit_snapshot(image_data)
-        async with self.lock:
-            previous_path = self._path("rings", source_id) / "snapshot.json"
-            previous = json.loads(previous_path.read_text()) if previous_path.exists() else None
-            sha = digest(image_data)
-            repeated = previous is not None and previous["sha256"] == sha
-            manifest = {"schemaVersion": "1.0", "captureId": f"cap_{uuid4().hex}", "sourceId": source_id,
-                        "sceneId": source_id, "sourceUrl": source["sourceUrl"], "coordinates": source["coordinates"],
-                        "modality": "snapshot", "provenance": "observed", "durationSeconds": 0,
-                        "allowedInterval": {"startSeconds": 0, "endSeconds": 0}, "receivedAt": received,
-                        "sourceCapturedAt": None, "sourceClock": "unknown", "clockUncertaintySeconds": None,
-                        "createdAt": received, "motionClaimsAllowed": False, "frameCount": 1, "byteLength": len(image_data),
-                        "cadence": {"kind": "periodic_snapshot", "repeated": repeated, "uniqueFramesPerSecond": None,
-                                    "previousReceivedAt": previous["receivedAt"] if previous else None},
-                        "media": [{"path": "prefix/0000.image", "partition": "prefix", "sha256": sha,
-                                   "byteLength": len(image_data), "mimeType": mime, "startSeconds": 0, "endSeconds": 0,
-                                   "receivedAt": received, "frameCount": 1}]}
-            result = self._persist_episode(manifest, [("prefix/0000.image", image_data)])
-            previous_path.parent.mkdir(exist_ok=True)
-            atomic_json(previous_path, {"sha256": sha, "receivedAt": received})
-            return result
+            if path.is_symlink() or path.parent.is_symlink() or path.stat().st_size != info["bytes"]:
+                raise ValueError("file identity")
+            data = path.read_bytes()
+            if sha256(data) != info["sha256"]:
+                raise ValueError("file hash")
+            offset = 0
+            for segment in manifest["segments"][partition]:
+                end = offset + segment["bytes"]
+                if sha256(data[offset:end]) != segment["sha256"]:
+                    raise ValueError("segment hash")
+                offset = end
+            return data
+        except (OSError, ValueError):
+            raise CaptureIntegrityError("Episode media no longer matches its manifest hash.", file=partition) from None
 
-    def read_prefix(self, capture_id: str, media_index: int) -> tuple[bytes, str]:
-        manifest = self.manifest(capture_id)
-        if media_index < 0 or media_index >= len(manifest["media"]):
-            raise fail(404, "Capture media was not found.")
-        item = manifest["media"][media_index]
-        if item["partition"] != "prefix":
-            raise fail(403, "Held-out suffix media is not available through inference routes.")
-        path = self._path("episodes", capture_id) / item["path"]
-        try:
-            if path.is_symlink() or path.parent.is_symlink():
-                raise OSError()
-            with path.open("rb") as stream:
-                data = stream.read(MAX_MEDIA + 1)
-        except OSError:
-            raise fail(409, "Capture media is missing or no longer an immutable local artifact.") from None
-        if digest(data) != item["sha256"] or len(data) != item["byteLength"]:
-            raise fail(409, "Capture media integrity check failed.")
-        return data, item.get("mimeType", "video/mp2t")
+    def list(self) -> list[dict]:
+        return [self.get(p.name) for p in sorted(self.root.iterdir()) if _EPISODE_ID.match(p.name)]
 
-    def prefix_playlist(self, capture_id: str) -> str:
-        """Review the sealed original prefix through server-owned media routes."""
-        manifest = self.manifest(capture_id)
-        if manifest["modality"] != "video":
-            raise fail(422, "Snapshot captures have no video playlist.")
-        prefix = [(index, item) for index, item in enumerate(manifest["media"]) if item["partition"] == "prefix"]
-        durations = []
-        for index, item in prefix:
-            self.read_prefix(capture_id, index)  # Validate exact bytes before advertising this segment.
-            durations.append(item["endSeconds"] - item["startSeconds"])
-        lines = ["#EXTM3U", "#EXT-X-VERSION:3", f"#EXT-X-TARGETDURATION:{math.ceil(max(durations))}",
-                 "#EXT-X-MEDIA-SEQUENCE:0", "#EXT-X-PLAYLIST-TYPE:VOD"]
-        for (index, _), duration in zip(prefix, durations):
-            value = f"{duration:.9f}".rstrip("0").rstrip(".")
-            lines.extend([f"#EXTINF:{value},", f"/api/captures/episodes/{capture_id}/media/{index}"])
+    def model_input(self, episode_id: str, camera_id: str | None = None) -> tuple[Path, str]:
+        """Path and hash of the model-visible prefix. Never exposes the holdout.
+
+        Re-verifies bytes so an inference retry always sees the original moment.
+        """
+        manifest = self.get(episode_id)
+        if camera_id and manifest["cameraId"] != camera_id:
+            raise SceneMismatch("Episode belongs to a different camera.", episodeCameraId=manifest["cameraId"], cameraId=camera_id)
+        info = manifest["files"]["prefix"]
+        self._read_partition(manifest, "prefix")
+        return self._dir(episode_id) / info["path"], info["sha256"]
+
+    def prefix_bytes(self, episode_id: str) -> tuple[bytes, str]:
+        manifest = self.get(episode_id)
+        return self._read_partition(manifest, "prefix"), manifest["mediaType"]
+
+    def prefix_segment(self, episode_id: str, index: int) -> bytes:
+        manifest = self.get(episode_id)
+        segments = manifest["segments"]["prefix"]
+        if manifest["sourceKind"] != "hls" or index < 0 or index >= len(segments):
+            raise AccessDenied("Only retained prefix segments are available.")
+        data = self._read_partition(manifest, "prefix")
+        start = sum(s["bytes"] for s in segments[:index])
+        return data[start:start + segments[index]["bytes"]]
+
+    def prefix_playlist(self, episode_id: str) -> str:
+        manifest = self.get(episode_id)
+        if manifest["sourceKind"] != "hls":
+            raise TruncatedCapture("Snapshots do not have a video playlist.")
+        self._read_partition(manifest, "prefix")
+        segments = manifest["segments"]["prefix"]
+        lines = ["#EXTM3U", "#EXT-X-VERSION:3", "#EXT-X-PLAYLIST-TYPE:VOD",
+                 f"#EXT-X-TARGETDURATION:{math.ceil(max(s['durationS'] for s in segments))}",
+                 "#EXT-X-MEDIA-SEQUENCE:0"]
+        for index, segment in enumerate(segments):
+            lines.extend([f"#EXTINF:{segment['durationS']:.6f},",
+                          f"/api/captures/{episode_id}/segments/{index}"])
         return "\n".join([*lines, "#EXT-X-ENDLIST", ""])
 
+    def holdout(self, episode_id: str, role: str) -> tuple[Path, str]:
+        if role != "evaluation":
+            raise AccessDenied("Held-out media is only available to the evaluation role.")
+        manifest = self.get(episode_id, verify=True)
+        info = manifest["files"].get("holdout")
+        if not info:
+            raise CaptureError("This episode has no held-out file.")
+        return self._dir(episode_id) / info["path"], info["sha256"]
 
-class EpisodeRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
-    sourceId: str
-    sceneId: str | None = None
-    recordingId: str
-    startSeconds: float = Field(ge=0)
-    endSeconds: float = Field(gt=0)
-    splitSeconds: float | None = None
+    def capture_contract(self, episode_id: str) -> Capture:
+        """The ``element119.v1`` Capture describing the model-visible prefix."""
+        m = self.get(episode_id)
+        return Capture(
+            id=m["id"], cameraId=m["cameraId"], sourceKind=m["sourceKind"],
+            mediaSha256=m["files"]["prefix"]["sha256"], mediaType=m["mediaType"],
+            durationS=m["files"]["prefix"]["durationS"], frameCount=m["frameCount"],
+            width=m["width"], height=m["height"],
+            retrievalStartedAt=m["clocks"]["retrievalStartedAt"], retrievalEndedAt=m["clocks"]["retrievalEndedAt"],
+            captureClock=m["clocks"]["sourceClock"], unknowns=[Unknown(**u) for u in m["unknowns"]])
 
+    # -- pins and cleanup -------------------------------------------------
 
-class SnapshotRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    sourceId: str
-    sceneId: str | None = None
+    def _pins_path(self, episode_id: str) -> Path:
+        return self._dir(episode_id) / "pins.json"
 
+    def pins(self, episode_id: str) -> list[str]:
+        path = self._pins_path(episode_id)
+        with self._lock:
+            try:
+                if path.is_symlink() or path.stat().st_size > 1024 * 1024:
+                    raise ValueError("invalid pins")
+                pins = json.loads(path.read_text())
+                if not isinstance(pins, list) or any(not isinstance(p, str) or not _JOB_ID.fullmatch(p) for p in pins):
+                    raise ValueError("invalid pins")
+                return pins
+            except (OSError, ValueError, TypeError):
+                # Missing ownership is never evidence that media may be deleted.
+                if path.exists() or path.is_symlink():
+                    path.rename(path.with_name(f"pins.corrupt-{secrets.token_hex(4)}.json"))
+                pins = ["capture-recovered-retention"]
+                self._write_pins(episode_id, pins)
+                return pins
 
-router = APIRouter(prefix="/api/captures", tags=["capture"])
+    def pin(self, episode_id: str, job_id: str) -> list[str]:
+        if not _JOB_ID.match(job_id):
+            raise CaptureError("Invalid job id.")
+        with self._lock:
+            pins = sorted(set(self.pins(episode_id)) | {job_id})
+            self._write_pins(episode_id, pins)
+        return pins
 
+    def unpin(self, episode_id: str, job_id: str) -> list[str]:
+        with self._lock:
+            pins = [p for p in self.pins(episode_id) if p != job_id]
+            self._write_pins(episode_id, pins)
+        return pins
 
-def service(request: Request) -> CaptureService:
-    return request.app.state.capture
+    def _write_pins(self, episode_id: str, pins: list[str]):
+        path = self._pins_path(episode_id)
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(pins))
+        os.replace(tmp, path)
 
+    def usage_bytes(self) -> int:
+        return sum(f.stat().st_size for f in self.root.rglob("*") if f.is_file())
 
-@router.post("/sources/{source_id}/start")
-async def start_source(source_id: str, request: Request):
-    return await service(request).start(source_id)
+    @staticmethod
+    def _size(path: Path) -> int:
+        return sum(f.stat().st_size for f in path.rglob("*") if f.is_file())
 
+    def _remove(self, path: Path):
+        for f in path.rglob("*"):
+            f.chmod(0o644) if f.is_file() else None
+        shutil.rmtree(path)
 
-@router.post("/sources/{source_id}/stop")
-async def stop_source(source_id: str, request: Request):
-    return await service(request).stop(source_id)
-
-
-@router.get("/sources/{source_id}/history")
-async def source_history(source_id: str, request: Request):
-    return service(request).history(source_id)
-
-
-@router.post("/episodes", status_code=201)
-async def create_episode(body: EpisodeRequest, request: Request):
-    return await service(request).create_episode(body.sourceId, body.startSeconds, body.endSeconds,
-        split=body.splitSeconds, scene_id=body.sceneId, recording_id=body.recordingId)
-
-
-@router.post("/snapshots", status_code=201)
-async def capture_snapshot(body: SnapshotRequest, request: Request):
-    return await service(request).capture_snapshot(body.sourceId, body.sceneId)
-
-
-@router.get("/episodes/{capture_id}")
-async def get_episode(capture_id: str, request: Request):
-    return service(request).manifest(capture_id)
-
-
-@router.get("/episodes/{capture_id}/media/{media_index}")
-async def get_media(capture_id: str, media_index: int, request: Request):
-    data, mime = service(request).read_prefix(capture_id, media_index)
-    return Response(data, media_type=mime, headers={"Cache-Control": "private, immutable", "X-Content-Type-Options": "nosniff"})
-
-
-@router.get("/episodes/{capture_id}/index.m3u8")
-async def get_prefix_playlist(capture_id: str, request: Request):
-    body = service(request).prefix_playlist(capture_id)
-    return Response(body, media_type="application/vnd.apple.mpegurl", headers={
-        "Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff",
-    })
+    def enforce_budget(self, protect: str | None = None) -> list[str]:
+        """Delete the oldest unpinned episodes (never ``protect``) until usage fits the budget."""
+        with self._lock:  # the pins() check and the delete must not interleave with pin()
+            removed = []
+            episodes = sorted((p for p in self.root.iterdir() if _EPISODE_ID.match(p.name)),
+                              key=lambda p: p.name)
+            usage = self.usage_bytes()
+            for path in episodes:
+                if usage <= self.budget_bytes:
+                    break
+                if path.name == protect or self.pins(path.name):
+                    continue
+                try:
+                    self.get(path.name)
+                except CaptureError:
+                    continue  # corrupted ownership/provenance requires explicit recovery
+                size = self._size(path)
+                self._remove(path)
+                usage -= size
+                removed.append(path.name)
+            return removed

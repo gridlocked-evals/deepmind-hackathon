@@ -13,6 +13,8 @@ def isolated_runtime(tmp_path, monkeypatch):
     monkeypatch.setenv("GENIE_ENABLED", "false")
     monkeypatch.setenv("CAPTURE_STORAGE_DIR", str(tmp_path / "captures"))
     monkeypatch.setenv("OBSERVATION_STORAGE_DIR", str(tmp_path / "observations"))
+    monkeypatch.setenv("CAPTURE_DIR", str(tmp_path / "captures"))
+    monkeypatch.setenv("PIPELINE_DIR", str(tmp_path / "pipeline"))
     monkeypatch.setenv("MODEL_LEDGER_PATH", str(tmp_path / "legacy.sqlite3"))
     configuration = tmp_path / "gateway.json"
     configuration.write_text(json.dumps({"data_dir": str(tmp_path / "gateway")}))

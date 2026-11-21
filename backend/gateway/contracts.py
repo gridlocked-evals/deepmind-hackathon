@@ -32,6 +32,8 @@ STAGES = {
     "reference": Service.NANO_BANANA,
     "image_gate": Service.DECISIONS,
     "temporal_gate": Service.DECISIONS,
+    "adversary": Service.CARBON,  # #24: attack generation, budgeted apart from repair
+    "attack_judge": Service.DECISIONS,  # #24: offline per-attack scoring
     "world": Service.GENIE,
 }
 Identifier = Annotated[str, Field(pattern=r"^[A-Za-z0-9_.:-]{1,128}$")]
@@ -48,6 +50,7 @@ class CallContext(BaseModel):
     prompt_id: Identifier
     source_id: Identifier | None = None
     capture_id: Identifier | None = None
+    attempt_id: Identifier | None = None
     original_media_sha256: tuple[Annotated[str, Field(pattern=r"^[a-f0-9]{64}$")], ...] = ()
     purpose: Literal["development", "smoke", "submission", "demo"] = "development"
 
@@ -107,12 +110,14 @@ class GatewayError(Exception):
 
     def __init__(self, code: ErrorCode, *, retryable: bool = False,
                  request_id: str | None = None, retry_after: float = 0,
-                 http_status: int | None = None, provider_status: str | None = None):
+                 http_status: int | None = None, provider_status: str | None = None, status: int | None = None):
         self.code = code
         self.retryable = retryable
         self.request_id = request_id
         self.retry_after = retry_after
+        http_status = http_status if http_status is not None else status
         self.http_status = http_status if type(http_status) is int and 100 <= http_status <= 599 else None
+        self.status = self.http_status  # World cleanup inspects explicit rejected creates.
         self.provider_status = provider_status if isinstance(provider_status, str) and provider_status in PROVIDER_STATUSES else None
         super().__init__(MESSAGES[code])
 
@@ -154,6 +159,15 @@ class AdapterResult:
     evidence: dict
     provider_request_id: str | None
     usage: Usage | None
+
+
+@dataclass
+class GenieCallState:
+    """Per-call progress retained even when a probe raises or is cancelled."""
+
+    termination_pending: bool = False
+    termination: str | None = None
+    usage: Usage | None = None
 
 
 @dataclass(frozen=True)

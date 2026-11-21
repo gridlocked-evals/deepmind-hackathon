@@ -4,7 +4,7 @@
 .city-map-root .maplibregl-ctrl-bottom-right{right:16px;bottom:1px}
 .city-map-root .maplibregl-ctrl-top-right{right:16px;top:auto;bottom:var(--map-navigation-bottom,120px);transition:bottom .3s ease}
 .city-map-root .maplibregl-ctrl-group{overflow:hidden;background:rgba(13,25,34,.92);box-shadow:0 0 0 1px rgba(158,192,206,.16);border-radius:7px}
-.city-map-root .maplibregl-ctrl-group button{width:34px;height:34px}
+.city-map-root .maplibregl-ctrl-group button{width:40px;height:40px}
 .city-map-root .maplibregl-ctrl-group button+button{border-top:1px solid rgba(158,192,206,.12)}
 .city-map-root .maplibregl-ctrl-group button:hover{background:rgba(133,238,210,.12)}
 .city-map-root .maplibregl-ctrl-group button:focus-visible{outline:2px solid #a4ffe1;outline-offset:-2px}

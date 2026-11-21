@@ -1,22 +1,21 @@
 import { useEffect, useRef, useState } from 'react';
 import type Hls from 'hls.js';
-import type { ImageRegion } from '../contracts';
+import type { Capture } from '../contracts';
+import type { Box } from './api';
 import { apiUrl, mediaPath } from './api';
-import type { CaptureManifest } from './api';
 
-export interface ReviewPoint { time: number; region: ImageRegion | null; revision: number }
+export interface ReviewPoint { time: number; region: Box | null; revision: number }
 
-export function CapturedMedia({ capture, review }: { capture: CaptureManifest; review: ReviewPoint | null }) {
+export function CapturedMedia({ capture, review }: { capture: Capture; review: ReviewPoint | null }) {
   const video = useRef<HTMLVideoElement>(null);
   const requested = useRef(review);
   requested.current = review;
   const [error, setError] = useState('');
   const [ratio, setRatio] = useState(16 / 9);
-  const firstIndex = capture.media.findIndex(item => item.partition === 'prefix');
   useEffect(() => {
-    if (capture.modality !== 'video' || !video.current) return;
+    if (capture.sourceKind !== 'hls' || !video.current) return;
     const element = video.current;
-    const url = apiUrl(`/api/captures/episodes/${encodeURIComponent(capture.captureId)}/index.m3u8`);
+    const url = apiUrl(`/api/captures/${encodeURIComponent(capture.id)}/index.m3u8`);
     let player: Hls | null = null;
     let disposed = false;
     const load = () => player?.startLoad();
@@ -56,18 +55,16 @@ export function CapturedMedia({ capture, review }: { capture: CaptureManifest; r
   }, [review]);
   return <div className="evidence-original">
     <div className="evidence-media-frame" style={{ aspectRatio: ratio }}>
-      {capture.modality === 'snapshot'
-        ? <img src={apiUrl(mediaPath(capture.captureId, firstIndex))} alt="Retained original camera snapshot" onLoad={event => setRatio(event.currentTarget.naturalWidth / event.currentTarget.naturalHeight)} onError={() => setError('The retained snapshot could not be loaded. Open the original file below.')} />
+      {capture.sourceKind === 'snapshot'
+        ? <img src={apiUrl(mediaPath(capture.id))} alt="Retained original camera snapshot" onLoad={event => setRatio(event.currentTarget.naturalWidth / event.currentTarget.naturalHeight)} onError={() => setError('The retained snapshot could not be loaded. Open the original file below.')} />
         : <video ref={video} controls muted playsInline preload="metadata" aria-label="Retained original camera video" />}
-      {review?.region && capture.modality === 'snapshot' && <span className="evidence-roi" aria-label="Referenced region in original image" style={{
-        left: `${review.region.x * 100}%`, top: `${review.region.y * 100}%`, width: `${review.region.width * 100}%`, height: `${review.region.height * 100}%`,
+      {review?.region && capture.sourceKind === 'snapshot' && <span className="evidence-roi" aria-label="Referenced region in original image" style={{
+        left: `${review.region.x * 100}%`, top: `${review.region.y * 100}%`, width: `${review.region.w * 100}%`, height: `${review.region.h * 100}%`,
       }} />}
     </div>
     {error && <p className="evidence-inline-error" role="status">{error}</p>}
-    <p className="evidence-caption">Retained original {capture.modality === 'snapshot' ? 'image' : 'video'}{review ? ` · ${capture.modality === 'video' ? 'approximate seek to' : 'reference at'} ${review.time.toFixed(3)} s` : ''}. Source exposure time {capture.sourceClock === 'unknown' ? 'unknown' : 'unverified'}.</p>
-    {review?.region && capture.modality === 'video' && <p className="evidence-caption">Referenced region: x {(review.region.x * 100).toFixed(1)}%, y {(review.region.y * 100).toFixed(1)}%, width {(review.region.width * 100).toFixed(1)}%, height {(review.region.height * 100).toFixed(1)}%. Video seeking does not guarantee the exact model frame.</p>}
-    <details className="evidence-file-list"><summary>Open original {capture.modality === 'snapshot' ? 'file' : 'segments'}</summary><ul>{capture.media.map((item, index) => item.partition === 'prefix' && <li key={index}>
-      <a href={apiUrl(mediaPath(capture.captureId, index))} target="_blank" rel="noreferrer">{capture.modality === 'snapshot' ? 'Snapshot image' : `Segment ${index + 1} · ${item.startSeconds.toFixed(3)}–${item.endSeconds.toFixed(3)} s`}</a>
-    </li>)}</ul></details>
+    <p className="evidence-caption">Retained original {capture.sourceKind === 'snapshot' ? 'image' : 'hls'}{review ? ` · ${capture.sourceKind === 'hls' ? 'approximate seek to' : 'reference at'} ${review.time.toFixed(3)} s` : ''}. Source exposure time {capture.captureClock === 'unknown' ? 'unknown' : 'unverified'}.</p>
+    {review?.region && capture.sourceKind === 'hls' && <p className="evidence-caption">Referenced region: x {(review.region.x * 100).toFixed(1)}%, y {(review.region.y * 100).toFixed(1)}%, width {(review.region.w * 100).toFixed(1)}%, height {(review.region.h * 100).toFixed(1)}%. Video seeking does not guarantee the exact model frame.</p>}
+    <p className="evidence-file-list"><a href={apiUrl(mediaPath(capture.id))} target="_blank" rel="noreferrer">Open retained original prefix file</a></p>
   </div>;
 }

@@ -13,7 +13,7 @@ const SOURCES = [
 
 export const CAMERA_CATALOG: CameraSource[] = SOURCES.map(([id, street, lon, lat, , resolution]) => ({
   id: `511ny-${id}`, name: `West Street at ${street}`, kind: 'hls',
-  coordinates: [lon, lat], provider: '511NY / NYSDOT', sourceUrl: `https://511ny.org/camera/${id}`,
+  coordinates: [lon, lat], provider: '511NY / NYSDOT', borough: 'Manhattan', sourceUrl: `https://511ny.org/camera/${id}`,
   playbackUrl: `/api/feeds/511ny-${id}/index.m3u8`, resolution,
   description: 'Public roadway video · source clock and broadcast delay unknown',
   capturedAt: null, fetchedAt: null, availability: 'unverified',
@@ -43,12 +43,35 @@ function isCamera(value: unknown): value is CameraSource {
 
 export type CameraDirectoryStatus = 'loading' | 'connected' | 'stale' | 'offline';
 
+interface CameraDirectory { cameras: CameraSource[]; mode?: string }
+type DirectoryResult = PromiseSettledResult<CameraDirectory>;
+
+/** Successful directories replace their own records; failures retain the last view. */
+export function reconcileCameraDirectories(previous: CameraSource[], live: DirectoryResult, stills: DirectoryResult) {
+  const available = (result: DirectoryResult) => result.status === 'fulfilled' && result.value.mode !== 'unavailable';
+  const liveAvailable = available(live), stillsAvailable = available(stills);
+  const records = (result: DirectoryResult, kind: CameraSource['kind']) => {
+    if (result.status === 'fulfilled' && result.value.mode !== 'unavailable') return result.value.cameras;
+    return previous.filter(camera => camera.kind === kind).map(camera => ({
+      ...camera, availability: camera.availability === 'unavailable' ? 'unavailable' as const : 'stale' as const,
+    }));
+  };
+  const merged = new Map(CAMERA_CATALOG.map(camera => [camera.id, camera]));
+  for (const camera of [...records(live, 'hls'), ...records(stills, 'snapshot')]) merged.set(camera.id, camera);
+  const status: CameraDirectoryStatus = !liveAvailable && !stillsAvailable ? 'offline'
+    : !liveAvailable || !stillsAvailable
+      || (live.status === 'fulfilled' && live.value.mode === 'stale')
+      || (stills.status === 'fulfilled' && stills.value.mode === 'stale') ? 'stale' : 'connected';
+  return { cameras: [...merged.values()], status };
+}
+
 export function useCameraSources(): { cameras: CameraSource[]; status: CameraDirectoryStatus } {
   const [cameras, setCameras] = useState<CameraSource[]>(CAMERA_CATALOG);
   const [status, setStatus] = useState<CameraDirectoryStatus>('loading');
   useEffect(() => {
     const controller = new AbortController();
     let running = false;
+    let previous = CAMERA_CATALOG;
     const refresh = async () => {
       if (running || document.hidden) return;
       running = true;
@@ -72,14 +95,10 @@ export function useCameraSources(): { cameras: CameraSource[]; status: CameraDir
       running = false;
       if (controller.signal.aborted) return;
       const [live, stills] = results;
-      const liveCameras = live.status === 'fulfilled' ? live.value.cameras : CAMERA_CATALOG;
-      const snapshotCameras = stills.status === 'fulfilled' ? stills.value.cameras : [];
-      // The configured catalog remains selectable when the API is offline.
-      const merged = new Map(CAMERA_CATALOG.map(camera => [camera.id, camera]));
-      for (const camera of [...liveCameras, ...snapshotCameras]) merged.set(camera.id, camera);
-      setCameras([...merged.values()]);
-      setStatus(live.status === 'rejected' && stills.status === 'rejected' ? 'offline'
-        : live.status === 'rejected' || (stills.status === 'fulfilled' && stills.value.mode === 'stale') ? 'stale' : 'connected');
+      const next = reconcileCameraDirectories(previous, live, stills);
+      previous = next.cameras;
+      setCameras(next.cameras);
+      setStatus(next.status);
     };
     void refresh();
     const timer = window.setInterval(() => void refresh(), 60000);

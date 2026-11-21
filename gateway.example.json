@@ -67,6 +67,14 @@
     "world": {
       "tokens": 1000000,
       "usd": "5"
+    },
+    "adversary": {
+      "tokens": 1000000,
+      "usd": "5"
+    },
+    "attack_judge": {
+      "tokens": 1000000,
+      "usd": "5"
     }
   },
   "genie_enabled": false,

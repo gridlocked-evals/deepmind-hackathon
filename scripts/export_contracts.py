@@ -16,14 +16,16 @@ def typescript(schema):
         return json.dumps(schema["const"])
     if "enum" in schema:
         return " | ".join(json.dumps(value) for value in schema["enum"])
-    if "anyOf" in schema:
-        return " | ".join(typescript(value) for value in schema["anyOf"])
+    if "anyOf" in schema or "oneOf" in schema:
+        return " | ".join(typescript(value) for value in schema.get("anyOf", schema.get("oneOf")))
     kind = schema.get("type")
     if kind == "object":
         required = schema.get("required", [])
         fields = [f"  {name}{'' if name in required else '?'}: {typescript(value)};" for name, value in schema.get("properties", {}).items()]
         return "{\n" + "\n".join(fields) + "\n}"
     if kind == "array":
+        if "prefixItems" in schema:
+            return "[" + ", ".join(typescript(value) for value in schema["prefixItems"]) + "]"
         return f"Array<{typescript(schema['items'])}>"
     return {"string": "string", "number": "number", "integer": "number", "boolean": "boolean", "null": "null"}.get(kind, "unknown")
 

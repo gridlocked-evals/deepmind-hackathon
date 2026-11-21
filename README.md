@@ -1,18 +1,12 @@
-# Crash Test NYC / Element 119
+# Gotham Forge simulation workspace
 
-NYC camera evidence → Hydrogen observation → Carbon mayor edit → Nano Banana reference → Decisions acceptance → Genie exploration. The backend now includes shared contracts, a model gateway, bounded capture, and timestamped Hydrogen extraction against the [core issues](https://github.com/Paradox560/deepmind-hackathon/issues/1). The interface contains a city map, an illustrative Vestry traffic demo, public camera feeds, and an Evidence drawer for immutable capture and explicit Hydrogen extraction. The complete edit/reference/world UI remains pending.
-
-Genie world generation is optional and disabled by default to preserve credits. Camera capture and reasoning do not require a world session.
+Interactive NYC city map with the full public DOT camera directory across all five boroughs, configured 511NY video feeds, selectable intersections, and driving-route playback. Click a mapped street to start a local preview, or choose two locations to replay a street-following journey with turn slowdown and destination stops. Camera footage remains independent of simulated motion while image processing is being integrated.
 
 **[Setup and controls](RUNNING.md)** · [Architecture](docs/ARCHITECTURE.md) · [Camera API](docs/CAMERA_API.md) · [Verification](docs/VERIFICATION.md)
 
-[Implementation plan](GOTHAM_FORGE_PLAN.md) · [Source attribution](THIRD_PARTY_NOTICES.md)
+[Implementation plan](GOTHAM_FORGE_PLAN.md) · [Element 119 contracts](docs/CONTRACTS.md) · [Source attribution](THIRD_PARTY_NOTICES.md)
 
-Quick start after installing dependencies: run `npm run dev:api` and `npm run dev` in separate terminals. Camera browsing works without model credentials. For model access, copy `.env.example` to `.env` and follow [credential setup](RUNNING.md#model-credentials).
-
-[Shared contracts](docs/CONTRACTS.md) · [Model gateway](docs/MODEL_GATEWAY.md) · [Capture API](docs/CAPTURE_API.md)
-
-[Hydrogen observation API](docs/OBSERVATIONS_API.md) · [Evidence sampling and reinspection](docs/EVIDENCE_MEDIA.md)
+Quick start after installing dependencies: run `npm run dev:api` and `npm run dev` in separate terminals. No model credentials are needed.
 
 ---
 

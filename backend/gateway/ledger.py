@@ -130,14 +130,22 @@ class Ledger:
             db.execute("BEGIN IMMEDIATE")
             if db.execute("SELECT 1 FROM blocks LIMIT 1").fetchone():
                 raise GatewayError(ErrorCode.BUDGET)
-            if call.service == "genie" and db.execute(
-                "SELECT 1 FROM attempts WHERE service='genie' AND (outcome='pending' OR (outcome='termination_unconfirmed' AND dispatched=1)) LIMIT 1"
-            ).fetchone():
-                raise GatewayError(ErrorCode.TERMINATION)
-            active = db.execute(
-                "SELECT COUNT(*) FROM attempts WHERE outcome='pending' AND lease_until>?", (now,)
-            ).fetchone()[0]
-            if active >= self.config.max_concurrency:
+            if call.service == "genie":
+                # _execute marks dispatched before any provider request, so an expired undispatched
+                # row is a crash before sending: nothing can be running. Its reservation stays charged.
+                db.execute("UPDATE attempts SET outcome=?,finished_at=? WHERE service='genie' AND outcome='pending' AND dispatched=0 AND lease_until<=?",
+                           (ErrorCode.CANCELLED.value, now, now))
+                unresolved = db.execute(
+                    "SELECT MAX(dispatched=1 AND (outcome!='pending' OR lease_until<=?)) FROM attempts WHERE service='genie' AND (outcome='pending' OR (outcome='termination_unconfirmed' AND dispatched=1))",
+                    (now,),
+                ).fetchone()[0]
+                if unresolved is not None:
+                    # A live or never-sent world only has to finish; a dispatched one nobody owns may still bill.
+                    raise GatewayError(ErrorCode.TERMINATION if unresolved else ErrorCode.CONCURRENCY)
+            # Genie is bounded by the one-world rule above, so it neither uses nor takes a slot.
+            elif db.execute(
+                "SELECT COUNT(*) FROM attempts WHERE outcome='pending' AND lease_until>? AND service!='genie'", (now,)
+            ).fetchone()[0] >= self.config.max_concurrency:
                 raise GatewayError(ErrorCode.CONCURRENCY)
             spent = db.execute("SELECT COALESCE(SUM(charged_microusd),0) FROM attempts").fetchone()[0]
             stage_spent, stage_tokens = db.execute(
@@ -253,7 +261,7 @@ class Ledger:
         return {"ready": all(traces.values()), "traces": traces,
                 "missing": [role for role, ids in traces.items() if not ids]}
 
-    def accept_artifact(self, result, artifact_id: str, artifact_sha256: str) -> str:
+    def accept_artifact(self, result, artifact_id: str, artifact_sha256: str, *, qualifying: bool = True) -> str:
         with self.connection() as db:
             db.execute("BEGIN IMMEDIATE")
             row = db.execute("SELECT * FROM attempts WHERE request_id=?", (result.request_id,)).fetchone()
@@ -264,13 +272,14 @@ class Ledger:
                 raise GatewayError(ErrorCode.INVALID_INPUT)
             previous = db.execute("SELECT * FROM accepted_artifacts WHERE request_id=?", (result.request_id,)).fetchone()
             if previous:
-                if previous["artifact_id"] != artifact_id or previous["artifact_sha256"] != artifact_sha256:
+                if (previous["artifact_id"] != artifact_id or previous["artifact_sha256"] != artifact_sha256
+                        or bool(row["qualifying"]) != qualifying):
                     raise GatewayError(ErrorCode.INVALID_INPUT)
                 return previous["binding_hash"]
             binding = self.artifact(canonical({"kind": "accepted_domain_artifact", "request_id": result.request_id,
                 "model_id": result.model_id, "input_hash": result.input_hash, "result_hash": result.result_hash,
-                "artifact_id": artifact_id, "artifact_sha256": artifact_sha256}))
+                "artifact_id": artifact_id, "artifact_sha256": artifact_sha256, "qualifying": qualifying}))
             db.execute("INSERT INTO accepted_artifacts VALUES(?,?,?,?)",
                        (result.request_id, artifact_id, artifact_sha256, binding))
-            db.execute("UPDATE attempts SET qualifying=1 WHERE request_id=?", (result.request_id,))
+            db.execute("UPDATE attempts SET qualifying=? WHERE request_id=?", (int(qualifying), result.request_id))
             return binding

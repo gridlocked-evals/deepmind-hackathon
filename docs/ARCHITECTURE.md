@@ -1,13 +1,12 @@
 # Gotham Forge architecture
 
-The current interface combines a geographic NYC map, one deterministic traffic demonstration, and independently advancing public camera footage. The frontend runs without model credentials. FastAPI supplies camera metadata, HLS transport, bounded capture, and a server-only model gateway; it does not execute the traffic simulation. Element 119's model pipeline is being built separately from the authored demo.
-
+Gotham Forge currently combines a geographic NYC map, one deterministic traffic demonstration, and independently advancing public camera footage. The frontend runs without model credentials. The FastAPI backend supplies camera metadata, HLS transport and an optional server-only model gateway; it does not execute the traffic simulation.
 
 For setup and controls, see [RUNNING.md](../RUNNING.md). The broader reconstruction and evaluation roadmap remains in [GOTHAM_FORGE_PLAN.md](../GOTHAM_FORGE_PLAN.md).
 
 ## Contracts and ownership
 
-The existing demo's frontend contracts live in [src/types.ts](../src/types.ts). Element 119's versioned Python/TypeScript artifact contracts and ownership live in [CONTRACTS.md](CONTRACTS.md). These preserve capture/media identity, evidence time domains, model provenance, unknowns, image-space edit permissions, and distinct stochastic world-session identities.
+Shared frontend contracts for the current map/demo live in [src/types.ts](../src/types.ts). The Element 119 submission pipeline (capture → Hydrogen → Carbon → Nano Banana → Decisions → Genie → evaluation) uses the separate versioned contracts in [CONTRACTS.md](CONTRACTS.md); its schema is served at `GET /api/contracts/element119`.
 
 | Contract | Responsibility |
 | --- | --- |
@@ -55,23 +54,11 @@ The API exposes `GET /api/health`, `/api/cameras` for Manhattan DOT snapshots, `
 
 The DOT directory cache retains the last successful fetch time when serving stale data. Snapshot images load directly from validated DOT URLs. HLS requests use the local proxy first; the frontend can fall back to a known direct stream URL. Native HLS is preferred when supported, otherwise `hls.js` is loaded dynamically. Playback has bounded retries, explicit error states, visibility-aware suspension, and cleanup when the source changes.
 
-The HLS proxy accepts registered camera IDs rather than arbitrary upstream URLs. It validates source host/path and redirects, rewrites playlist URIs to camera-bound opaque tokens, supports single byte ranges, and bounds concurrency and response sizes. Proxy tokens, source health, and directory caches are in memory. Separately, [the capture service](CAPTURE_API.md) persists immutable episode manifests/media and pinned references within a storage budget. A proxy token is not a capture ID.
-
-## Model services
-
-[The model gateway](MODEL_GATEWAY.md) owns credential selection, immutable inference requests, bounded concurrency/retries/timeouts, budgets, and sanitized audit records. Hydrogen and Carbon retain distinct required roles. Standard model interactions, typed Decisions requests, and Genie live sessions use separate adapters; Genie completion must end server generation. Provider success is recorded only after a validated response, and local tests do not establish account access.
-
-The local API loads `.env` only on the server. `GEMINI_KEY_PROFILE` explicitly selects the Tier 3 or Workshop AI Studio key; neither key reaches the Vite bundle. Run one backend worker per local evidence/budget directory until shared coordination is implemented.
-
-`ObservationService` prepares retained prefix bytes through `evidence_media`, which reads actual decoded presentation timestamps and samples across the requested interval. It sends inline frames to Hydrogen with a structured response schema, resolves model references back to supplied frames, validates the shared artifact, and persists the result with an attempt record. Optional crops map back to original image-space coordinates. All accepted and failed attempts retain their source capture pins; no inference retry fetches fresh camera footage. See [observation routes](OBSERVATIONS_API.md) and [media preparation](EVIDENCE_MEDIA.md).
-
-The frontend Evidence drawer keeps source selection, recording history, sealed captures, and
-observation attempts separate from the authored scene clock. It uses only real buffered
-boundaries, reviews immutable prefix media, and never starts inference on camera selection.
+The HLS proxy accepts registered camera IDs rather than arbitrary upstream URLs. It validates source host/path and redirects, rewrites playlist URIs to camera-bound opaque tokens, supports single byte ranges, and bounds concurrency and response sizes. Tokens, source health, and caches are in memory. A server restart discards them; there is no footage archive or persistent episode store.
 
 ## Extension points and current limits
 
-The [model gateway](MODEL_GATEWAY.md) adds backend Hydrogen/Carbon/Nano Banana inference, typed Decisions judgments and a bounded Genie development probe. It records immutable request/result evidence and persistent per-stage budgets, with read-only status at `/api/models/status`. All five services passed [live capability checks](MODEL_GATEWAY_VERIFICATION.md) on November 21, 2026. Capture and observation now share this gateway with the optional world runtime. Edit/reference/gate integration remains pending; gateway-local contracts do not replace the shared domain contracts.
+The [model gateway](MODEL_GATEWAY.md) adds backend Hydrogen/Carbon/Nano Banana inference, typed Decisions judgments and a bounded Genie development probe. It records immutable request/result evidence and persistent per-stage budgets, with read-only status at `/api/models/status`. All five services passed [live capability checks](MODEL_GATEWAY_VERIFICATION.md) on November 21, 2026. It does not connect the camera capture, mayor edit or playable-world stages, and its local contracts do not replace the domain schema freeze in issue #2.
 
 The [Genie runtime](GENIE_RUNTIME.md) now owns live session creation, scoped provider
 authorization, a video WebSocket relay, received-frame recordings, separate key/text
@@ -80,8 +67,7 @@ and gate hashes from a trusted backend store. The real #8 gate and frontend are
 not wired to that boundary yet. A synthetic development session verified 208 frames
 and acknowledged termination; [the measurement record](GENIE_RUNTIME_VERIFICATION.md)
 separates visible responses from unmeasured limits. The runtime reuses gateway
-reservations and leaves unconfirmed sessions blocked for recovery. `GENIE_ENABLED=false`
-blocks creation before allocating a session; camera evidence remains usable.
+reservations and leaves unconfirmed sessions blocked for recovery.
 
 - Add a backend `ScenarioProvider`, runtime payload validation, and loading/error state in `App` to replace its static bundle import. Preserve the metric axes, actor IDs, ordered frame times, provenance, and version identity.
 - Generalize the renderer before accepting arbitrary intersections. Base polygons and actor states come from the bundle, but curbs, markings, signal placement, furniture, and route-progress coloring still use Vestry-specific constants. The renderer currently supports one ego plus up to 63 surrounding actors, three vehicle kinds, and one scene-wide signal state.

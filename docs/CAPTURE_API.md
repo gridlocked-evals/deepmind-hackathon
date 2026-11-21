@@ -1,73 +1,104 @@
-# Bounded camera evidence
+# Bounded camera capture
 
-`backend/capture.py` implements issue #4's capture foundation. A capture is immutable input for later model jobs. Retrying inference reads the same retained bytes; it never calls a camera again. The Evidence drawer uses these routes for real recording boundaries, retained playback, and snapshot capture; see the verification record for browser checks.
+The merged implementation uses the canonical `CaptureStore` / `Capture` interfaces
+in `backend/capture.py` and the routes in `backend/capture_api.py`. See
+[CAMERA_API.md](CAMERA_API.md#capture-episodes) for the complete request shapes.
+The older `/api/captures/sources/...` and `/api/captures/episodes` write routes are
+replaced by the canonical routes below.
 
-## Record a registered video source
+## Recording and selecting actual history
 
-```sh
-curl -X POST http://127.0.0.1:8000/api/captures/sources/511ny-32998/start
-curl http://127.0.0.1:8000/api/captures/sources/511ny-32998/history
-```
+- `POST /api/captures/{camera_id}/recording` starts a registered HLS source.
+- `GET /api/captures/{camera_id}/buffer` reports actual buffered history. A fresh
+  recorder has none. `history.segmentBoundariesS` contains selectable whole-segment
+  boundaries, measured from the oldest retained segment. `recording` distinguishes
+  an active task from retained history after a stop.
+- `POST /api/captures/{camera_id}/stop` stops retrieval while preserving the buffer.
+- `POST /api/captures` accepts `cameraId`, `secondsAgo`, `durationS`, optional
+  `holdoutS`, `sceneCameraId`, and `bufferRevision`. Send the revision returned by
+  the buffer response to prevent a selection silently shifting as recording
+  advances. A changed revision returns 409. Starting again after a stop or an
+  unavailable source begins fresh history; sealed episodes remain intact.
+- `POST /api/captures/snapshots/{camera_id}` resolves an actual DOT registry entry
+  and retains one original image. Refresh the camera directory first if the ID is
+  not yet registered in this process.
 
-The asynchronous recorder fetches the selected source's actual registered HLS URL. It retains a bounded 180-second ring of complete MPEG-TS segments. History reports its `recordingId`, `earliestSeconds`, `latestSeconds`, and selectable `segmentBoundaries`. Initially the bounds are null. Times are relative to this recording, not wall-clock exposure times. No arbitrary “30 seconds ago” history is fabricated.
+Offsets measure backward from the newest buffered segment, not exposure time.
+Selections cover complete overlapping segments and report their exact actual
+selected duration. The declared sum and the decoded original sum must both fit
+120 seconds, including the held-out partition. An unavailable interval fails;
+recording and inference retries never manufacture earlier history.
 
-Use the returned recording ID and **existing boundaries** when sealing an episode:
+Source-reported program times and server receipt times remain separate. Missing
+exposure time and broadcast delay stay unknown. Repeated snapshot bytes and HLS
+segments are labeled. Decoded frame rate below five frames per second receives
+`low_effective_cadence`; this measures decoded cadence, not a count of visually
+unique frames. Stale and unavailable states do not assert the camera is current.
 
-```json
-{
-  "sourceId": "511ny-32998",
-  "sceneId": "511ny-32998",
-  "recordingId": "rec_REPLACE_WITH_RETURNED_ID",
-  "startSeconds": 0,
-  "endSeconds": 30,
-  "splitSeconds": 20
-}
-```
+## Mandatory media audits
 
-Send this body to `POST /api/captures/episodes`. The exact total original duration must be greater than zero and at most 120 seconds, including any held-out suffix. `splitSeconds` is optional; when present it must be an interior segment boundary. This implementation deliberately rejects non-boundary selections instead of silently trimming or returning fewer seconds than requested. A mismatch between source and scene is rejected.
+`ffprobe` is required. Every original MPEG-TS segment in both partitions must decode
+successfully, with positive frame count, bounded dimensions and a duration within
+max(0.25 seconds, 5%) of its playlist claim. A failed probe is rejected, never
+converted to an accepted unknown. Segment duration tolerance does not relax the
+120-second decoded total cap. Snapshots must decode exactly one image and have the
+correct image signature. `auditedTotalDurationS`, `auditedPrefixDurationS` and
+per-segment `auditedDurationS` retain decoded timing separately from playlist timing.
 
-Both the sum of declared segment durations and the sum of decoded/audited durations must fit the 120-second cap. Small per-segment decoding tolerance never relaxes that episode limit. `durationSeconds` and selection boundaries use the HLS-declared timeline (`timelineBasis: hls_declared_segment_duration`); `auditedDurationSeconds` and `auditedPrefixDurationSeconds` separately retain measured media durations. Segment duration drift is not corrected into an invented exposure clock. Prefix/suffix isolation uses whole, physically separate segment files, so timing drift cannot cause the suffix file to enter a prefix read. Downstream extraction must retain this declared-versus-decoded timing uncertainty when assigning evidence timestamps.
+The ring is bounded to 180 seconds / 96 MiB per source; each segment is at most
+16 MiB and each snapshot at most 2 MiB. Captures permit at most 100,000 decoded
+frames and 1,000 original segments. Two capture audits may run concurrently;
+additional admission returns 503. Decoder output, per-process execution time,
+allocations and allowed protocols/formats are bounded. Capture audits have an
+additional overall deadline. Encrypted media, fMP4, byte ranges, discontinuities
+and sequence gaps are rejected. A sequence rollback makes the recorder unavailable
+until an explicit fresh start.
 
-`POST /api/captures/sources/{source_id}/stop` cancels recording without deleting sealed episodes. Upstream failures stop the recording and report `unavailable`. Starting an unavailable recording clears only its ring and gives it a fresh recording ID. Accepted episode bytes remain intact. Recording does not automatically resume after a server restart; retained history and episode manifests are loaded from disk.
+## Immutable provenance, playback and retention
 
-## Capture a snapshot
+Each manifest binds original file and segment bytes to SHA-256 hashes, source
+identity, receipt/source clocks, dimensions and decoded counts. New manifests add
+`integrityVersion: 1` and a canonical `manifestSha256`. Legacy main-branch manifests
+remain readable with structural/path and original-byte checks; they do not gain a
+historical manifest hash or a claim that they passed the newer strict decoder audit.
+Malformed JSON, metadata changes, invalid paths, missing media, symlinks and changed
+original bytes fail closed. Original files remain read-only.
 
-`POST /api/captures/snapshots` accepts `{"sourceId":"<id from /api/cameras>"}` and optional matching `sceneId`. The server resolves the source through the DOT registry and fetches only the official camera-ID image endpoint. Arbitrary URLs are never accepted.
+Prefix and held-out bytes occupy separate files. Model input and playback verify
+and read only the prefix. Holdout access requires the existing explicit evaluation
+role. Public playback routes never expose it:
 
-Snapshots have zero temporal duration, an allowed interval of `[0,0]`, unknown exposure time, and `motionClaimsAllowed: false`. Consecutive byte-identical images are labeled `cadence.repeated`; actual unique-frame cadence remains unknown. A repeated image does not establish whether the camera is frozen or the street is unchanged. Snapshot capture does not create trajectories, flow estimates, or historical video.
+- `GET /api/captures/{episode_id}/media` returns original prefix bytes.
+- `GET /api/captures/{episode_id}/index.m3u8` returns a prefix-only VOD playlist with
+  original segment durations; snapshots return 422.
+- `GET /api/captures/{episode_id}/segments/{index}` returns one original prefix
+  segment. An index beyond the prefix is denied.
 
-## Immutable provenance and isolation
+Playback is `private, no-store`. Browser seeking is approximate; source evidence
+frame timestamps remain authoritative.
 
-`GET /api/captures/episodes/{capture_id}` returns the manifest for evidence review. It contains source identity/location, received time, source clock semantics, all per-file SHA-256 hashes, byte lengths, audited video frame counts and durations, and partition membership. HLS program date/time is retained when supplied, but is not asserted to be exposure time. Clock uncertainty remains explicitly unknown. A successful poll with no new media eventually becomes `stale` based on the last new segment's receipt time.
+The downstream `source_frame` helper uses the actual indexed frame at or before
+the requested time and stores its decoded timestamp. Video requests use the
+half-open prefix interval; snapshots accept only time zero. Each read holds a
+durable temporary capture pin through verification and decoding, rechecks cached
+frame provenance, and releases its pin on success or failure. It never reads the
+held-out file.
 
-`originalMediaSha256` hashes the exact original file bytes concatenated in source order. Per-file hashes and lengths preserve the boundaries. `manifestSha256` separately hashes the canonical JSON manifest excluding `manifestSha256` itself, binding those bytes to their source and timing metadata. Manifests and media are checked again when read.
+`CAPTURE_DIR` selects the storage directory and `CAPTURE_BUDGET_BYTES` its budget.
+Pins survive restarts. Pin publication and eviction share the main implementation's
+lock, preventing successful pins from racing deletion. New episodes explicitly
+record an empty pin list; missing or corrupt pin records are recovered conservatively
+as retained. Damaged manifests are never automatically evicted. Storage pressure
+can remove only explicitly unpinned valid episodes. Incomplete temporary episodes
+are discarded at startup; recording itself does not resume automatically.
 
-Prefix and suffix segments are copied into **different files and directories** when an episode is sealed. `GET /api/captures/episodes/{capture_id}/media/{media_index}` and `CaptureService.read_prefix()` serve only prefix media; suffix requests return 403. The full manifest is for capture/evaluation review and must not be passed to inference. `CaptureService.capture_context(capture_id)` returns the validated shared `CaptureContext` with UTC `Z` timestamps and the permitted prefix interval; it excludes suffix frame metadata, file paths, and counts. Later model stages must use this context and prefix-only reads, and must not accept arbitrary episode-directory paths.
+## Verification
 
-### Retained video playback
-
-`GET /api/captures/episodes/{capture_id}/index.m3u8` returns a `no-store` VOD
-playlist with original prefix segment durations and server-owned media URLs.
-Every referenced prefix segment is hash-checked. The held-out suffix is neither
-read nor listed. Snapshots return 422 instead of masquerading as temporal media.
-Browser video seeks are approximate; source frame timestamps in observation
-artifacts remain authoritative for evidence references.
-
-Missing or damaged retention-pin metadata is rebuilt conservatively from sealed
-episodes. Corrupt manifests and missing/modified prefix bytes fail with a typed
-integrity response. A reset upstream media sequence stops that recording so it can
-be explicitly restarted with a fresh recording ID; sealed episodes survive.
-
-## Limits and retention
-
-- `CAPTURE_STORAGE_DIR` selects the local data directory; `CAPTURE_MAX_BYTES` caps disk use. Configure both on the backend. Do not commit media or manifests.
-- Every accepted episode is pinned as `capture-retention`. Jobs can add durable pins with `pin(capture_id, job_id)` and remove only their own reference using `unpin`. Retention management may explicitly remove `capture-retention` when an episode is no longer required.
-- Storage pressure may delete only unpinned episodes. If pins fill the budget, new work returns 507 and existing evidence remains readable. There is no public deletion/unpin route in this foundation.
-- Segment responses are capped at 16 MiB and playlists at 1 MiB. Incomplete bodies, partial responses, unsupported encodings, frame/decode failures, and mismatched declared duration fail explicitly.
-- `ffprobe` is required for both image decode and video duration/frame audits. Audit subprocesses have timeouts and are killed on cancellation. `ffmpeg` is used only by the optional real-media unit test.
-- Encrypted HLS, initialization maps/fMP4, byte ranges, discontinuities, and missing media-sequence intervals are rejected. Extend and test these formats before accepting them. No four/eight-second or fixed frame-count truncation is applied.
-- Camera selection and public model-job authorization are separate concerns. These local routes currently expose capture controls for the local application; add deployment authentication before exposing write routes publicly.
-
-## Validation
-
-`python -m pytest backend/test_capture.py -q` covers video/snapshot semantics, exact byte hashes, 120-second caps, source mismatch, unavailable history, immutable retries/restarts, durable pins, ring eviction, failed storage reservations, held-out access isolation, repeated snapshots, source clocks, sequence-gap recovery, and ffprobe rejecting malformed or misdeclared media. HTTP fixtures are synthetic. No real camera recording result is claimed by these tests.
+`python -m pytest backend/test_capture.py -q` covers actual bounded history, stale
+and repeated sources, source/scene mismatch, immutable retries, snapshot/video
+semantics, real ffmpeg/ffprobe decoding, failed-prefix/held-out audits, decoded
+120-second limits, pin/eviction races and recovery, tamper/path failures, bounded
+decoder output/time, revision guards, and prefix-only playback. Mocked transport
+and synthetic annotations are not real-world accuracy measurements. The retained
+real public-camera input runs are documented separately in
+[OBSERVATIONS_VERIFICATION.md](OBSERVATIONS_VERIFICATION.md).

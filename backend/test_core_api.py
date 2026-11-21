@@ -21,24 +21,24 @@ def test_core_api_reports_missing_keys_and_real_history_bounds(tmp_path, monkeyp
         assert all(item["state"] == "unavailable" for item in value["services"])
         assert all(not item["configured"] for item in value["services"])
         assert all("unmeasured" in item["project_quota"] for item in value["services"])
-        history = client.get("/api/captures/sources/511ny-32998/history").json()
-        assert history["earliestSeconds"] is None
-        assert history["latestSeconds"] is None
-        assert history["recording"] is False
-        unavailable = client.post("/api/captures/episodes", json={
-            "sourceId": "511ny-32998", "recordingId": history["recordingId"],
-            "startSeconds": 0, "endSeconds": 30,
+        history = client.get("/api/captures/511ny-32998/buffer").json()
+        assert history["bufferedSeconds"] == 0
+        assert history["history"]["maxSecondsAgo"] == 0
+        assert history["availability"] == "not_recording"
+        unavailable = client.post("/api/captures", json={
+            "cameraId": "511ny-32998", "secondsAgo": 30, "durationS": 30,
         })
         assert unavailable.status_code == 409
-        assert client.post("/api/captures/sources/not-registered/start").status_code == 404
-        observation = client.post("/api/observations", json={"captureId": "capture-missing"})
+        assert client.post("/api/captures/not-registered/recording").status_code == 404
+        monkeypatch.setenv("WORLD_API_TOKEN", "operator-test-token-" + "x" * 32)
+        client.headers["Authorization"] = "Bearer operator-test-token-" + "x" * 32
+        observation = client.post("/api/observations/extract", json={
+            "captureId": "cap_missing", "cameraId": "511ny-32998"})
         assert observation.status_code == 404
-        attempt_id = observation.json()["detail"]["attemptId"]
-        attempt = client.get(f"/api/observations/attempts/{attempt_id}").json()
-        assert attempt["status"] == "rejected"
-        assert attempt["error"]["code"] == "evidence_unavailable"
         assert client.get("/api/models/status").json()["budgets"]["charged_usd"] == 0
-        assert client.post("/api/observations", json={"captureId": "capture-missing", "apiKey": "client-secret"}).status_code == 422
+        assert client.post("/api/observations/extract", json={
+            "captureId": "cap_missing", "cameraId": "511ny-32998", "apiKey": "client-secret"}).status_code == 422
+        assert client.get("/api/contracts/element119").json()["schemaVersion"] == "element119.v1"
 
 
 def test_workshop_status_does_not_expose_key(tmp_path, monkeypatch):

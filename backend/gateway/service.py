@@ -15,7 +15,7 @@ from pydantic import BaseModel
 
 from .adapters import GenieAdapter, HTTPAdapter, reported_usage, safe_id
 from .config import GatewayConfig, backend_key
-from .contracts import (MODELS, STAGES, CallContext, CallResult, ErrorCode, GatewayError,
+from .contracts import (MODELS, STAGES, CallContext, CallResult, ErrorCode, GatewayError, GenieCallState,
                         PreparedCall, Service, canonical, digest)
 from .ledger import Ledger
 
@@ -42,6 +42,9 @@ class ModelGateway:
         self.ledger = Ledger(config)
         self.http = HTTPAdapter(client, self._key or "", config)
         self.genie = GenieAdapter(self.http, genie_connector) if genie_connector else GenieAdapter(self.http)
+        # Queue this process's calls; the ledger's limit still guards other workers.
+        # Genie stays out: the ledger's one-world rule bounds it, and a live world must not starve judges.
+        self.slots = asyncio.Semaphore(config.max_concurrency)
 
     def _input(self, value):
         """Inline, immutable inputs only: remote URLs could change between retries."""
@@ -101,6 +104,9 @@ class ModelGateway:
                         else self.config.output_tokens_per_call)
         payload = {"model": MODELS[service], "input": input_value, "store": False,
                    "generation_config": {"max_output_tokens": output_bound}}
+        if service == Service.HYDROGEN and stage == "observation":
+            # Preserve the policy verified against main's six-frame extraction.
+            payload["generation_config"]["thinking_level"] = "low"
         if service == Service.NANO_BANANA:
             if response_model:
                 raise GatewayError(ErrorCode.INVALID_INPUT)
@@ -170,11 +176,19 @@ class ModelGateway:
             if world_timeout is not None:
                 timeout = world_timeout
         attempts = 1 if call.service == Service.GENIE else self.config.max_attempts
+        world_state = (world_executor or GenieCallState()) if call.service == Service.GENIE else None
         for attempt in range(attempts):
             request_id = None
             started = time.monotonic()
             response_evidence = None
+            acquired = False
             try:
+                if call.service != Service.GENIE:
+                    try:
+                        await asyncio.wait_for(self.slots.acquire(), timeout=timeout)
+                    except TimeoutError:
+                        raise GatewayError(ErrorCode.CONCURRENCY) from None
+                    acquired = True
                 if call.service == Service.GENIE and not self.config.genie_enabled:
                     raise GatewayError(ErrorCode.DISABLED)
                 if not self._key:
@@ -195,7 +209,10 @@ class ModelGateway:
                     response_evidence = self._redact(raw)
                 async with asyncio.timeout(timeout):
                     if call.service == Service.GENIE:
-                        result = await (world_executor or self.genie).execute(call, on_id)
+                        if world_executor is not None:
+                            result = await world_executor.execute(call, on_id)
+                        else:
+                            result = await self.genie.execute(call, on_id, world_state)
                     else:
                         result = await self.http.execute(call, on_id, on_response)
                 evidence = self._redact(result.evidence)
@@ -217,16 +234,19 @@ class ModelGateway:
                     error = GatewayError(ErrorCode.CANCELLED)
                 else:
                     error = GatewayError(ErrorCode.STORAGE)
-                if (call.service == Service.GENIE and request_id
-                        and (world_executor or self.genie).termination_pending):
+                if world_state is not None and world_state.termination_pending:
                     # Preserve the unresolved-world admission latch even if caller
                     # cancellation or a storage failure interrupts finalization.
                     error = GatewayError(ErrorCode.TERMINATION)
                 try:
                     if request_id:
                         evidence = response_evidence or {"error": error.public()}
-                        result_hash = self.ledger.artifact(canonical(evidence))
                         usage = reported_usage(response_evidence.get("usage")) if response_evidence else None
+                        if world_state is not None:
+                            usage = world_state.usage
+                            evidence = {**evidence, "termination": world_state.termination,
+                                        "usage": usage.model_dump() if usage else None}
+                        result_hash = self.ledger.artifact(canonical(evidence))
                         self.ledger.finish(request_id, outcome=error.code.value,
                             latency_ms=(time.monotonic() - started) * 1000, result_hash=result_hash,
                             usage=usage, microusd=rate.usage_charge(usage) if usage else None)
@@ -241,6 +261,9 @@ class ModelGateway:
                 if not error.retryable or attempt + 1 >= attempts:
                     raise error from None
                 await asyncio.sleep(min(self.config.retry_delay_seconds, max(error.retry_after, .25 * 2 ** attempt)))
+            finally:
+                if acquired:
+                    self.slots.release()
         raise AssertionError("unreachable")
 
     def status(self) -> dict:
@@ -277,40 +300,22 @@ class ModelGateway:
                 "config_hash": self.config.config_hash,
                 "rates_expired": datetime.now(timezone.utc).date() > self.config.rates_valid_through}
 
-    def trace(self, result: CallResult, context: CallContext, *, config_id: str) -> dict:
-        """Map durable gateway evidence into the shared domain ModelTrace."""
-        from ..contracts import ModelTrace
-        row = self.ledger.get(result.request_id)
-        if (not row or row["outcome"] != "success" or row["input_hash"] != result.input_hash
-                or json.loads(row["context"]) != context.model_dump(mode="json")):
-            raise GatewayError(ErrorCode.INVALID_INPUT)
-        def timestamp(value):
-            return datetime.fromtimestamp(value, timezone.utc).isoformat().replace("+00:00", "Z")
-        return ModelTrace.model_validate({
-            "traceId": result.request_id, "requestId": result.request_id,
-            "providerRequestId": result.provider_request_id, "modelId": result.model_id,
-            "promptId": context.prompt_id, "configId": config_id, "inputSha256": result.input_hash,
-            "startedAt": timestamp(row["created_at"]), "completedAt": timestamp(row["finished_at"]),
-            "outcome": "success", "inputTokens": result.usage.input_tokens if result.usage else None,
-            "outputTokens": result.usage.output_tokens if result.usage else None,
-        }).model_dump(mode="json")
-
     def require_submission_models(self, *, episode_id: str, source_id: str, capture_id: str) -> dict:
         report = self.ledger.submission_models(episode_id, source_id, capture_id)
         if not report["ready"]:
             raise GatewayError(ErrorCode.INVALID_INPUT)
         return report
 
-    def accept_artifact(self, result: CallResult, *, artifact_id: str, artifact_sha256: str) -> str:
+    def accept_artifact(self, result: CallResult, *, artifact_id: str, artifact_sha256: str, qualifying: bool = True) -> str:
         """Qualify only after the caller durably accepts its domain artifact.
 
         The caller owns domain validation and storage. This records an immutable
         binding to its envelope hash, without repeating model calls or billing.
         """
-        if (not isinstance(artifact_id, str) or not re.fullmatch(r"[A-Za-z0-9_.:-]{1,128}", artifact_id)
+        if (type(qualifying) is not bool or not isinstance(artifact_id, str) or not re.fullmatch(r"[A-Za-z0-9_.:-]{1,128}", artifact_id)
                 or not isinstance(artifact_sha256, str) or not re.fullmatch(r"[a-f0-9]{64}", artifact_sha256)):
             raise GatewayError(ErrorCode.INVALID_INPUT)
-        return self.ledger.accept_artifact(result, artifact_id, artifact_sha256)
+        return self.ledger.accept_artifact(result, artifact_id, artifact_sha256, qualifying=qualifying)
 
     async def cancel_world(self, request_id: str) -> dict:
         """Recover a known interrupted development session without admitting new spend."""

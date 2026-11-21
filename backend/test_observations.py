@@ -1,408 +1,460 @@
+"""Scripted provider tests; fixture annotations here are not live human labels."""
 import asyncio
-from copy import deepcopy
-import hashlib
+from datetime import date
 import json
+from pathlib import Path
+import shutil
+import subprocess
 
+import httpx
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-import pytest
+from pydantic import ValidationError
 
-from backend.contracts import CaptureContext, EvidenceRef, ImageRegion
-from backend.gateway.contracts import CallResult, ErrorCode, GatewayError, Service, Usage
-from backend.observations import ExtractionOutput, ObservationError, ObservationRequest, ObservationService, router
+from backend.artifacts import ArtifactError, ArtifactStore, sha256, utcnow
+from backend.capture import CaptureStore
+from backend.contracts import ObservationBatch
+from backend.gateway import GatewayConfig, ModelGateway
+from backend.observation_api import router
+from backend.observation_contracts import ExtractRequest, Fact, ManualReview, ReinspectRequest, WireOutput
+from backend.observation_media import index_prefix, verified_prefix
+from backend.observation_review import annotation_template, failure_report, main as review_main, review_html, score_review, verified_review
+from backend.observations import accept_facts, extract, windows
+from backend.test_pipeline_helpers import png, USAGE
 
-CAPTURE = {"captureId": "cap_fixture", "sourceId": "511ny-32998", "originalMediaSha256": "a" * 64,
-           "modality": "video", "durationSeconds": 10, "allowedInterval": {"startSeconds": 0, "endSeconds": 5},
-           "receivedAt": "2026-11-21T15:00:00Z", "sourceCapturedAt": None, "sourceClock": "unknown", "clockUncertaintySeconds": None}
-TRACE = {"traceId": "trace_fixture", "requestId": "request_fixture", "providerRequestId": None,
-         "modelId": "gemini-4-hydrogen", "promptId": "prompt_fixture", "configId": "config_fixture", "inputSha256": "b" * 64,
-         "startedAt": "2026-11-21T15:00:00Z", "completedAt": "2026-11-21T15:00:01Z", "outcome": "success",
-         "inputTokens": 100, "outputTokens": 500}
-
-
-def observation(**changes):
-    return {"category": "crossing", "feature": "crossing_markings", "state": "visible", "countLower": None,
-            "countUpper": None, "confidence": .8, "unknownReason": None, "provenance": "observed",
-            "evidence": [{"frame": 0, "region": {"x": .1, "y": .2, "width": .2, "height": .3}}], "eventType": None, **changes}
+BOX = {'kind':'box', 'x':.1, 'y':.2, 'w':.3, 'h':.4}
 
 
-class Captures:
-    def __init__(self, snapshot=False):
-        value = deepcopy(CAPTURE)
-        if snapshot:
-            value.update(modality="snapshot", durationSeconds=0, allowedInterval={"startSeconds": 0, "endSeconds": 0})
-        self.capture = CaptureContext.model_validate(value)
-        self.pins = []
-
-    def capture_context(self, capture_id):
-        assert capture_id == self.capture.captureId
-        return self.capture
-
-    def pin(self, capture_id, job_id):
-        self.pins.append((capture_id, job_id))
+def fact(meta, **changes):
+    frame = meta['frames'][0]
+    return {'kind':'anchor', 'semanticClass':'crosswalk', 'label':'Visible crossing', 'region':BOX,
+        'time':{'startS':frame['mediaTimeS'], 'endS':frame['mediaTimeS']}, 'frameIndices':[frame['frameIndex']],
+        'visibility':'visible', 'state':'unknown', 'count':{'lower':None,'upper':None},
+        'confidence':.8, 'provenance':'observed', **changes}
 
 
-class Frame:
-    def __init__(self, capture, time, index, crop):
-        self.capture, self.time_seconds, self.frame_index, self.region = capture, time, index, crop
-        self.data, self.mime_type = b"fixture-source-image-" + str(index).encode(), "image/jpeg"
+class Provider:
+    def __init__(self, outputs=None):
+        self.outputs = list(outputs or [lambda m: [fact(m)]])
+        self.requests = []
 
-    def to_evidence_ref(self, region=None):
-        roi = self.region
-        if region:
-            roi = ImageRegion(x=roi.x + region.x * roi.width, y=roi.y + region.y * roi.height,
-                              width=region.width * roi.width, height=region.height * roi.height)
-        return EvidenceRef(captureId=self.capture.captureId, originalMediaSha256=self.capture.originalMediaSha256,
-                           timeSeconds=self.time_seconds, frameIndex=self.frame_index, region=roi)
-
-
-class Prepared:
-    def __init__(self, capture, frames):
-        self.capture, self.frames = capture, frames
-
-    def metadata(self):
-        return {"frameCount": len(self.frames), "frames": [{"timeSeconds": f.time_seconds,
-                 "sha256": hashlib.sha256(f.data).hexdigest()} for f in self.frames]}
-
-
-async def prepare(captures, capture_id, *, window=None, crop=None, **kwargs):
-    capture = captures.capture_context(capture_id)
-    roi = crop or ImageRegion(x=0, y=0, width=1, height=1)
-    times = [0] if capture.modality == "snapshot" else [0, 1, 2, 3, 4]
-    if window:
-        times = [t for t in times if window.startSeconds <= t < window.endSeconds]
-        capture = capture.model_copy(update={"allowedInterval": window})
-    return Prepared(capture, [Frame(capture, time, index, roi) for index, time in enumerate(times)])
-
-
-class Gateway:
-    def __init__(self, observations=None, error=None):
-        self.observations, self.error, self.calls = observations or [observation()], error, []
-        self.accepted = []
-
-    async def generate(self, service, *, input_value, context, response_model, **kwargs):
-        assert service == Service.HYDROGEN
-        assert response_model is ExtractionOutput
-        assert context.original_media_sha256 == (CAPTURE["originalMediaSha256"],)
-        assert context.episode_id == context.capture_id
-        assert kwargs["qualify"] is False
-        self.calls.append((service, {"input": input_value}, kwargs))
-        if self.error:
-            raise self.error
-        return CallResult("request_fixture", None, "gemini-4-hydrogen", "b" * 64, "c" * 64,
-                          {"observations": self.observations, "unknowns": ["Signal timing is unknown."]},
-                          Usage(input_tokens=100, output_tokens=500, total_tokens=600), "reported_usage_upper_bound")
-
-    def trace(self, result, context, **kwargs):
-        return TRACE.copy()
-
-    def accept_artifact(self, result, **binding):
-        self.accepted.append(binding)
-
-
-def service(tmp_path, *, snapshot=False, observations=None, error=None):
-    return ObservationService(Captures(snapshot), Gateway(observations, error), tmp_path,
-                              evidence_preparer=prepare)
-
-
-def test_observations_use_server_evidence_real_trace_and_persist_across_restart(tmp_path):
-    async def run():
-        worker = service(tmp_path)
-        result = await worker.create(ObservationRequest(captureId="cap_fixture"))
-        assert result.capture.originalMediaSha256 == CAPTURE["originalMediaSha256"]
-        assert result.trace.modelId == "gemini-4-hydrogen"
-        assert result.observations[0].value == "crossing_markings: visible"
-        assert worker.gateway.accepted[0]["artifact_id"] == result.id
-        assert worker.captures.pins
-        payload = worker.gateway.calls[0][1]
-        assert sum(item["type"] == "image" for item in payload["input"]) == 5
-        assert "Do not emit temporal events" in payload["input"][0]["text"]
-        restarted = ObservationService(worker.captures, worker.gateway, tmp_path, evidence_preparer=prepare)
-        assert restarted.get(result.id) == result
-        attempt = restarted.attempt(restarted.evidence(result.id)["attemptId"])
-        assert attempt["status"] == "accepted"
-        assert attempt["trace"]["requestId"] == "request_fixture"
-    asyncio.run(run())
-
-
-def test_crop_reinspection_maps_actual_frame_regions_to_original_image(tmp_path):
-    async def run():
-        worker = service(tmp_path)
-        result = await worker.create(ObservationRequest(captureId="cap_fixture", crop=ImageRegion(x=.25,y=.2,width=.5,height=.5),
-                                                       window={"startSeconds": 2, "endSeconds": 4}))
-        evidence = result.observations[0].evidence[0]
-        assert evidence.timeSeconds == 2
-        assert evidence.region.x == pytest.approx(.3)
-        assert evidence.region.y == pytest.approx(.3)
-        assert evidence.region.width == pytest.approx(.1)
-        assert worker.get(result.id).capture.allowedInterval.startSeconds == 2
-    asyncio.run(run())
-
-
-@pytest.mark.parametrize("bad", [
-    observation(evidence=[{"frame": 999, "region": None}]),
-    observation(category="event", eventType="entry", evidence=[{"frame": 0, "region": None}, {"frame": 1, "region": None}]),
-    observation(state="unknown", unknownReason=None),
-    observation(category="count", feature="vehicle", countLower=3, countUpper=1),
-    {**observation(), "value": "Traffic flows at 15 vehicles per minute"},
-    observation(state="moving"),
-    observation(evidence=[{"frame": 0, "region": {"x": .9, "y": 0, "width": .5, "height": .5}}]),
-])
-def test_invalid_outputs_are_rejected_and_attempts_preserved(tmp_path, bad):
-    async def run():
-        worker = service(tmp_path, observations=[bad])
-        with pytest.raises(ObservationError) as caught:
-            await worker.create(ObservationRequest(captureId="cap_fixture"))
-        record = worker.attempt(caught.value.attempt_id)
-        assert record["status"] == "rejected"
-        assert record["trace"] == TRACE
-        assert not list((tmp_path / "artifacts").glob("*.json"))
-    asyncio.run(run())
-
-
-def test_snapshot_supports_instantaneous_counts_but_rejects_temporal_events(tmp_path):
-    async def run():
-        worker = service(tmp_path, snapshot=True, observations=[observation(category="count", feature="vehicle", countLower=2, countUpper=4)])
-        result = await worker.create(ObservationRequest(captureId="cap_fixture"))
-        assert "instantaneous visible count [2, 4]" in result.observations[0].value
-        assert result.observations[0].evidence[0].timeSeconds == 0
-        with pytest.raises(ObservationError, match="invalid_event_interval"):
-            await worker.create(ObservationRequest(captureId="cap_fixture", includeEvents=True, ownedInterval={"startSeconds": 0, "endSeconds": 1}))
-    asyncio.run(run())
-
-
-def test_events_have_non_overlapping_persistent_ownership_and_no_duplicate_ids(tmp_path):
-    event = observation(category="event", feature="vehicle", eventType="crossing",
-                        evidence=[{"frame": 0, "region": None}, {"frame": 1, "region": None}])
-    async def run():
-        worker = service(tmp_path, observations=[event, event])
-        request = ObservationRequest(captureId="cap_fixture", includeEvents=True, ownedInterval={"startSeconds": 0, "endSeconds": 2})
-        result = await worker.create(request)
-        assert len(result.observations) == 1
-        restarted = ObservationService(worker.captures, worker.gateway, tmp_path, evidence_preparer=prepare)
-        with pytest.raises(ObservationError, match="event_interval_owned"):
-            await restarted.create(request)
-        assert len(worker.gateway.calls) == 1
-    asyncio.run(run())
-
-
-def test_event_crossing_owned_interval_boundary_is_rejected(tmp_path):
-    event = observation(category="event", feature="vehicle", eventType="crossing",
-                        evidence=[{"frame": 0, "region": None}, {"frame": 2, "region": None}])
-    async def run():
-        worker = service(tmp_path, observations=[event])
-        with pytest.raises(ObservationError, match="unowned_temporal_event"):
-            await worker.create(ObservationRequest(captureId="cap_fixture", includeEvents=True, ownedInterval={"startSeconds": 0, "endSeconds": 2}))
-    asyncio.run(run())
-
-
-def test_failures_are_sanitized_and_retain_model_trace_id(tmp_path):
-    async def run():
-        failure = GatewayError(ErrorCode.QUOTA, request_id="request_failed")
-        worker = service(tmp_path, error=failure)
-        with pytest.raises(ObservationError) as caught:
-            await worker.create(ObservationRequest(captureId="cap_fixture"))
-        value = worker.attempt(caught.value.attempt_id)
-        assert value["error"] == {"code": "model_quota_exceeded"}
-        assert value["gatewayRequestId"] == "request_failed"
-    asyncio.run(run())
-
-
-def test_observation_router_returns_artifact_and_blocks_client_supplied_provenance(tmp_path):
-    app = FastAPI()
-    app.state.observations = service(tmp_path)
-    app.include_router(router)
-    with TestClient(app) as client:
-        rejected = client.post('/api/observations', json={"captureId": "cap_fixture", "trace": TRACE})
-        assert rejected.status_code == 422
-        accepted = client.post('/api/observations', json={"captureId": "cap_fixture"})
-        assert accepted.status_code == 201
-        assert accepted.headers['X-Observation-Attempt-Id']
-        artifact = accepted.json()
-        assert client.get('/api/observations/' + artifact['id']).json() == artifact
-        assert client.get('/api/observations/' + artifact['id'] + '/evidence').status_code == 200
-        cropped = client.post('/api/observations', json={"captureId": "cap_fixture", "window": {"startSeconds": 2, "endSeconds": 4}})
-        assert cropped.status_code == 201
-        narrowed = cropped.json()
-        assert narrowed['capture']['allowedInterval'] == {'startSeconds': 2, 'endSeconds': 4}
-        assert client.get('/api/observations/' + narrowed['id']).json() == narrowed
-
-
-def test_model_cannot_reference_frames_outside_targeted_window(tmp_path):
-    async def run():
-        worker = service(tmp_path, observations=[observation(evidence=[{'frame': 2, 'region': None}])])
-        with pytest.raises(ObservationError, match='unknown_evidence_frame'):
-            await worker.create(ObservationRequest(captureId='cap_fixture', window={'startSeconds': 2, 'endSeconds': 4}))
-        assert not list((tmp_path / 'artifacts').glob('*.json'))
-    asyncio.run(run())
-
-
-def test_structured_schema_cannot_encode_flow_or_trajectory_values():
-    schema = ExtractionOutput.model_json_schema()['$defs']['ExtractedObservation']['properties']
-    assert 'value' not in schema
-    assert 'description' not in schema
-    assert schema['state']['enum'] == ['visible','partially_occluded','occluded','unknown','red','amber','green','unlit']
-
-
-def test_preprocessing_concurrency_is_bounded_and_cancel_releases_slot(tmp_path):
-    async def run():
-        entered = asyncio.Event()
-        release = asyncio.Event()
-        async def slow_prepare(*args, **kwargs):
-            entered.set()
-            await release.wait()
-            return await prepare(*args, **kwargs)
-        worker = ObservationService(Captures(), Gateway(), tmp_path, evidence_preparer=slow_prepare, concurrency=1)
-        first = asyncio.create_task(worker.create(ObservationRequest(captureId="cap_fixture")))
-        await entered.wait()
-        with pytest.raises(ObservationError, match="busy") as blocked:
-            await worker.create(ObservationRequest(captureId="cap_fixture"))
-        assert worker.attempt(blocked.value.attempt_id)["error"]["code"] == "busy"
-        first.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await first
-        release.set()
-        result = await worker.create(ObservationRequest(captureId="cap_fixture"))
-        assert result.observations
-        assert len(worker.gateway.calls) == 1
-        attempts = [json.loads(path.read_text()) for path in (tmp_path / 'attempts').glob('*.json')]
-        assert {record['status'] for record in attempts} == {'cancelled', 'rejected', 'accepted'}
-    asyncio.run(run())
-
-
-def test_occlusion_produces_explicit_unknown_instead_of_actor_disappearance(tmp_path):
-    async def run():
-        worker = service(tmp_path, observations=[observation(category='signal', feature='traffic_signal', state='occluded',
-                         confidence=None, unknownReason='The signal face is hidden behind a truck.')])
-        result = await worker.create(ObservationRequest(captureId='cap_fixture'))
-        assert result.observations[0].value is None
-        assert result.observations[0].unknownReason
-        assert result.observations[0].evidence
-    asyncio.run(run())
-
-
-@pytest.mark.parametrize('field', ['evidence', 'attemptId'])
-def test_envelope_hash_covers_source_metadata_and_attempt_link(tmp_path, field):
-    async def run():
-        worker = service(tmp_path)
-        artifact = await worker.create(ObservationRequest(captureId='cap_fixture'))
-        path = tmp_path / 'artifacts' / f'{artifact.id}.json'
-        value = json.loads(path.read_text())
-        value[field] = {'frameCount': 999} if field == 'evidence' else 'attempt_other'
-        path.write_text(json.dumps(value))
-        with pytest.raises(ObservationError, match='integrity'):
-            worker.get(artifact.id)
-    asyncio.run(run())
-
-
-def test_restart_recovers_finished_artifact_but_releases_interrupted_event_owner(tmp_path):
-    event = observation(category='event', feature='vehicle', eventType='crossing',
-                        evidence=[{'frame': 0, 'region': None}, {'frame': 1, 'region': None}])
-    async def run():
-        worker = service(tmp_path, observations=[event])
-        request = ObservationRequest(captureId='cap_fixture', includeEvents=True, ownedInterval={'startSeconds': 0, 'endSeconds': 2})
-        artifact = await worker.create(request)
-        attempt_id = worker.evidence(artifact.id)['attemptId']
-        record = worker.attempt(attempt_id)
-        record.update(status='running', artifactId=None, completedAt=None)
-        worker._record(record)
-        interrupted = deepcopy(record)
-        interrupted.update(attemptId='attempt_interrupted', trace=None)
-        interrupted['request']['ownedInterval'] = {'startSeconds': 2, 'endSeconds': 4}
-        worker._record(interrupted)
-        restarted = ObservationService(worker.captures, worker.gateway, tmp_path, evidence_preparer=prepare)
-        assert restarted.attempt(attempt_id)['status'] == 'accepted'
-        assert restarted.attempt(attempt_id)['artifactId'] == artifact.id
-        assert restarted.attempt('attempt_interrupted')['status'] == 'interrupted'
-        with pytest.raises(ObservationError, match='event_interval_owned'):
-            await restarted.create(request)
-        restarted.gateway.observations = [observation()]
-        second = await restarted.create(ObservationRequest(captureId='cap_fixture', includeEvents=True, ownedInterval={'startSeconds': 2, 'endSeconds': 4}))
-        assert second.id != artifact.id
-    asyncio.run(run())
-
-
-@pytest.mark.parametrize("bad", [
-    observation(category="count", feature="vehicle", state="unknown", countLower=0, countUpper=0, unknownReason="Hidden"),
-    observation(category="count", feature="vehicle", state="occluded", countLower=2, countUpper=4, unknownReason="Hidden"),
-    observation(category="signal", feature="vehicle"),
-    observation(category="lane", feature="pedestrian"),
-    observation(category="crossing", feature="building"),
-])
-def test_unobservable_counts_and_mismatched_features_are_rejected(bad):
-    from pydantic import ValidationError
-    with pytest.raises(ValidationError):
-        ExtractionOutput.model_validate({"observations": [bad], "unknowns": []})
-
-
-@pytest.mark.parametrize("damaged", ["{", "[]", '{"artifact":{}}'])
-def test_damaged_artifact_returns_integrity_error(tmp_path, damaged):
-    async def run():
-        worker = service(tmp_path)
-        artifact = await worker.create(ObservationRequest(captureId="cap_fixture"))
-        (tmp_path / "artifacts" / f"{artifact.id}.json").write_text(damaged)
-        with pytest.raises(ObservationError, match="integrity") as caught:
-            worker.get(artifact.id)
-        assert caught.value.status == 409
-    asyncio.run(run())
-
-
-def test_corrupt_attempt_cannot_silently_release_event_ownership_on_restart(tmp_path):
-    async def run():
-        worker = service(tmp_path)
-        (tmp_path / "attempts" / "attempt_damaged.json").write_text("{")
-        restarted = ObservationService(worker.captures, worker.gateway, tmp_path, evidence_preparer=prepare)
-        with pytest.raises(ObservationError, match="integrity"):
-            await restarted.create(ObservationRequest(captureId="cap_fixture"))
-        assert not worker.gateway.calls
-    asyncio.run(run())
-
-
-@pytest.mark.parametrize("frame", [0, 99])
-def test_observation_runs_through_shared_gateway_and_durable_trace(tmp_path, frame):
-    """Exercise the merged adapter boundary, rather than only a service-shaped stub."""
-    from datetime import date
-    import httpx
-    from backend.gateway import GatewayConfig, ModelGateway
-
-    calls = []
-
-    def provider(request):
-        calls.append(request)
+    def handler(self, request):
         body = json.loads(request.content)
-        assert body["model"] == "gemini-4-hydrogen"
-        assert body["store"] is False
-        assert "maxItems" not in json.dumps(body["response_format"]["schema"])
-        return httpx.Response(200, json={
-            "status": "completed", "model": "gemini-4-hydrogen",
-            "steps": [{"type": "model_output", "content": [{"type": "text", "text": json.dumps({
-                "observations": [observation(evidence=[{"frame": frame, "region": None}])],
-                "unknowns": ["Metric geometry is unknown."]})}]}],
-            "usage": {"total_input_tokens": 100, "total_output_tokens": 200, "total_tokens": 300},
-        })
+        self.requests.append(body)
+        meta = json.loads(body['input'][0]['text'])
+        selected = self.outputs.pop(0) if len(self.outputs)>1 else self.outputs[0]
+        if isinstance(selected, int):
+            return httpx.Response(selected, json={'error':'scripted failure'})
+        content = selected(meta)
+        output = {'captureId':meta['captureId'],'sourceId':meta['sourceId'], 'prefixSha256':meta['prefixSha256'],
+                  'facts': content, 'unknowns':[{'field':'identity','reason':'Not established'}]} if isinstance(content,list) else content
+        return httpx.Response(200,json={'id':f'hydrogen-test-{len(self.requests)}','status':'completed','usage':USAGE,
+            'steps':[{'type':'model_output','content':[{'type':'text','text':json.dumps(output)}]}]})
 
+
+def setup(tmp_path):
+    captures, store = CaptureStore(tmp_path/'captures'), ArtifactStore(tmp_path/'artifacts')
+    manifest = captures.create_snapshot_episode('dot-test', png(size=(200,100)), 'image/png', utcnow(),
+                                                'https://example.invalid/test-fixture')
+    return captures, store, manifest
+
+
+async def perform(tmp_path, captures, store, manifest, provider, **kwargs):
+    async with httpx.AsyncClient(transport=httpx.MockTransport(provider.handler)) as client:
+        gateway = ModelGateway(GatewayConfig(data_dir=tmp_path/'ledger', max_attempts=1,
+            rates_valid_through=date(2030,1,1)), client, api_key='observation-test-secret')
+        return await extract(gateway, store, captures, ExtractRequest(captureId=manifest['id'],cameraId=manifest['cameraId'],
+            startS=kwargs.pop('start',0),endS=kwargs.pop('end',None)), **kwargs)
+
+
+def test_snapshot_has_real_gateway_trace_exact_pixels_and_reviewable_provenance(tmp_path):
+    captures, store, manifest = setup(tmp_path)
+    provider = Provider()
+    report = asyncio.run(perform(tmp_path,captures,store,manifest,provider))
+    assert report['status']=='completed' and report['manualReview']=='pending_human_annotations'
+    row = report['facts'][0]
+    evidence = row['evidence'][0]
+    assert evidence['captureId']==manifest['id'] and evidence['sourceId']=='dot-test'
+    assert evidence['mediaTimeS']==0 and evidence['frameIndex']==0
+    assert evidence['prefixSha256']==manifest['files']['prefix']['sha256']
+    assert report['id'] in captures.pins(manifest['id'])
+    batch = ObservationBatch.model_validate(store.get('observations', report['batchIds'][0]))
+    assert not batch.motionSupported
+    assert batch.modelCall.requestId.startswith('hydrogen-test-') and batch.modelCall.outcome=='ok'
+    assert evidence['frameSha256'] in batch.modelCall.inputHashes
+    assert batch.anchors[0].id == row['id'].replace('ob_','anc_',1)
+    assert store.get('observation_evidence',batch.id)['facts']==report['facts']
+    assert report['windows'][0]['gatewayRequestId']
+    assert provider.requests[0]['input'][2]['type']=='image'
+    assert provider.requests[0]['generation_config']['thinking_level']=='low'
+    assert store.get('extractions',report['id'])==report
+    assert len(store.list('extraction_attempts'))==2
+    assert '<img src="data:image/png;base64,' in review_html(store,report)
+    assert annotation_template(report)['annotations']==[]
+
+
+def test_wire_schema_preserves_fixed_discriminator_values():
+    schema=WireOutput.model_json_schema()
+    assert schema['$defs']['BoxRegion']['properties']['kind']['enum']==['box']
+    assert 'const' not in schema['$defs']['BoxRegion']['properties']['kind']
+
+
+def test_permanent_budget_or_quota_failure_does_not_retry_later_windows(tmp_path,video):
+    captures,store,_=setup(tmp_path)
+    manifest=video_capture(captures,video)
+    provider=Provider([429,lambda m:[fact(m)]])
+    report=asyncio.run(perform(tmp_path,captures,store,manifest,provider))
+    assert len(provider.requests)==1 and report['metrics']['unprocessedWindows']==1
+    assert report['status']=='failed' and report['metrics']['attempts']==1
+
+
+@pytest.mark.parametrize('change', ['capture','source','hash','frame','time','movement','flow','identity'])
+def test_invalid_evidence_is_retained_as_failure_and_never_published(tmp_path, change):
+    captures, store, manifest = setup(tmp_path)
+    def output(m):
+        f=fact(m)
+        out={'captureId':m['captureId'],'sourceId':m['sourceId'],'prefixSha256':m['prefixSha256'],'facts':[f],'unknowns':[]}
+        if change=='capture': out['captureId']='cap_other-0001'
+        if change=='source': out['sourceId']='different-camera'
+        if change=='hash': out['prefixSha256']='sha256:'+'0'*64
+        if change=='frame': f['frameIndices']=[9]
+        if change=='time': f['time']={'startS':0,'endS':1}
+        if change=='movement': f.update(kind='event',state='crossing',provenance='derived')
+        if change=='flow': f['flowPerHour']=400
+        if change=='identity': f['persistentIdentity']='same-person'
+        return out
+    report=asyncio.run(perform(tmp_path,captures,store,manifest,Provider([output])))
+    assert report['status']=='failed' and report['metrics']['failures']==1 and not report['batchIds']
+    assert report['windows'][0]['modelCall']['outcome']=='invalid_output'
+    assert report['windows'][0]['modelCall']['costUsd'] > 0
+    assert report['windows'][0]['gatewayRequestId']
+    assert not store.list('observations')
+
+
+@pytest.mark.parametrize('changes', [
+    {'kind':'signal','semanticClass':'signal','visibility':'partial','state':'green'},
+    {'kind':'count','semanticClass':'vehicle','visibility':'unobservable','count':{'lower':1,'upper':2}},
+    {'kind':'count','semanticClass':'vehicle','count':{'lower':5,'upper':3}},
+    {'frameIndices':[0.5]},
+    {'region':{'kind':'box','x':.9,'y':0,'w':.2,'h':1}},
+    {'confidence':float('nan')},
+    {'provenance':'generated'},
+])
+def test_structural_abstention_and_geometry_guards(changes):
+    with pytest.raises(ValidationError):
+        Fact.model_validate(fact({'frames':[{'frameIndex':0,'mediaTimeS':0}]},**changes))
+
+
+def test_abstentions_and_provider_failures_are_visible_in_denominators(tmp_path):
+    captures,store,manifest=setup(tmp_path)
+    def unknown(m):
+        return [fact(m,kind='signal',semanticClass='signal',visibility='unobservable',state='unknown'),
+                fact(m,kind='count',semanticClass='vehicle',visibility='unobservable')]
+    report=asyncio.run(perform(tmp_path,captures,store,manifest,Provider([unknown])))
+    assert report['status']=='abstained' and report['metrics']['abstentions']==2
+    assert store.get('observations',report['batchIds'][0])['observations']==[]
+    failed=asyncio.run(perform(tmp_path,captures,store,manifest,Provider([429])))
+    assert failed['status']=='failed' and failed['windows'][0]['modelCall']['outcome']=='quota'
+    assert len(store.list('extractions'))==2
+
+
+def test_reinspection_preserves_capture_remaps_crop_and_is_bounded(tmp_path):
+    captures,store,manifest=setup(tmp_path)
+    provider=Provider()
+    parent=asyncio.run(perform(tmp_path,captures,store,manifest,provider))
+    ask=ReinspectRequest(focus='anchors',time={'startS':0,'endS':0},roi={'kind':'box','x':.2,'y':.1,'w':.5,'h':.8})
+    a=asyncio.run(perform(tmp_path,captures,store,manifest,provider,parent=parent,reinspection=ask))
+    e=a['facts'][0]['evidence'][0]
+    assert e['roi']['x']==pytest.approx(.25) and e['roi']['y']==pytest.approx(.26)
+    assert e['frameSha256']!=e['modelImageSha256']
+    assert e['captureId']==parent['captureId'] and e['prefixSha256']==parent['prefixSha256']
+    asyncio.run(perform(tmp_path,captures,store,manifest,provider,parent=parent,reinspection=ask))
+    with pytest.raises(ArtifactError,match='already used'):
+        asyncio.run(perform(tmp_path,captures,store,manifest,provider,parent=parent,reinspection=ask))
+    with pytest.raises(ArtifactError,match='recursively'):
+        asyncio.run(perform(tmp_path,captures,store,manifest,provider,parent=a,reinspection=ask))
+    assert len(provider.requests)==3
+
+
+def test_wrong_source_and_out_of_prefix_selection_never_calls_model(tmp_path):
+    captures,store,manifest=setup(tmp_path)
+    provider=Provider()
+    with pytest.raises(ArtifactError):
+        asyncio.run(perform(tmp_path,captures,store,manifest,provider,end=1))
+    from backend.capture import SceneMismatch
+    with pytest.raises(SceneMismatch):
+        verified_prefix(captures,manifest['id'],'other-camera')
+    assert not provider.requests
+
+
+@pytest.fixture(scope='module')
+def video(tmp_path_factory):
+    if not shutil.which('ffmpeg') or not shutil.which('ffprobe'):
+        pytest.skip('ffmpeg required for real frame-index decoding tests')
+    target=tmp_path_factory.mktemp('observation_video')/'fixture.ts'
+    subprocess.run(['ffmpeg','-v','error','-f','lavfi','-i','testsrc2=size=160x90:rate=6','-t','8',
+                    '-c:v','mpeg2video','-f','mpegts',str(target)],capture_output=True,check=True,timeout=30)
+    holdout=target.with_name('holdout.ts')
+    subprocess.run(['ffmpeg','-v','error','-f','lavfi','-i','color=c=red:size=160x90:rate=6','-t','2',
+                    '-c:v','mpeg2video','-f','mpegts',str(holdout)],capture_output=True,check=True,timeout=30)
+    return target.read_bytes(), holdout.read_bytes()
+
+
+def video_capture(captures,video):
+    # Both partitions are real decodable fixtures with explicit byte boundaries.
+    # Isolation checks still ensure no holdout bytes/timeline are used by extraction.
+    prefix,holdout=video
+    segment = {'durationS':8, 'bytes':len(prefix), 'sha256':sha256(prefix)}
+    held_segment = {'durationS':2, 'bytes':len(holdout), 'sha256':sha256(holdout)}
+    return captures._write_episode(camera_id='511ny-32998',source_kind='hls',media_type='video/mp2t',ext='ts',
+        prefix_bytes=prefix,holdout_bytes=holdout,segments={'prefix':[segment],'holdout':[held_segment]},
+        prefix_duration=8,holdout_duration=2,received=(utcnow(),utcnow()),source_clock='unknown',request={},labels=[])
+
+
+def test_video_indexes_exact_frames_and_never_reads_suffix_into_model(tmp_path,video):
+    captures,store,_=setup(tmp_path)
+    manifest=video_capture(captures,video)
+    provider=Provider()
+    report=asyncio.run(perform(tmp_path,captures,store,manifest,provider))
+    assert report['status']=='completed' and len(report['windows'])==2
+    assert all(w['motionSupported'] for w in report['windows'])
+    assert all('held-out-secret' not in json.dumps(r) for r in provider.requests)
+    assert manifest['files']['holdout']['sha256'] not in json.dumps(provider.requests)
+    assert all(e['mediaTimeS']<8 for f in report['facts'] for e in f['evidence'])
+    assert all(e['frameIndex']<manifest['frameCount'] for f in report['facts'] for e in f['evidence'])
+    assert len(set(report['batchIds']))==2
+    with pytest.raises(ArtifactError):
+        asyncio.run(perform(tmp_path,captures,store,manifest,provider,end=9))
+
+
+def test_event_ownership_and_uncertainty_do_not_double_count():
+    from backend.observation_contracts import HydrogenOutput
+    manifest={'id':'cap_test-0001','cameraId':'camera-test','files':{'prefix':{'sha256':'sha256:'+'a'*64}}}
+    frames=[{'id':f'frame_test-000{i}','frameIndex':i,'mediaTimeS':t,'frameSha256':'sha256:'+'b'*64} for i,t in enumerate([4.,5.,6.,7.])]
+    images=[{'sha256':'sha256:'+'b'*64,'roi':{'kind':'box','x':0,'y':0,'w':1,'h':1}}]*4
+    meta={'frames':frames}
+    def output(start,end,indices):
+        return HydrogenOutput(captureId=manifest['id'],sourceId=manifest['cameraId'],prefixSha256=manifest['files']['prefix']['sha256'],
+            facts=[fact(meta,kind='event',state='crossing',provenance='derived',semanticClass='pedestrian',
+                        time={'startS':start,'endS':end},frameIndices=indices)])
+    w=windows(0,8)
+    first=accept_facts(output(4,5,[0,1]),manifest,w[0],frames,images,True,[])
+    assert first[0]['disposition']=='accepted'
+    duplicate=accept_facts(output(4,5,[0,1]),manifest,w[1],frames,images,True,first)
+    assert duplicate[0]['disposition']=='duplicate'
+    uncertain=accept_facts(output(5,7,[1,3]),manifest,w[1],frames,images,True,first)
+    assert uncertain[0]['disposition']=='boundary_uncertain'
+
+
+def test_reinspection_marks_parent_event_duplicate_instead_of_counting_again(tmp_path,video):
+    captures,store,_=setup(tmp_path)
+    manifest=video_capture(captures,video)
+    def event(meta):
+        left,right=meta['frames'][:2]
+        return [fact(meta,kind='event',semanticClass='pedestrian',state='crossing',provenance='derived',
+                     frameIndices=[left['frameIndex'],right['frameIndex']],
+                     time={'startS':left['mediaTimeS'],'endS':right['mediaTimeS']})]
+    provider=Provider([event])
+    parent=asyncio.run(perform(tmp_path,captures,store,manifest,provider))
+    ask=ReinspectRequest(focus='events',time={'startS':0,'endS':3},roi={'kind':'box','x':0,'y':0,'w':1,'h':1})
+    child=asyncio.run(perform(tmp_path,captures,store,manifest,provider,parent=parent,reinspection=ask,end=3))
+    assert child['metrics']['duplicates']==1 and child['metrics']['acceptedFacts']==0
+    assert child['facts'][0]['duplicateOf'] in {row['id'] for row in parent['facts']}
+
+
+def test_manual_review_reports_errors_and_does_not_hide_model_abstention(tmp_path):
+    captures,store,manifest=setup(tmp_path)
+    provider=Provider([lambda m:[fact(m,kind='count',semanticClass='vehicle',count={'lower':1,'upper':2}),
+                               fact(m,kind='signal',semanticClass='signal',visibility='unobservable')]])
+    report=asyncio.run(perform(tmp_path,captures,store,manifest,provider))
+    frames=report['windows'][0]['frameIds']
+    review=ManualReview(**{**annotation_template(report),'reviewer':'fixture-reviewer','reviewedOriginalPixels':True,'annotations':[
+        {'kind':'count','semanticClass':'vehicle','time':{'startS':0,'endS':0},'region':BOX,'frameIds':frames,'present':'yes','count':{'lower':4,'upper':4}},
+        {'kind':'signal','semanticClass':'signal','time':{'startS':0,'endS':0},'region':BOX,'frameIds':frames,'present':'yes','state':'red'}]})
+    result=score_review(store,report,review)
+    assert result['counts']=={'count_error':1,'model_abstained':1}
+    assert result['extractionMetrics']['abstentions']==1
+    with pytest.raises(ArtifactError):
+        score_review(store,report,review.model_copy(update={'prefixSha256':'sha256:'+'0'*64}))
+
+
+def test_api_requires_operator_auth_and_keeps_original_pixels_next_to_facts(tmp_path,monkeypatch):
+    captures,store,manifest=setup(tmp_path)
+    provider=Provider([lambda m:[fact(m,label='<script>unsafe</script>')]])
+    report=asyncio.run(perform(tmp_path,captures,store,manifest,provider))
+    app=FastAPI()
+    app.state.artifacts=store
+    app.include_router(router)
+    monkeypatch.setenv('WORLD_API_TOKEN','x'*32)
+    with TestClient(app) as client:
+        path=f'/api/observations/extractions/{report["id"]}'
+        assert client.get(path).status_code==401
+        auth={'Authorization':'Bearer '+'x'*32}
+        assert client.get(path,headers=auth).json()['captureId']==manifest['id']
+        page=client.get(path+'/review',headers=auth)
+        assert page.status_code==200 and '&lt;script&gt;' in page.text and '<script>' not in page.text
+        assert client.get(path+'/frames/frame_not-in-job',headers=auth).status_code==403
+        frame=report['windows'][0]['frameIds'][0]
+        assert client.get(path+'/frames/'+frame,headers=auth).content==png(size=(200,100))
+        assert client.get(path+'/failure-report',headers=auth).json()['humanAccuracy'] is None
+        assert client.get(path+'/reviews',headers=auth).json()['status']=='pending_human_annotations'
+        body=manual_review(report).model_dump(mode='json')
+        assert client.post(path+'/annotations',json=body).status_code==401
+        submitted=client.post(path+'/annotations',json=body,headers=auth)
+        assert submitted.status_code==200
+        review_id=submitted.json()['id']
+        assert client.get(path+'/reviews/'+review_id,headers=auth).json()['sha256']==submitted.json()['sha256']
+        assert len(client.get(path+'/reviews',headers=auth).json()['reviews'])==1
+
+
+def test_cancellation_retains_trace_failure_and_pinned_originals(tmp_path):
+    captures,store,manifest=setup(tmp_path)
     async def run():
-        async with httpx.AsyncClient(transport=httpx.MockTransport(provider)) as client:
-            gateway = ModelGateway(GatewayConfig(data_dir=tmp_path / "gateway", max_attempts=1,
-                rates_valid_through=date(2030, 1, 1)), client, api_key="isolated-test-key")
-            worker = ObservationService(Captures(), gateway, tmp_path / "observations", evidence_preparer=prepare)
-            if frame == 99:
-                with pytest.raises(ObservationError, match="unknown_evidence_frame"):
-                    await worker.create(ObservationRequest(captureId="cap_fixture"))
-                with gateway.ledger.connection() as database:
-                    row = database.execute("SELECT outcome,qualifying FROM attempts").fetchone()
-                assert row["outcome"] == "success" and row["qualifying"] == 0
-                assert not list((tmp_path / "observations" / "artifacts").glob("*.json"))
-                return
-            artifact = await worker.create(ObservationRequest(captureId="cap_fixture"))
-            assert artifact.trace.modelId == "gemini-4-hydrogen"
-            assert artifact.trace.inputSha256 == hashlib.sha256(calls[0].content).hexdigest()
-            assert artifact.trace.inputTokens == 100
-            assert artifact.trace.outputTokens == 200
-            assert artifact.trace.providerRequestId is None
-            assert artifact.trace.startedAt <= artifact.trace.completedAt
-            assert worker.get(artifact.id) == artifact
-            assert gateway.ledger.get(artifact.trace.requestId)["qualifying"] == 1
-            assert gateway.status()["budgets"]["charged_usd"] > 0
-            assert len(calls) == 1
+        started=asyncio.Event()
+        async def hanging(request):
+            started.set()
+            await asyncio.sleep(10)
+        async with httpx.AsyncClient(transport=httpx.MockTransport(hanging)) as http:
+            gateway=ModelGateway(GatewayConfig(data_dir=tmp_path/'ledger',max_attempts=1,
+                rates_valid_through=date(2030,1,1)),http,api_key='test-observation-key')
+            task=asyncio.create_task(extract(gateway,store,captures,ExtractRequest(captureId=manifest['id'],cameraId=manifest['cameraId'])))
+            await asyncio.wait_for(started.wait(),2)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            report=store.list('extractions')[0]
+            assert report['status']=='cancelled' and report['metrics']['failures']==1
+            assert report['windows'][0]['gatewayRequestId']
+            assert report['windows'][0]['modelCall']['requestId'].startswith('gateway:')
+            assert report['id'] in captures.pins(manifest['id'])
+    asyncio.run(run())
+
+
+def manual_annotation(report, **changes):
+    return {'kind':'count','semanticClass':'vehicle','time':{'startS':0,'endS':0},'region':BOX,
+            'frameIds':report['windows'][0]['frameIds'],'present':'yes','count':{'lower':4,'upper':4},**changes}
+
+
+def manual_review(report, **changes):
+    return ManualReview.model_validate({**annotation_template(report),'reviewer':'scripted-test-fixture',
+        'reviewedOriginalPixels':True,'annotations':[manual_annotation(report)],**changes})
+
+
+def test_reviews_bind_exact_report_original_frames_and_attestation(tmp_path):
+    captures,store,manifest=setup(tmp_path)
+    report=asyncio.run(perform(tmp_path,captures,store,manifest,Provider()))
+    template=annotation_template(report)
+    assert template['annotations']==[] and template['reviewedOriginalPixels'] is False
+    with pytest.raises(ValidationError):
+        ManualReview.model_validate({**template,'reviewer':'fixture','annotations':[manual_annotation(report)]})
+    review=manual_review(report)
+    result=score_review(store,report,review)
+    assert verified_review(result,report)==result
+    assert result['annotation']['reviewMode']=='model_assisted'
+    with pytest.raises(ArtifactError,match='exact capture'):
+        score_review(store,{**report,'status':'changed'},review)
+    with pytest.raises(ArtifactError,match='original frames'):
+        score_review(store,report,manual_review(report,annotations=[manual_annotation(report,frameIds=['frame_other-0001'])]))
+    with pytest.raises(ArtifactError,match='Duplicate'):
+        score_review(store,report,manual_review(report,annotations=[manual_annotation(report)]*2))
+    with pytest.raises(ArtifactError,match='content hash'):
+        verified_review({**result,'counts':{'matched':100}},report)
+    # A review cannot silently transfer to another extraction of the same pixels.
+    other=asyncio.run(perform(tmp_path,captures,store,manifest,Provider()))
+    with pytest.raises(ArtifactError):
+        score_review(store,other,review)
+
+
+@pytest.mark.parametrize('change', [
+    {'kind':'signal','semanticClass':'signal'},
+    {'present':'unknown'},
+    {'kind':'event','state':'crossing','semanticClass':'pedestrian'},
+    {'frameIds':[]},
+    {'time':{'startS':0,'endS':1}},
+])
+def test_manual_annotation_semantics_do_not_invent_unsupported_truth(tmp_path,change):
+    captures,store,manifest=setup(tmp_path)
+    report=asyncio.run(perform(tmp_path,captures,store,manifest,Provider()))
+    with pytest.raises(ValidationError):
+        manual_review(report,annotations=[manual_annotation(report,**change)])
+
+
+def test_count_comparison_requires_matching_region_and_unknown_stays_unscored(tmp_path):
+    captures,store,manifest=setup(tmp_path)
+    report=asyncio.run(perform(tmp_path,captures,store,manifest,Provider([
+        lambda meta:[fact(meta,kind='count',semanticClass='vehicle',count={'lower':1,'upper':2})]])))
+    shifted={**BOX,'x':.12}
+    result=score_review(store,report,manual_review(report,annotations=[manual_annotation(report,region=shifted)]))
+    assert result['counts']=={'count_region_mismatch_unscored':1}
+    unknown=score_review(store,report,manual_review(report,annotations=[manual_annotation(report,count={'lower':None,'upper':None})]))
+    assert unknown['counts']=={'human_unknown':1}
+
+
+@pytest.mark.parametrize('lower,upper,outcome', [(0,0,'correct_absence'),(0,2,'model_abstained'),(1,2,'false_positive')])
+def test_reviewed_absence_respects_zero_and_uncertain_model_count(tmp_path,lower,upper,outcome):
+    captures,store,manifest=setup(tmp_path)
+    report=asyncio.run(perform(tmp_path,captures,store,manifest,Provider([
+        lambda meta:[fact(meta,kind='count',semanticClass='vehicle',count={'lower':lower,'upper':upper})]])))
+    annotation=manual_annotation(report,present='no',count={'lower':None,'upper':None})
+    assert score_review(store,report,manual_review(report,annotations=[annotation]))['counts']=={outcome:1}
+
+
+def test_reviewed_absence_never_counts_failed_extraction_as_correct(tmp_path):
+    captures,store,manifest=setup(tmp_path)
+    report=asyncio.run(perform(tmp_path,captures,store,manifest,Provider([429])))
+    annotation=manual_annotation(report,present='no',count={'lower':None,'upper':None})
+    result=score_review(store,report,manual_review(report,annotations=[annotation]))
+    assert result['counts']=={'model_failed_or_unprocessed':1}
+    assert result['coverage']['scoredComparisons']==0
+
+
+def test_offline_review_export_is_empty_safe_and_never_overwrites_human_work(tmp_path,capsys):
+    captures,store,manifest=setup(tmp_path)
+    report=asyncio.run(perform(tmp_path,captures,store,manifest,Provider()))
+    packet=tmp_path/'packet'
+    args=['--artifact-dir',str(store.root),'--extraction',report['id'],'--export-dir',str(packet)]
+    assert review_main(args)==0
+    assert json.loads((packet/'annotations.template.json').read_text())['annotations']==[]
+    assert json.loads((packet/'failures.json').read_text())['humanAccuracy'] is None
+    html=(packet/'review.html').read_text()
+    assert html.index('Original evidence') < html.index('Model facts and evidence links')
+    assert not store.list('reviews')
+    (packet/'annotations.template.json').write_text('human work in progress')
+    assert review_main(args)==1
+    assert (packet/'annotations.template.json').read_text()=='human work in progress'
+    annotation_file=tmp_path/'human-fixture.json'
+    annotation_file.write_text(manual_review(report).model_dump_json())
+    assert review_main(['--artifact-dir',str(store.root),'--extraction',report['id'],'--annotations',str(annotation_file)])==0
+    assert len(store.list('reviews'))==1
+
+
+def test_failure_report_preserves_failed_abstained_and_unprocessed_windows(tmp_path,video):
+    captures,store,_=setup(tmp_path)
+    manifest=video_capture(captures,video)
+    report=asyncio.run(perform(tmp_path,captures,store,manifest,Provider([429])))
+    detail=failure_report(report)
+    assert detail['plannedWindows']==2 and detail['metrics']['unprocessedWindows']==1
+    assert detail['metrics']['failures']==1 and detail['windows'][0]['gatewayRequestId']
+    assert detail['humanAccuracy'] is None
+
+
+def test_invalid_domain_output_and_abstention_never_qualify_but_success_does(tmp_path):
+    captures,store,manifest=setup(tmp_path)
+    async def run():
+        provider=Provider([lambda meta:[fact(meta,frameIndices=[99])],lambda meta:[],lambda meta:[fact(meta)]])
+        async with httpx.AsyncClient(transport=httpx.MockTransport(provider.handler)) as client:
+            gateway=ModelGateway(GatewayConfig(data_dir=tmp_path/'ledger',max_attempts=1,
+                rates_valid_through=date(2030,1,1)),client,api_key='fixture-secret')
+            request=ExtractRequest(captureId=manifest['id'],cameraId=manifest['cameraId'])
+            invalid=await extract(gateway,store,captures,request)
+            assert invalid['status']=='failed' and gateway.ledger.attempts()[0]['qualifying']==0
+            abstained=await extract(gateway,store,captures,request)
+            assert abstained['status']=='abstained' and gateway.ledger.attempts()[0]['qualifying']==0
+            assert abstained['windows'][0]['acceptanceBinding']
+            accepted=await extract(gateway,store,captures,request)
+            assert accepted['status']=='completed' and gateway.ledger.attempts()[0]['qualifying']==1
+            context=json.loads(gateway.ledger.attempts()[0]['context'])
+            assert context['episode_id']==manifest['id'] and context['source_id']==manifest['cameraId']
+            assert context['attempt_id']==accepted['windows'][0]['attemptId']
     asyncio.run(run())

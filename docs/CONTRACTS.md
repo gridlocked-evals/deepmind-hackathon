@@ -1,57 +1,90 @@
-# Element 119 contracts, version 1.0
+# Element 119 contracts (`element119.v1`)
 
-The canonical models are in `backend/contracts.py`. `scripts/export_contracts.py` generates the frontend's `src/contracts/types.ts` and `schema.json`; `src/contracts/index.ts` validates untrusted JSON with that schema and the same semantic rules as Python. Existing `src/types.ts` remains the authored map demonstration's contract. Its simulator seed and metric lane geometry are not Genie session fields.
+Frozen shared contracts for the eight-hour submission pipeline (issue #2). They let the four lanes build against mocks without waiting for each other or for SUMO.
 
-```python
-from backend.contracts import ObservationBatch
-observations = ObservationBatch.model_validate(payload)
+| Side | File |
+| --- | --- |
+| Backend (source of truth) | [`backend/contracts.py`](../backend/contracts.py) — Pydantic models; JSON Schema at `GET /api/contracts/element119` |
+| Frontend | [`src/contracts/element119.ts`](../src/contracts/element119.ts) — types plus `validateVerticalSlice()` runtime checks |
+| Shared fixture | [`contracts/fixtures/vertical_slice.v1.json`](../contracts/fixtures/vertical_slice.v1.json) — one synthetic end-to-end episode, validated by both test suites |
+
+The fixture is synthetic. Its IDs, hashes and numbers are not measurements.
+
+## Pipeline and ownership
+
+```
+Capture ─► ObservationBatch ─► StreetEdit ─► ReferenceImage ─► GateDecision(reference_image) ─► WorldSession ─► NavigationEvent* ─► GateDecision(navigation_window)* ─► EvaluationResult
+ (A,#4)       (A,#5 Hydrogen)   (C,#6 Carbon)  (D,#7 Nano Banana)   (C,#8 Decisions)              (B,#9 Genie)   (B,#10 human/Hydrogen) (C,#11 Decisions)             (C,#13)
 ```
 
-```typescript
-import { parseContract } from './contracts';
-const observations = parseContract('ObservationBatch', await response.json());
-```
-
-Regenerate after editing the Python models, then run both test suites. CI or local checks can run `.venv/bin/python scripts/export_contracts.py --check` to detect drift. Semantic rules that depend on more than one field must also be updated in the frontend validator. Both languages consume the exact same successful fixture and invalid-case mutations in `fixtures/contracts/`.
-
-The fixture is **synthetic test data**. Its mock trace IDs and outputs do not establish real model access, successful inference, accepted source imagery, or measured evaluation results.
-
-## Shared semantics
-
-- Every artifact carries `schemaVersion`, a local `id`, immutable `capture`, UTC `createdAt`, explicit `provenance`, nullable `trace`, and an `unknowns` list. Unknown values use `null` with an explanation where required, never fabricated zeros. Additional fields fail validation so an incompatible version cannot silently enter the pipeline.
-- Local IDs contain letters, digits, `_`, and `-`, with 2–96 characters. Provider request/interaction IDs also permit `.`, `:`, and `/`, up to 256 characters. Local artifact IDs and provider session IDs are distinct.
-- All timestamps are UTC ISO 8601 with `Z`; offsets from camera adapters must be normalized before validation. `receivedAt` is the server's retrieval time. `sourceCapturedAt` is separately nullable, with `sourceClock` equal to `exposure`, `program_date_time`, or `unknown`. Unknown clocks cannot claim an exposure timestamp or measured clock uncertainty. A known clock can still have unknown uncertainty.
-- `CaptureContext.originalMediaSha256` hashes the exact original media bytes concatenated in capture order. The capture manifest retains each file's length and hash to identify boundaries and separately supplies `manifestSha256` to bind its metadata. These hashes must never be replaced with hashes of newly fetched bytes during inference retries. `captureId` and `sourceId` identify the captured episode and actual camera independently.
-- `durationSeconds` is the total original source duration and cannot exceed 120 seconds. For video, `allowedInterval` is the half-open evidence-reference window `[startSeconds, endSeconds)` within those bytes; it may expose only the prefix of a longer capture. The endpoint is excluded so the first suffix timestamp cannot become prefix evidence. These bounds do not by themselves deduplicate temporal events across overlapping inference windows; downstream extraction must assign ownership separately.
-- Snapshots have duration zero and `[0, 0]` as their allowed interval. They cannot contain temporal event observations or references to later frames. Repeated stills must not be relabeled as motion evidence.
-- `ImageRegion` is a normalized top-left rectangle (`x`, `y`, `width`, `height`) inside `[0,1]`. Regions have positive area. No metric width, calibrated route, collision, or safety feasibility is implied.
-- Each `EvidenceRef` must match its artifact's capture and original hash and fall inside its allowed interval. `frameIndex` may be null when unavailable. Generated-world frame hashes belong to `NavigationEvent.frameSha256`, not original-camera evidence.
-- `ModelTrace` carries the exact model ID, stable gateway `requestId`, nullable actual `providerRequestId`, trace/prompt/config IDs, input hash, start/completion timestamps, outcome, and nullable token usage. Missing provider request IDs or usage stay unknown. A successful model trace is required for observations, edits, references, gates, and Hydrogen navigation; fabricated success is never a substitute for an unavailable service.
-
-## Ownership and integration boundaries
-
-These are proposed pipeline routes unless listed as implemented in `RUNNING.md`. Defining a contract does not implement the stage or claim its integration acceptance.
-
-| Contract | Owner | Intended route | Required behavior |
+| Contract | Owning lane / issue | Producer | Main consumers |
 | --- | --- | --- | --- |
-| `ObservationBatch` | A: capture/evidence | `POST /api/observations` | Hydrogen extracts evidence-linked facts. Observation IDs are unique; invisible values abstain. |
-| `StreetEdit` | C: reasoning/evaluation | `POST /api/edits` | Carbon returns `accepted`, `rejected`, or `needs_clarification`. Accepted edits include supported image regions, permissions, preserved observations, and separate image/world prompts. |
-| `ReferenceImage` | D: images/UI | `POST /api/references` | Nano Banana returns generated image metadata and a server artifact ID, with a 16:9 aspect ratio. Raw source evidence is retained separately. |
-| `GateDecision` | C: reasoning/evaluation | `POST /api/reference-gates` | Decisions checks apply explicit probability and confidence thresholds. Unknown blocks automatic world creation; any failed check rejects. |
-| `WorldSession` | B: world/control | `POST /api/world-sessions`, `POST /api/world-sessions/{id}/complete` | References an accepted image/gate, retains provider interaction ID, declares transport and duration/cost limits, and records terminal reason. |
-| `NavigationEvent` | B: world/control | `POST /api/world-sessions/{id}/actions` | Orders bounded human/Hydrogen/supervisor actions against generated frame hashes and the session clock. Release/terminate never holds keys. |
-| `EvaluationResult` | C: reasoning/evaluation | `GET /api/evaluations/{id}` | Records dataset split, baseline, every attempt ID, unknown coverage, and measured-or-unknown metrics. |
+| `Capture` | A — evidence/capture, #4 | recorder | every stage (IDs, media hash, duration) |
+| `ObservationBatch` | A, #5 | **Gemini 4 Hydrogen** | Carbon, UI evidence panel |
+| `StreetEdit` | C — reasoning/eval, #6 | **Gemini 4 Carbon** | Nano Banana prompt, UI before/after |
+| `ReferenceImage` | D — images/UI, #7 | Nano Banana | reference gate, Genie, UI |
+| `GateDecision` | C, #8 / #11 | Decisions API | world creation, navigation loop, UI |
+| `WorldSession` | B — world/control, #9 | Genie | navigation loop, UI player |
+| `NavigationEvent` | B, #10 | human or **Hydrogen** | temporal gates, evaluation |
+| `EvaluationResult` | C, #13 / #14 | evaluation harness | submission evidence (#15) |
+| `ModelCall` | C, #3 (gateway) | model gateway | embedded in every model-produced contract |
 
-`StreetEdit.regions[].permissions` assigns at most one access value per actor class. Duplicate/conflicting permissions are rejected. Preserved source observations remain immutable; inserted lane regions retain inserted/generated provenance. Metric geometry is a later contract.
+Hydrogen and Carbon are the two required qualifying Gemini 4 models. The validators require Hydrogen for observations and model-driven navigation, and Carbon for street edits. Nano Banana, Decisions and Genie cannot fill those roles.
 
-Gate checks are phrased so a higher probability supports acceptance. Below `minimumConfidence`, or without a probability/confidence, the result must be `unknown`. Otherwise `probability >= threshold` is `pass`; lower probability is `fail`. All checks must pass for `verdict: accept` and `action: allow_world_creation`. The pipeline must execute this decision before opening a world; a schema alone cannot stop an out-of-band service call.
+## Shared rules
 
-`WorldSession.replaySemantics` can only be `stochastic_no_exact_reset`. It has no simulator seed, branch ID, or deterministic replay promise. Closing a transport is not proof that generation ended; the world service must explicitly complete the provider interaction and then record the outcome.
+- **IDs** are `<prefix>_<4–64 of [A-Za-z0-9-]>`: `cap_`, `obs_`, `ob_`, `anc_`, `edit_`, `op_`, `ref_`, `gate_`, `world_`, `nav_`, `eval_`, `call_`. Camera IDs keep the existing registry form (`511ny-32998`).
+- **Hashes** are `sha256:<64 lowercase hex>`. `Capture.mediaSha256` hashes the original media bytes. Hydrogen's `ModelCall.inputHashes` must include it, and the reference gate must hash the image it judged. Retries reuse the same immutable inputs.
+- **Model provenance**: every model-produced object embeds a `ModelCall` with exact model ID, prompt ID, config ID, request ID when known, input hashes, request/response times, latency, usage, cost and outcome. Credentials never appear in contracts or logs.
+- **Data provenance**: `observed` (seen in original media), `derived` (computed from observations), `assumed` (a stated assumption), `inserted` (mayor edit), `generated` (Nano Banana/Genie pixels).
+- **Unknowns** are explicit `{field, reason}` entries instead of guesses. Gate checks may answer `unknown`, and evaluations count unknown outcomes separately (`succeeded + failed + unknown == attempts`).
+- **Image space only**: regions are normalized `box` or `polygon` coordinates in the referenced image (x right, y down, in [0, 1]). Edits are scoped by anchors from the observation batch and by `permissions.allowed/forbidden` semantic classes. Metric geometry and physical route feasibility belong to the calibrated milestone (#16).
 
-`VerticalSlice` joins all seven contracts and checks capture identity, artifact links, unique IDs and navigation sequences, preserved-observation membership, accepted edit/gate prerequisites, and navigation timestamps against the session duration. Production handlers must resolve and check referenced persisted artifacts at each boundary, rather than trusting client-supplied capture or gate copies.
+## Clocks
 
-## Verification and remaining work
+| Field | Meaning |
+| --- | --- |
+| `MediaTimeRange.startS/endS` | Seconds from the first frame of the captured media. Must lie within `Capture.durationS` (at most 120 s). |
+| `Capture.retrievalStartedAt/EndedAt` | UTC time **we retrieved** the media. Not exposure time; `captureClock` is `unknown` for current DOT/511NY sources. |
+| `NavigationEvent.sessionTimeS`, `GateSubject.sessionTime` | Seconds since the Genie session started streaming. |
+| `ModelCall.requestedAt/completedAt`, `WorldSession.startedAt/terminatedAt` | UTC wall clock of our own requests. |
 
-The shared fixture and malformed cases validate both runtimes, including malformed IDs, out-of-frame regions, conflicting permissions, source/hash mismatch, held-out references, excess duration, clock contradictions, missing required model roles, gate threshold contradictions, unrecognized simulator fields, and navigation/evaluation bounds. Separate snapshot tests verify that visible facts remain valid while temporal claims fail.
+Snapshot captures have zero duration, so `motionSupported` must be false and they cannot carry `movement` observations.
 
-The gateway, capture store, and [observation service](OBSERVATIONS_API.md) now supply the evidence stage. Edit compilation, reference generation, operational gate handlers, optional playable sessions, navigation supervision, and real evaluation still need their respective issue implementations and acceptance evidence. Event-only/reuse wording and baseline disclosure remain submission checks in the implementation plan.
+## Gates are operational
+
+| Subject | accept | reject | unknown |
+| --- | --- | --- | --- |
+| `reference_image` | `allow_world_creation` | `block_world_creation` | `block_world_creation` |
+| `navigation_window` | `continue` | `terminate_session` | `flag_unknown` |
+
+The outcome follows from the checks: any `fail` → reject, otherwise any `unknown` → unknown, otherwise accept. A `WorldSession` is valid only if it references an accepted reference gate.
+
+## Genie is not a simulator
+
+`WorldSession` is stochastic. It has `deterministicReplay: false` and rejects `seed`, `branchId` and other simulator identity fields. Deterministic seeds, branch IDs and frozen replays belong to the SUMO milestone (#19) and its `ScenarioBundle`/ScenarioIR contracts. They never appear in a Genie session.
+
+## Routes
+
+Implemented now:
+
+- `GET /api/contracts/element119` — JSON Schema for every contract.
+- `POST /api/observations`, `POST /api/edits`, `POST /api/references`, `POST /api/references/{id}/gate`,
+  `POST /api/edits/{id}/gated-reference` and read routes — see [EDIT_REFERENCE_GATE.md](EDIT_REFERENCE_GATE.md) (#6–#8).
+  `POST /api/edits` takes `preset` and optional `frameTimeS`; `/api/edits/{id}` returns an `EditBundle` wrapping the `StreetEdit`.
+
+Proposed (owners implement against these shapes; none exist yet):
+
+| Route | Returns | Issue |
+| --- | --- | --- |
+| `POST /api/captures` `{cameraId, maxSeconds}` | `Capture` | #4 |
+| `POST /api/captures/{captureId}/observations` | `ObservationBatch` | #5 |
+| `POST /api/worlds` `{referenceImageId, gateDecisionId, budget}` | `WorldSession` | #9 |
+| `POST /api/worlds/{worldId}/terminate` `{reason}` | `WorldSession` | #9 |
+| `POST /api/worlds/{worldId}/navigation` / `GET .../events` | `NavigationEvent` | #10 |
+| `POST /api/worlds/{worldId}/gates` `{sessionTime}` | `GateDecision` | #11 |
+| `GET /api/evaluations/{evaluationId}` | `EvaluationResult` | #13 |
+
+## Changing a contract
+
+Any breaking change bumps `SCHEMA_VERSION` (`element119.v2`), updates both validators and the fixture in one commit, and is announced on #2. Additive optional fields keep the version but still update both sides.

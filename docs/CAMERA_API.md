@@ -1,6 +1,6 @@
 # Camera API and playback
 
-The camera service supplies a fixed 511NY live-video catalog, a cached NYC DOT snapshot directory, and an HLS proxy. It does not capture footage, run inference, or derive the demo simulation from video. No model credentials are required.
+The camera service supplies a fixed 511NY live-video catalog, a cached NYC DOT snapshot directory, an HLS proxy, and a bounded capture recorder that turns buffered footage into immutable episodes (see [Capture episodes](#capture-episodes)). It does not run inference or derive the demo simulation from video. No model credentials are required.
 
 Run `npm run dev:api` after installing `backend/requirements.txt` into `.venv`. Vite proxies `/api` to `http://127.0.0.1:8000`. If `dist/` exists when the backend starts, FastAPI also serves that build. Source code: [backend](../backend/main.py), [HLS registry](../backend/feeds.py), [proxy](../backend/proxy.py), and [browser player](../src/media/LiveFeed.tsx).
 
@@ -12,7 +12,7 @@ All application routes below use `GET`.
 | --- | --- |
 | `/api/health` | API readiness: `status`, `service`, and UTC `timestamp`. Does not probe camera availability. |
 | `/api/vision/cameras` | `{ cameras, metadata }` for five configured 511NY HLS sources. The retained `vision` path does not imply inference. |
-| `/api/cameras` | `{ cameras, metadata }` for validated Manhattan DOT snapshots. Directory failure is represented in metadata, with HTTP 200. |
+| `/api/cameras` | `{ cameras, metadata }` for validated NYC DOT snapshots from all five boroughs. Directory failure is represented in metadata, with HTTP 200. |
 | `/api/feeds/{camera_id}/index.m3u8` | Rewritten HLS master playlist for an allowlisted camera. |
 | `/api/feeds/{camera_id}/resource/{token}` | Rewritten child playlist or streamed media identified by a server-issued token. Supports a single valid byte range. |
 
@@ -48,7 +48,7 @@ Both directories use the frontend [CameraSource](../src/types.ts) shape. Coordin
 }
 ```
 
-`kind` is `hls` or `snapshot`. `sourceUrl` links to the official viewer; `playbackUrl` supplies the actual media. Snapshot records also include `thumbnailUrl`. `resolution`, `description`, `thumbnailUrl`, and `fetchedAt` are optional in the shared type; `providerCameraId` is an additional HLS API field.
+`kind` is `hls` or `snapshot`. `sourceUrl` links to the official viewer; `playbackUrl` supplies the actual media. Snapshot records also include `thumbnailUrl`. `borough`, `resolution`, `description`, `thumbnailUrl`, and `fetchedAt` are optional in the shared type; `providerCameraId` is an additional HLS API field.
 
 `capturedAt` is currently always `null`: neither directory establishes a source capture clock. HLS `fetchedAt` records the last successful proxy media fetch; snapshot `fetchedAt` records directory retrieval. Neither is the time pictured in the footage. The browser's “Image loaded … ET” label records a successful image load and uses `America/New_York`.
 
@@ -65,7 +65,7 @@ The live directory's `metadata.mode` is `configured`, with `registryUrl`, `captu
 
 The DOT directory has a one-hour in-memory cache and a serialized refresh. Metadata includes `mode: connected | stale | unavailable`, `fetchedAt`, and `cached`. Failed refreshes return the prior records as `stale`, preserving their original successful timestamps. Without prior data, the response contains an empty list and `mode: unavailable`. Provider-reported online snapshots start as `unverified`; offline entries start as `unavailable`. Images themselves load directly from NYC DOT in the browser.
 
-DOT records are limited to Manhattan and latitude `40.68–40.89`, longitude `−74.04–−73.90`. Invalid IDs or coordinates are discarded. Image URLs must use HTTPS on `webcams.nyctmc.org`; otherwise the standard image URL is constructed from the validated camera ID. The fetched directory is capped at 8 MiB.
+DOT records include Manhattan, Brooklyn, Queens, Bronx, and Staten Island, including cameras reported offline. Each record carries the provider’s `borough`. A broad NYC envelope (latitude `40.45–40.95`, longitude `−74.30–−73.65`) rejects invalid coordinates without clipping outer-borough cameras; duplicate and invalid IDs are discarded. Metadata includes `coverage`, `total`, and `boroughCounts`. These counts describe the public DOT directory, not every privately operated camera in New York. Image URLs must use HTTPS on `webcams.nyctmc.org`; otherwise the standard image URL is constructed from the validated camera ID. The fetched directory is capped at 8 MiB.
 
 ## HLS proxy behavior and limits
 
@@ -82,9 +82,9 @@ Playlists must be UTF-8 HLS beginning with `#EXTM3U`. Relative and absolute medi
 | Playlist response | 1 MiB maximum |
 | Media response | 16 MiB maximum |
 | Resource references | 4,096 in-memory tokens; least-recently-used eviction |
-| Token lifetime | 900 seconds from issuance or renewal during playlist rewriting |
+| Token lifetime | 900 seconds from the last issuance, playlist rewrite, or successful resolution |
 
-Resolving a token updates its eviction order, but does not extend its expiration. Tokens are camera-specific and disappear on restart. Use one backend worker for this implementation: tokens and status are process-local, so requests routed across independent workers can receive unknown-token errors.
+Resolving a token updates its eviction order and slides its expiration to 900 seconds after that use, so an actively polled playlist stays valid. Tokens are camera-specific and disappear on restart. Use one backend worker for this implementation: tokens and status are process-local, so requests routed across independent workers can receive unknown-token errors.
 
 The proxy forwards only the validated `Range` request header and requests identity encoding. It accepts single ranges such as `bytes=0-4095`, `bytes=4096-`, or `bytes=-4096`; explicit ranges and suffix lengths cannot exceed 16 MiB. Media preserves upstream 200/206 status and available `Content-Range`, `Accept-Ranges`, and `Content-Length` headers. Upstream nonidentity media encoding is rejected. Allowed media types are MPEG-TS, MP4 video/audio, AAC, and octet-stream; playlists receive `application/vnd.apple.mpegurl`.
 
@@ -103,11 +103,36 @@ If an unknown-length media stream exceeds the byte cap or fails after headers ha
 
 Development CORS permits `http://localhost:5173` and `http://127.0.0.1:5173`, GET, and the Range header. Same-origin production requests do not require CORS. Source attribution and access terms are recorded in [third-party notices](../THIRD_PARTY_NOTICES.md).
 
+## Capture episodes
+
+Source: [backend/capture.py](../backend/capture.py) and [backend/capture_api.py](../backend/capture_api.py). Episodes are the evidence input of the Element 119 pipeline; their model-visible part is described by the `Capture` contract in [CONTRACTS.md](CONTRACTS.md).
+
+| Route | Behavior |
+| --- | --- |
+| `POST /api/captures/{camera_id}/recording` | Starts (or keeps) a ring recorder for a registered HLS camera. History begins now; a fresh selection has none. Returns buffer status. |
+| `GET /api/captures/{camera_id}/buffer` | `availability` (`not_recording`, `starting`, `recording`, `stale`, `unavailable`), `bufferedSeconds`, earliest/latest receipt times, earliest source time, `sourceClock`, repeated-segment count, and `history.maxSecondsAgo`. |
+| `POST /api/captures` `{cameraId, secondsAgo, durationS, holdoutS?, sceneCameraId?}` | Writes an episode from whole buffered segments covering `[now − secondsAgo, now − secondsAgo + durationS]`. Returns `{manifest, capture}`. |
+| `POST /api/captures/snapshots/{dot_camera_id}` | Stores one DOT still as a snapshot episode (zero duration, `no_motion_evidence`). |
+| `GET /api/captures`, `GET /api/captures/{episode_id}` | Manifests. |
+| `POST /api/captures/{episode_id}/pins` `{jobId}`, `DELETE .../pins/{jobId}` | Keep media while a job references it. |
+
+**Bounds.** The ring keeps the newest 180 s (and at most 96 MiB) per camera; recorders stop after 10 minutes without a status or capture request. `durationS` (prefix plus held-out) is capped at 120 s. Segments are limited to 16 MiB, snapshots to 2 MiB. Only MPEG-TS HLS is recorded; fMP4 (`EXT-X-MAP`) and encrypted streams are rejected.
+
+**Truthful history.** A request outside the buffered window returns 409 with `availableSecondsAgo`; the UI helper [captureHistory.ts](../src/media/captureHistory.ts) only offers choices like “30 seconds ago” inside that window.
+
+**Clocks.** Every segment records `receivedAt` (server receipt) and `sourceTime` (from `EXT-X-PROGRAM-DATE-TIME`, when the stream provides it). Without a source clock the manifest says `sourceClock: unknown` and lists `exposureTime` as an unknown.
+
+**Audits and labels.** Sequence gaps and discontinuities, playlist coverage shorter than requested (by more than one segment), and ffprobe-decoded duration shorter than the playlist claims all return 422 instead of a silently truncated file. Labels: `source_clock_unknown`, `repeated_segments`, `repeated_stills` (identical bytes), `low_effective_cadence` (< 5 decoded fps), `stale_source`, `snapshot_only`, `no_motion_evidence`, `repeated_still`. The decoder audit is mandatory: missing ffprobe or failed decoding rejects the capture. Every prefix and held-out segment is audited, and the aggregate decoded original duration must remain at or below 120 seconds. Byte hashes, dimensions, actual frame counts and durations are retained in the manifest.
+
+**Immutability and isolation.** Each episode directory holds `prefix/media.ts` (model input), an optional physically separate `holdout/media.ts`, and a read-only `manifest.json` with byte counts and SHA-256 per file and per segment. `model_input()` returns only the prefix, re-verifies its hash on every call (so inference retries see the same moment), and refuses an episode from a different camera than the requesting scene. `holdout()` requires the `evaluation` role. Capturing again always creates a new episode ID.
+
+**Storage.** Episodes live under `CAPTURE_DIR` (default `var/captures`, git-ignored) and survive restarts. When usage exceeds `CAPTURE_BUDGET_BYTES` (default 2 GiB), the oldest **unpinned** episodes are deleted; pinned episodes are never removed.
+
 ## Browser lifecycle
 
 [useCameraSources](../src/media/cameras.ts) starts with the five-source catalog, fetches both directories in parallel, and merges valid records by ID. Requests time out after 12 seconds. Refreshes occur every 60 seconds while visible and when the page becomes visible, without overlapping refresh cycles. The configured HLS catalog remains selectable when the API is unreachable.
 
-The hook's `loading | connected | stale | offline` status describes directory access, not stream health. Both requests failing yields `offline`; a failed live-directory request or stale DOT response yields `stale`. A successful live directory can therefore remain `connected` even if DOT has no available records.
+The hook’s `loading | connected | stale | offline` status describes directory access, not stream health. Both directories failing or reporting unavailable yields `offline`. Either directory failing, reporting unavailable, or returning stale data yields `stale`; `connected` requires both directories to be available and current. On refresh failure, previously loaded cameras remain browsable with stale availability. A successful directory replaces its own prior records, allowing removed cameras to disappear after a healthy refresh.
 
 `LiveFeed` mounts one selected source. It uses native HLS when supported, otherwise lazy-loads hls.js. Playback is muted and inline. It tries the same-origin proxy first, then the known direct provider URL once; direct playback depends on provider CORS. A 12-second connection/buffering watchdog advances this fallback. hls.js allows one media-error recovery per source attempt; manifest retries are disabled, while level and fragment loading each allow one retry.
 
@@ -122,4 +147,4 @@ Snapshots refresh every five seconds while visible, skip refresh while a request
 3. Add the matching row to `SOURCES` in [src/media/cameras.ts](../src/media/cameras.ts). Its tuple order is **ID, street, longitude, latitude, stream path, resolution**. This generates both offline catalog and direct-fallback entries. Keep availability initially `unverified` and capture time `null`.
 4. Extend [backend tests](../backend/test_cameras.py) for identity/coordinates and any new playlist behavior. Run `npm run test:api` and `npm run build`, then verify actual browser playback, source switching, hidden-tab behavior, and feeds off. Confirm old decoder requests stop.
 
-DOT snapshots are discovered through the directory adapter, so ordinary new Manhattan DOT entries require no manual catalog change. Adding a camera does not create or calibrate a simulation for that location.
+DOT snapshots are discovered through the directory adapter, so ordinary new NYC DOT entries require no manual catalog change. Adding a camera does not create or calibrate a simulation for that location.
