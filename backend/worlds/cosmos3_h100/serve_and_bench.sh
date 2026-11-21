@@ -9,11 +9,12 @@ nvidia-smi --query-gpu=index,memory.used,memory.total,utilization.gpu --format=c
 bash $HERE/serve.sh $GPU $PORT
 SPID=$(cat $L/serve_gpu$GPU.pid); echo "SERVER_PID $SPID"
 # wait up to 60 min for ready
-for i in $(seq 1 3600); do
+for i in $(seq 1 ${COSMOS3_READY_TIMEOUT_S:-3600}); do
   [ -f $L/serve_gpu${GPU}_ready_epoch.txt ] && break
   kill -0 $SPID 2>/dev/null || { echo SERVER_DIED; tail -60 $L/serve_gpu$GPU.log; exit 1; }
   sleep 1
 done
+[ -f $L/serve_gpu${GPU}_ready_epoch.txt ] || { echo SERVER_NOT_READY; tail -60 $L/serve_gpu$GPU.log; exit 1; }
 S=$(cat $L/serve_gpu${GPU}_start_epoch.txt); Rd=$(cat $L/serve_gpu${GPU}_ready_epoch.txt)
 echo "LOAD_S $(python3 -c "print(round($Rd-$S,1))")"
 nvidia-smi --query-compute-apps=pid,used_memory --format=csv > $R/gpu_after_load.csv; cat $R/gpu_after_load.csv
