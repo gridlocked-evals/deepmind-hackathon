@@ -30,7 +30,7 @@ from .artifacts import ArtifactError, ArtifactStore, sha256, utcnow
 from .contracts import GATE_EFFECTS, GateCheck, GateDecision, GateSubject, ModelCall, ReferenceImage, WorldSession
 from .edits import EditBundle
 from .gateway import CallContext, GatewayError, ModelGateway, Service
-from .gateway.contracts import MODELS
+from .gateway.contracts import ErrorCode, MODELS
 from .modelcalls import from_error, from_result
 from .references import MAX_ATTEMPTS, TARGET_SIZE, attempts, generate_reference, validate_transport
 
@@ -198,12 +198,16 @@ async def _judge(gateway, store, bundle, record, gate_id, thresholds, purpose) -
                           source_id=bundle.captureId, purpose=purpose)
     requested = utcnow()
     answers, judge_error = None, None
+    cancelled = None
     try:
         result = await gateway.judge(stage="image_gate", input_value=input_value, questions=questions, context=context)
         call = from_result(gateway, Service.DECISIONS, result, prompt_id=PROMPT_ID, domain_hashes=domain,
                            requested_at=requested, completed_at=utcnow())
         answers = result.output
-    except GatewayError as error:
+    except (GatewayError, asyncio.CancelledError) as exc:
+        cancelled = exc if isinstance(exc, asyncio.CancelledError) else None
+        error = (GatewayError(ErrorCode.CANCELLED, request_id=getattr(exc, "request_id", None))
+                 if cancelled is not None else exc)
         call = from_error(gateway, Service.DECISIONS, error, prompt_id=PROMPT_ID, domain_hashes=domain,
                           requested_at=requested, completed_at=utcnow())
         judge_error = error.public()
@@ -241,6 +245,8 @@ async def _judge(gateway, store, bundle, record, gate_id, thresholds, purpose) -
                                   "sha256": thresholds["sha256"]},
                       answers=answers, deterministic=det, judgeError=judge_error)
     store.put("gates", gate_id, gate)
+    if cancelled is not None:
+        raise cancelled  # the persisted unknown decision prevents re-sampling, without swallowing cancellation
     return gate
 
 

@@ -1,12 +1,16 @@
+import asyncio
 import base64
 from io import BytesIO
+import json
 
+import httpx
 import pytest
 from PIL import Image
 
+from backend.artifacts import ArtifactStore
 from backend.references import (MAX_ATTEMPTS, ReferenceError, generate_reference, genie_payload, normalize,
                                 validate_transport)
-from backend.test_pipeline_helpers import FakeProvider, carbon_ok, png, run, setup
+from backend.test_pipeline_helpers import FakeProvider, carbon_ok, gateway, png, run, setup
 
 
 def test_normalization_produces_exact_16_9_and_transport_checks():
@@ -73,6 +77,75 @@ def test_malformed_and_failed_outputs_are_recorded_not_substituted(tmp_path):
     with pytest.raises(ReferenceError) as exhausted:
         run(tmp_path, provider, lambda gw: generate_reference(gw, store, bundle, style="photoreal"))
     assert exhausted.value.status == 409 and len(store.list("references")) == MAX_ATTEMPTS
+
+
+def test_cancelled_dispatches_are_recorded_and_exhaust_attempts_across_restart(tmp_path):
+    store, bundle = setup(tmp_path, FakeProvider())
+
+    async def exercise():
+        entered = asyncio.Event()
+        dispatched = []
+
+        async def blocked(request):
+            dispatched.append(request)
+            entered.set()
+            await asyncio.Event().wait()
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(blocked)) as http:
+            gw = gateway(tmp_path, http)
+            for number in range(1, MAX_ATTEMPTS + 1):
+                entered.clear()
+                task = asyncio.create_task(generate_reference(gw, store, bundle, style="photoreal"))
+                await asyncio.wait_for(entered.wait(), 1)
+                task.cancel("private cancellation detail")
+                with pytest.raises(asyncio.CancelledError) as cancelled:
+                    await task
+                assert task.cancelled() and cancelled.value.args == ("private cancellation detail",)
+                record = next(r for r in store.list("references") if r["attempt"] == number)
+                request_id = cancelled.value.request_id
+                ledger = gw.ledger.get(request_id)
+                assert record["status"] == "failed" and record["referenceImage"] is None
+                assert record["error"]["code"] == "cancelled" and record["error"]["request_id"] == request_id
+                assert record["modelCall"]["requestId"] == f"gateway:{request_id}"
+                assert record["modelCall"]["outcome"] == "error"
+                assert record["modelCall"]["costUsd"] is None and record["modelCall"]["inputTokens"] is None
+                assert ledger["outcome"] == "cancelled" and ledger["charged_tokens"] > 0 and ledger["usage"] is None
+                assert "private cancellation detail" not in json.dumps(record)
+
+            # The cap must survive new gateway/store instances, not just this process's lock state.
+            with pytest.raises(ReferenceError) as exhausted:
+                await generate_reference(gateway(tmp_path, http), ArtifactStore(store.root), bundle, style="photoreal")
+            assert exhausted.value.status == 409 and len(dispatched) == MAX_ATTEMPTS
+
+    asyncio.run(exercise())
+
+
+def test_cancel_before_gateway_admission_records_no_invented_request_id(tmp_path):
+    store, bundle = setup(tmp_path, FakeProvider())
+    dispatched = []
+
+    def unexpected(request):
+        dispatched.append(request)
+        raise AssertionError("cancelled before admission: no provider request should be made")
+
+    async def exercise():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(unexpected)) as http:
+            gw = gateway(tmp_path, http)
+            gw.slots = asyncio.Semaphore(0)
+            task = asyncio.create_task(generate_reference(gw, store, bundle, style="photoreal"))
+            await asyncio.sleep(0)  # let the call reach the unavailable gateway slot
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError) as cancelled:
+                await task
+            assert getattr(cancelled.value, "request_id", None) is None
+            assert not [r for r in gw.ledger.attempts() if r["stage"] == "reference"]
+            [record] = store.list("references")
+            assert record["attempt"] == 1 and record["status"] == "failed"
+            assert record["error"]["code"] == "cancelled" and record["error"]["request_id"] is None
+            assert record["modelCall"]["requestId"] is None and record["modelCall"]["costUsd"] is None
+
+    asyncio.run(exercise())
+    assert dispatched == []
 
 
 def test_unchanged_source_frame_is_malformed(tmp_path):

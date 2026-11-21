@@ -37,6 +37,7 @@ cost. Failed attempts are stored too.
 - **Normalization:** Nano Banana's 1K "16:9" output is 1376×768, which is not exact 16:9. Code center-crops it to exactly 16:9 (1360×765) and Lanczos-resizes to **1280×720**, the 16:9 size the Genie docs suggest and output. The raw output's hash and bytes are kept. Output more than 3% away from 16:9, smaller than 640×360, undecodable, or identical to the source is recorded as `malformed`.
 - **Genie transport:** checked on the exact bytes: PNG/JPEG, exactly 1280×720, MIME type matches the bytes, and at most 8 MiB. The 8 MiB cap is our own local limit; the Genie docs give none for WebSocket. The 48 KB limit applies only to WebRTC, which isn't used.
 - **Attempts:** at most 3 per edit and style (the first plus two gate-driven re-edits), serialized per edit and style. Each attempt has its own ID, hash, `ModelCall` and cost, including `failed` (gateway error) and `malformed` attempts. Nothing ever falls back to another camera or a cached image.
+- **Cancellation:** a locally cancelled image attempt is recorded as failed before cancellation propagates and still counts toward the cap. Unreported usage stays unknown; it links to the actual gateway request when one was admitted, or has no request ID if cancelled while waiting for admission.
 - **Labelling:** generated pixels, invented hidden surfaces and viewpoint changes are listed as `interpretations` on every record.
 - **No world creation:** this stage never starts a Genie session.
 
@@ -57,6 +58,7 @@ cost. Failed attempts are stored too.
 - **One decision per image:** gating the same reference again returns the stored decision.
 - **World binding:** `claim_world(reference, gate)` re-verifies the accepted image's bytes against the hash the judge saw and atomically claims the gate, so it admits one session. `bind_world(session, imageSha256)` then records which `WorldSession` used it, and `check_world_session` verifies the binding. Rejected and unknown gates raise HTTP 409.
 - **Genie handoff (#9):** `publish_accepted(reference, gate)` (route `POST /api/worlds/accepted-references`, operator token required) re-runs `authorize_world` and publishes an `AcceptedReference` pinning the judged image hash and the exact gate record bytes. It spends nothing and does not claim. `WorldManager.create` re-checks the live gate record, creates the session (no paid request is sent until a client attaches), then calls `claim_world` and binds `world_<session id>` to the image hash. A gate that is rejected, unknown, already claimed or changed since publication fails before any Genie request; losing a claim race stops the new session before it can reach Genie.
+- **Judge cancellation:** local cancellation persists an `insufficient_evidence` decision before propagating. Later callers receive that same decision instead of re-sampling the reference; any admitted gateway request remains linked without inventing usage.
 - **What the scores mean:** they are a model's visual judgments. They are not crash probabilities, safety ratings or proof of geographic identity.
 
 ### Blinded human checks and calibration — `backend/gate_review.py`
