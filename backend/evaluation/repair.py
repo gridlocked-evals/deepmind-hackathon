@@ -115,6 +115,7 @@ def register_plan(lock_path: str | Path, pinned_sha256: str, suite_path: str | P
 
     The test roster must be complete: every frozen-suite script on every test episode whose camera
     is absent from development, for replicates 0..k-1 with one k throughout. The dev roster is free.
+    Order: add the fresh capture (if any) first, then register the plan, then open a FinalRun.
     """
     if opened_marker(lock_path).exists():
         raise HoldoutError("holdout already opened: the comparison plan must be registered before any FinalRun")

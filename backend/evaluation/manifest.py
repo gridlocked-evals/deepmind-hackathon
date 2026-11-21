@@ -182,6 +182,8 @@ def add_fresh_capture(path: str | Path, episode: Episode, expected_sha256: str) 
     """Append the single judge-selected post-freeze capture, only before any FinalRun, without touching the core hash."""
     if opened_marker(path).exists():
         raise HoldoutError("holdout already opened: no additions after a FinalRun")
+    if plan_path(path).exists():  # the plan's roster is checked against the episodes at registration
+        raise HoldoutError("register the comparison plan after the fresh capture")
     locked = verify_lock(path, expected_sha256)
     if episode.split != "test":
         raise ValueError("the post-freeze fresh capture is a test episode")

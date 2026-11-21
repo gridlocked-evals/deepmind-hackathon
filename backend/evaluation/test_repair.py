@@ -6,7 +6,8 @@ import pytest
 from pydantic import ValidationError
 
 from backend.evaluation.attacks import AttackRecord, AttackScore, AttackScript, AttackType, save_suite
-from backend.evaluation.manifest import Episode, FinalRun, HoldoutError, Manifest, ResultsLedger, lock, opened_marker
+from backend.evaluation.manifest import (Episode, FinalRun, HoldoutError, Manifest, ResultsLedger, add_fresh_capture, lock,
+                                           opened_marker)
 from backend.evaluation.repair import (ChoiceField, ComparisonPlan, NumberField, PlanSlot, RepairSession, RepairSurface, RepairTrial,
                                        ScoredEpisode, TextField, build_packet, plan_path, register_plan)
 from backend.gateway.contracts import CallContext, CallResult, canonical, digest
@@ -367,6 +368,14 @@ def test_symlink_alias_shares_the_freeze(tmp_path):
     FinalRun(path, pinned)
     with pytest.raises(HoldoutError, match="already opened"):
         register_plan(alias, pinned, tmp_path / "suite.json", slots())
+
+
+def test_fresh_capture_after_plan_registration_is_refused(tmp_path):
+    path, pinned = locked(tmp_path)  # plan registered for b1 only
+    fresh = Episode(episode_id="fresh", source_id="cam7", provider="nyc_dot", modality="continuous",
+                    source_hashes=(digest(b"fresh"),), window_id="w2", duration_s=60, split="test")
+    with pytest.raises(HoldoutError, match="register the comparison plan after the fresh capture"):
+        add_fresh_capture(path, fresh, pinned)  # would add a held-out episode the plan never covers
 
 
 class GatedGateway(FakeGateway):
