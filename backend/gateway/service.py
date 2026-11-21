@@ -229,6 +229,9 @@ class ModelGateway:
                     raise GatewayError(ErrorCode.STORAGE, request_id=request_id) from None
                 error.request_id = request_id
                 if isinstance(exc, asyncio.CancelledError):
+                    # Preserve cancellation while letting callers link their failed attempt to this real ledger row.
+                    if request_id is not None:
+                        exc.request_id = request_id
                     raise
                 if not error.retryable or attempt + 1 >= attempts:
                     raise error from None
