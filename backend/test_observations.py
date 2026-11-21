@@ -12,14 +12,14 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
-from backend.artifacts import ArtifactError, ArtifactStore, utcnow
+from backend.artifacts import ArtifactError, ArtifactStore, sha256, utcnow
 from backend.capture import CaptureStore
 from backend.contracts import ObservationBatch
 from backend.gateway import GatewayConfig, ModelGateway
 from backend.observation_api import router
 from backend.observation_contracts import ExtractRequest, Fact, ManualReview, ReinspectRequest, WireOutput
 from backend.observation_media import index_prefix, verified_prefix
-from backend.observation_review import annotation_template, review_html, score_review
+from backend.observation_review import annotation_template, failure_report, main as review_main, review_html, score_review, verified_review
 from backend.observations import accept_facts, extract, windows
 from backend.test_pipeline_helpers import png, USAGE
 
@@ -72,7 +72,7 @@ def test_snapshot_has_real_gateway_trace_exact_pixels_and_reviewable_provenance(
     captures, store, manifest = setup(tmp_path)
     provider = Provider()
     report = asyncio.run(perform(tmp_path,captures,store,manifest,provider))
-    assert report['status']=='completed' and report['manualReview']=='pending_human_annotations'
+    assert report['status']=='completed' and report['manualReview']=='optional_not_reviewed'
     row = report['facts'][0]
     evidence = row['evidence'][0]
     assert evidence['captureId']==manifest['id'] and evidence['sourceId']=='dot-test'
@@ -195,12 +195,20 @@ def video(tmp_path_factory):
     target=tmp_path_factory.mktemp('observation_video')/'fixture.ts'
     subprocess.run(['ffmpeg','-v','error','-f','lavfi','-i','testsrc2=size=160x90:rate=6','-t','8',
                     '-c:v','mpeg2video','-f','mpegts',str(target)],capture_output=True,check=True,timeout=30)
-    return target.read_bytes()
+    holdout=target.with_name('holdout.ts')
+    subprocess.run(['ffmpeg','-v','error','-f','lavfi','-i','color=c=red:size=160x90:rate=6','-t','2',
+                    '-c:v','mpeg2video','-f','mpegts',str(holdout)],capture_output=True,check=True,timeout=30)
+    return target.read_bytes(), holdout.read_bytes()
 
 
 def video_capture(captures,video):
+    # Both partitions are real decodable fixtures with explicit byte boundaries.
+    # Isolation checks still ensure no holdout bytes/timeline are used by extraction.
+    prefix,holdout=video
+    segment = {'durationS':8, 'bytes':len(prefix), 'sha256':sha256(prefix)}
+    held_segment = {'durationS':2, 'bytes':len(holdout), 'sha256':sha256(holdout)}
     return captures._write_episode(camera_id='511ny-32998',source_kind='hls',media_type='video/mp2t',ext='ts',
-        prefix_bytes=video,holdout_bytes=b'held-out-secret-never-visible',segments={'prefix':[],'holdout':[]},
+        prefix_bytes=prefix,holdout_bytes=holdout,segments={'prefix':[segment],'holdout':[held_segment]},
         prefix_duration=8,holdout_duration=2,received=(utcnow(),utcnow()),source_clock='unknown',request={},labels=[])
 
 
@@ -212,6 +220,7 @@ def test_video_indexes_exact_frames_and_never_reads_suffix_into_model(tmp_path,v
     assert report['status']=='completed' and len(report['windows'])==2
     assert all(w['motionSupported'] for w in report['windows'])
     assert all('held-out-secret' not in json.dumps(r) for r in provider.requests)
+    assert manifest['files']['holdout']['sha256'] not in json.dumps(provider.requests)
     assert all(e['mediaTimeS']<8 for f in report['facts'] for e in f['evidence'])
     assert all(e['frameIndex']<manifest['frameCount'] for f in report['facts'] for e in f['evidence'])
     assert len(set(report['batchIds']))==2
@@ -236,6 +245,22 @@ def test_event_ownership_and_uncertainty_do_not_double_count():
     assert duplicate[0]['disposition']=='duplicate'
     uncertain=accept_facts(output(5,7,[1,3]),manifest,w[1],frames,images,True,first)
     assert uncertain[0]['disposition']=='boundary_uncertain'
+
+
+def test_reinspection_marks_parent_event_duplicate_instead_of_counting_again(tmp_path,video):
+    captures,store,_=setup(tmp_path)
+    manifest=video_capture(captures,video)
+    def event(meta):
+        left,right=meta['frames'][:2]
+        return [fact(meta,kind='event',semanticClass='pedestrian',state='crossing',provenance='derived',
+                     frameIndices=[left['frameIndex'],right['frameIndex']],
+                     time={'startS':left['mediaTimeS'],'endS':right['mediaTimeS']})]
+    provider=Provider([event])
+    parent=asyncio.run(perform(tmp_path,captures,store,manifest,provider))
+    ask=ReinspectRequest(focus='events',time={'startS':0,'endS':3},roi={'kind':'box','x':0,'y':0,'w':1,'h':1})
+    child=asyncio.run(perform(tmp_path,captures,store,manifest,provider,parent=parent,reinspection=ask,end=3))
+    assert child['metrics']['duplicates']==1 and child['metrics']['acceptedFacts']==0
+    assert child['facts'][0]['duplicateOf'] in {row['id'] for row in parent['facts']}
 
 
 @pytest.mark.parametrize('indices, repeated_crop, accepted', [
@@ -271,9 +296,10 @@ def test_manual_review_reports_errors_and_does_not_hide_model_abstention(tmp_pat
     provider=Provider([lambda m:[fact(m,kind='count',semanticClass='vehicle',count={'lower':1,'upper':2}),
                                fact(m,kind='signal',semanticClass='signal',visibility='unobservable')]])
     report=asyncio.run(perform(tmp_path,captures,store,manifest,provider))
-    review=ManualReview(**{**annotation_template(report),'reviewer':'fixture-reviewer','annotations':[
-        {'kind':'count','semanticClass':'vehicle','time':{'startS':0,'endS':0},'region':BOX,'present':'yes','count':{'lower':4,'upper':4}},
-        {'kind':'signal','semanticClass':'signal','time':{'startS':0,'endS':0},'region':BOX,'present':'yes','state':'red'}]})
+    frames=report['windows'][0]['frameIds']
+    review=ManualReview(**{**annotation_template(report),'reviewer':'fixture-reviewer','reviewedOriginalPixels':True,'annotations':[
+        {'kind':'count','semanticClass':'vehicle','time':{'startS':0,'endS':0},'region':BOX,'frameIds':frames,'present':'yes','count':{'lower':4,'upper':4}},
+        {'kind':'signal','semanticClass':'signal','time':{'startS':0,'endS':0},'region':BOX,'frameIds':frames,'present':'yes','state':'red'}]})
     result=score_review(store,report,review)
     assert result['counts']=={'count_error':1,'model_abstained':1}
     assert result['extractionMetrics']['abstentions']==1
@@ -299,6 +325,15 @@ def test_api_requires_operator_auth_and_keeps_original_pixels_next_to_facts(tmp_
         assert client.get(path+'/frames/frame_not-in-job',headers=auth).status_code==403
         frame=report['windows'][0]['frameIds'][0]
         assert client.get(path+'/frames/'+frame,headers=auth).content==png(size=(200,100))
+        assert client.get(path+'/failure-report',headers=auth).json()['humanAccuracy'] is None
+        assert client.get(path+'/reviews',headers=auth).json()['status']=='optional_not_reviewed'
+        body=manual_review(report).model_dump(mode='json')
+        assert client.post(path+'/annotations',json=body).status_code==401
+        submitted=client.post(path+'/annotations',json=body,headers=auth)
+        assert submitted.status_code==200
+        review_id=submitted.json()['id']
+        assert client.get(path+'/reviews/'+review_id,headers=auth).json()['sha256']==submitted.json()['sha256']
+        assert len(client.get(path+'/reviews',headers=auth).json()['reviews'])==1
 
 
 def test_cancellation_retains_trace_failure_and_pinned_originals(tmp_path):
@@ -332,6 +367,137 @@ def test_cancellation_retains_trace_failure_and_pinned_originals(tmp_path):
     asyncio.run(run())
 
 
+def manual_annotation(report, **changes):
+    return {'kind':'count','semanticClass':'vehicle','time':{'startS':0,'endS':0},'region':BOX,
+            'frameIds':report['windows'][0]['frameIds'],'present':'yes','count':{'lower':4,'upper':4},**changes}
+
+
+def manual_review(report, **changes):
+    return ManualReview.model_validate({**annotation_template(report),'reviewer':'scripted-test-fixture',
+        'reviewedOriginalPixels':True,'annotations':[manual_annotation(report)],**changes})
+
+
+def test_reviews_bind_exact_report_original_frames_and_attestation(tmp_path):
+    captures,store,manifest=setup(tmp_path)
+    report=asyncio.run(perform(tmp_path,captures,store,manifest,Provider()))
+    template=annotation_template(report)
+    assert template['annotations']==[] and template['reviewedOriginalPixels'] is False
+    with pytest.raises(ValidationError):
+        ManualReview.model_validate({**template,'reviewer':'fixture','annotations':[manual_annotation(report)]})
+    review=manual_review(report)
+    result=score_review(store,report,review)
+    assert verified_review(result,report)==result
+    assert result['annotation']['reviewMode']=='model_assisted'
+    with pytest.raises(ArtifactError,match='exact capture'):
+        score_review(store,{**report,'status':'changed'},review)
+    with pytest.raises(ArtifactError,match='original frames'):
+        score_review(store,report,manual_review(report,annotations=[manual_annotation(report,frameIds=['frame_other-0001'])]))
+    with pytest.raises(ArtifactError,match='Duplicate'):
+        score_review(store,report,manual_review(report,annotations=[manual_annotation(report)]*2))
+    with pytest.raises(ArtifactError,match='content hash'):
+        verified_review({**result,'counts':{'matched':100}},report)
+    # A review cannot silently transfer to another extraction of the same pixels.
+    other=asyncio.run(perform(tmp_path,captures,store,manifest,Provider()))
+    with pytest.raises(ArtifactError):
+        score_review(store,other,review)
+
+
+@pytest.mark.parametrize('change', [
+    {'kind':'signal','semanticClass':'signal'},
+    {'present':'unknown'},
+    {'kind':'event','state':'crossing','semanticClass':'pedestrian'},
+    {'frameIds':[]},
+    {'time':{'startS':0,'endS':1}},
+])
+def test_manual_annotation_semantics_do_not_invent_unsupported_truth(tmp_path,change):
+    captures,store,manifest=setup(tmp_path)
+    report=asyncio.run(perform(tmp_path,captures,store,manifest,Provider()))
+    with pytest.raises(ValidationError):
+        manual_review(report,annotations=[manual_annotation(report,**change)])
+
+
+def test_count_comparison_requires_matching_region_and_unknown_stays_unscored(tmp_path):
+    captures,store,manifest=setup(tmp_path)
+    report=asyncio.run(perform(tmp_path,captures,store,manifest,Provider([
+        lambda meta:[fact(meta,kind='count',semanticClass='vehicle',count={'lower':1,'upper':2})]])))
+    shifted={**BOX,'x':.12}
+    result=score_review(store,report,manual_review(report,annotations=[manual_annotation(report,region=shifted)]))
+    assert result['counts']=={'count_region_mismatch_unscored':1}
+    unknown=score_review(store,report,manual_review(report,annotations=[manual_annotation(report,count={'lower':None,'upper':None})]))
+    assert unknown['counts']=={'human_unknown':1}
+
+
+@pytest.mark.parametrize('lower,upper,outcome', [(0,0,'correct_absence'),(0,2,'model_abstained'),(1,2,'false_positive')])
+def test_reviewed_absence_respects_zero_and_uncertain_model_count(tmp_path,lower,upper,outcome):
+    captures,store,manifest=setup(tmp_path)
+    report=asyncio.run(perform(tmp_path,captures,store,manifest,Provider([
+        lambda meta:[fact(meta,kind='count',semanticClass='vehicle',count={'lower':lower,'upper':upper})]])))
+    annotation=manual_annotation(report,present='no',count={'lower':None,'upper':None})
+    assert score_review(store,report,manual_review(report,annotations=[annotation]))['counts']=={outcome:1}
+
+
+def test_reviewed_absence_never_counts_failed_extraction_as_correct(tmp_path):
+    captures,store,manifest=setup(tmp_path)
+    report=asyncio.run(perform(tmp_path,captures,store,manifest,Provider([429])))
+    annotation=manual_annotation(report,present='no',count={'lower':None,'upper':None})
+    result=score_review(store,report,manual_review(report,annotations=[annotation]))
+    assert result['counts']=={'model_failed_or_unprocessed':1}
+    assert result['coverage']['scoredComparisons']==0
+
+
+def test_offline_review_export_is_empty_safe_and_never_overwrites_human_work(tmp_path,capsys):
+    captures,store,manifest=setup(tmp_path)
+    report=asyncio.run(perform(tmp_path,captures,store,manifest,Provider()))
+    packet=tmp_path/'packet'
+    args=['--artifact-dir',str(store.root),'--extraction',report['id'],'--export-dir',str(packet)]
+    assert review_main(args)==0
+    assert json.loads((packet/'annotations.template.json').read_text())['annotations']==[]
+    assert json.loads((packet/'failures.json').read_text())['humanAccuracy'] is None
+    html=(packet/'review.html').read_text()
+    assert html.index('Original evidence') < html.index('Model facts and evidence links')
+    assert not store.list('reviews')
+    (packet/'annotations.template.json').write_text('human work in progress')
+    assert review_main(args)==1
+    assert (packet/'annotations.template.json').read_text()=='human work in progress'
+    annotation_file=tmp_path/'human-fixture.json'
+    annotation_file.write_text(manual_review(report).model_dump_json())
+    assert review_main(['--artifact-dir',str(store.root),'--extraction',report['id'],'--annotations',str(annotation_file)])==0
+    assert len(store.list('reviews'))==1
+
+
+def test_failure_report_preserves_failed_abstained_and_unprocessed_windows(tmp_path,video):
+    captures,store,_=setup(tmp_path)
+    manifest=video_capture(captures,video)
+    report=asyncio.run(perform(tmp_path,captures,store,manifest,Provider([429])))
+    detail=failure_report(report)
+    assert detail['plannedWindows']==2 and detail['metrics']['unprocessedWindows']==1
+    assert detail['metrics']['failures']==1 and detail['windows'][0]['gatewayRequestId']
+    assert detail['humanAccuracy'] is None
+
+
+def test_invalid_domain_output_and_abstention_never_qualify_but_success_does(tmp_path):
+    captures,store,manifest=setup(tmp_path)
+    async def run():
+        provider=Provider([lambda meta:[fact(meta,frameIndices=[99])],lambda meta:[],lambda meta:[fact(meta)]])
+        async with httpx.AsyncClient(transport=httpx.MockTransport(provider.handler)) as client:
+            gateway=ModelGateway(GatewayConfig(data_dir=tmp_path/'ledger',max_attempts=1,
+                rates_valid_through=date(2030,1,1)),client,api_key='fixture-secret')
+            request=ExtractRequest(captureId=manifest['id'],cameraId=manifest['cameraId'])
+            invalid=await extract(gateway,store,captures,request)
+            assert invalid['status']=='failed' and gateway.ledger.attempts()[0]['qualifying']==0
+            abstained=await extract(gateway,store,captures,request)
+            assert abstained['status']=='abstained' and gateway.ledger.attempts()[0]['qualifying']==0
+            assert abstained['windows'][0]['acceptanceBinding']
+            accepted=await extract(gateway,store,captures,request)
+            assert accepted['status']=='completed' and gateway.ledger.attempts()[0]['qualifying']==1
+            context=json.loads(gateway.ledger.attempts()[0]['context'])
+            assert context['episode_id']==manifest['id'] and context['source_id']==manifest['cameraId']
+            assert context['attempt_id']==accepted['windows'][0]['attemptId']
+    asyncio.run(run())
+
+
+
+
 @pytest.mark.parametrize('abstention_first', [False, True])
 def test_negative_review_checks_all_accepted_candidates_before_abstentions(tmp_path, abstention_first):
     captures,store,manifest=setup(tmp_path)
@@ -341,8 +507,8 @@ def test_negative_review_checks_all_accepted_candidates_before_abstentions(tmp_p
         abstention=fact(meta,kind='signal',semanticClass='signal',visibility='unobservable')
         return [abstention,*accepted] if abstention_first else [*accepted,abstention]
     report=asyncio.run(perform(tmp_path,captures,store,manifest,Provider([rows])))
-    review=ManualReview(**{**annotation_template(report),'reviewer':'synthetic-regression-fixture','annotations':[
-        {'kind':'signal','semanticClass':'signal','time':{'startS':0,'endS':0},'region':BOX,'present':'no'}]})
+    review=ManualReview(**{**annotation_template(report),'reviewer':'synthetic-regression-fixture','reviewedOriginalPixels':True,'annotations':[
+        {'kind':'signal','semanticClass':'signal','time':{'startS':0,'endS':0},'region':BOX,'frameIds':report['windows'][0]['frameIds'],'present':'no'}]})
     result=score_review(store,report,review)
     comparison=result['comparisons'][0]
     accepted_ids={row['id'] for row in report['facts'] if row['disposition']=='accepted'}
@@ -357,8 +523,8 @@ def test_negative_review_keeps_abstention_distinct_from_absence(tmp_path, abstai
     provider=Provider([lambda meta:[fact(meta,kind='signal',semanticClass='signal',visibility='unobservable')]
                        if abstained else []])
     report=asyncio.run(perform(tmp_path,captures,store,manifest,provider))
-    review=ManualReview(**{**annotation_template(report),'reviewer':'synthetic-regression-fixture','annotations':[
-        {'kind':'signal','semanticClass':'signal','time':{'startS':0,'endS':0},'region':BOX,'present':'no'}]})
+    review=ManualReview(**{**annotation_template(report),'reviewer':'synthetic-regression-fixture','reviewedOriginalPixels':True,'annotations':[
+        {'kind':'signal','semanticClass':'signal','time':{'startS':0,'endS':0},'region':BOX,'frameIds':report['windows'][0]['frameIds'],'present':'no'}]})
     assert score_review(store,report,review)['comparisons'][0]['outcome']==expected
 
 
@@ -368,9 +534,9 @@ def test_count_review_requires_human_quantity_and_preserves_presence(tmp_path, h
     captures,store,manifest=setup(tmp_path)
     provider=Provider([lambda meta:[fact(meta,kind='count',semanticClass='vehicle',count={'lower':1,'upper':2})]])
     report=asyncio.run(perform(tmp_path,captures,store,manifest,provider))
-    review=ManualReview(**{**annotation_template(report),'reviewer':'synthetic-regression-fixture','annotations':[
+    review=ManualReview(**{**annotation_template(report),'reviewer':'synthetic-regression-fixture','reviewedOriginalPixels':True,'annotations':[
         {'kind':'count','semanticClass':'vehicle','time':{'startS':0,'endS':0},'region':BOX,
-         'present':'yes','count':human_count}]})
+         'frameIds':report['windows'][0]['frameIds'],'present':'yes','count':human_count}]})
     comparison=score_review(store,report,review)['comparisons'][0]
     assert comparison['outcome']==expected
     assert comparison['presenceOutcome']=='matched'
@@ -387,8 +553,8 @@ def test_count_review_without_human_quantity_keeps_presence_errors(tmp_path, mod
             count={} if model_case=='unknown' else {'lower':1,'upper':2},
             region={**BOX,'w':.1} if model_case=='partial_overlap' else BOX)]
     report=asyncio.run(perform(tmp_path,captures,store,manifest,Provider([rows])))
-    review=ManualReview(**{**annotation_template(report),'reviewer':'synthetic-regression-fixture','annotations':[
-        {'kind':'count','semanticClass':'vehicle','time':{'startS':0,'endS':0},'region':BOX,'present':'yes'}]})
+    review=ManualReview(**{**annotation_template(report),'reviewer':'synthetic-regression-fixture','reviewedOriginalPixels':True,'annotations':[
+        {'kind':'count','semanticClass':'vehicle','time':{'startS':0,'endS':0},'region':BOX,'frameIds':report['windows'][0]['frameIds'],'present':'yes'}]})
     result=score_review(store,report,review)
     assert result['counts']=={'human_unknown':1}
     assert result['comparisons'][0]['presenceOutcome']==presence

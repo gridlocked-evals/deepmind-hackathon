@@ -11,6 +11,7 @@ from .gateway.contracts import MODELS, CallResult, ErrorCode, Service
 
 _OUTCOMES = {
     ErrorCode.TIMEOUT: "timeout", ErrorCode.QUOTA: "quota", ErrorCode.INVALID_OUTPUT: "invalid_output",
+    ErrorCode.INCOMPLETE_OUTPUT: "invalid_output",
     ErrorCode.BUDGET: "blocked", ErrorCode.DISABLED: "blocked", ErrorCode.NOT_CONFIGURED: "blocked",
     ErrorCode.CONCURRENCY: "blocked", ErrorCode.INVALID_INPUT: "blocked",
 }

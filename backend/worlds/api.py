@@ -3,26 +3,39 @@ import asyncio
 import json
 import os
 import secrets
+from urllib.parse import urlsplit
 
 from fastapi import APIRouter, Depends, HTTPException, Request, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, ConfigDict
 
 from ..gateway.contracts import GatewayError
 from .contracts import WorldRequest
+from .evidence import recorded_results
 
 router = APIRouter(prefix="/api/worlds")
 ORIGINS = {"http://localhost:5173", "http://127.0.0.1:5173", "http://localhost:8000", "http://127.0.0.1:8000"}
+
+
+def allowed_origins() -> set[str]:
+    origins = set(ORIGINS)
+    for value in os.getenv("WORLD_ALLOWED_ORIGINS", "").split(","):
+        value = value.strip()
+        parsed = urlsplit(value)
+        if (parsed.scheme in {"http", "https"} and parsed.netloc and not parsed.username
+                and not parsed.password and not parsed.path and not parsed.query and not parsed.fragment):
+            origins.add(value)
+    return origins
 
 
 def authorize(request: Request):
     configured = os.getenv("WORLD_API_TOKEN", "")
     supplied = request.headers.get("authorization", "")
     if len(configured) < 32:
-        raise HTTPException(503, "World creation requires a backend WORLD_API_TOKEN of at least 32 characters.")
+        raise HTTPException(503, "Model operations require a backend WORLD_API_TOKEN of at least 32 characters.")
     if not secrets.compare_digest(supplied, "Bearer " + configured):
-        raise HTTPException(401, "World API authentication required.")
+        raise HTTPException(401, "Operator authentication required.")
     origin = request.headers.get("origin")
-    if origin and origin not in ORIGINS:
+    if origin and origin not in allowed_origins():
         raise HTTPException(403, "Origin is not allowed.")
 
 
@@ -65,6 +78,15 @@ async def world_status(session_id: str, request: Request):
     return session.status()
 
 
+@router.get("/{session_id}/results", dependencies=[Depends(authorize)])
+async def world_results(session_id: str, request: Request):
+    """Retained evidence remains reviewable after the live session is retired."""
+    try:
+        return await asyncio.to_thread(recorded_results, request.app.state.models.config.data_dir, session_id)
+    except (OSError, ValueError, KeyError, TypeError):
+        raise HTTPException(404, "No readable recording for this session.") from None
+
+
 @router.post("/{session_id}/stop", dependencies=[Depends(authorize)])
 async def stop_world(session_id: str, request: Request):
     session = request.app.state.worlds.sessions.get(session_id)
@@ -79,7 +101,7 @@ async def stream_world(websocket: WebSocket, session_id: str):
     # Reject cross-site browser connections even with a leaked session capability.
     origin = websocket.headers.get("origin")
     session = websocket.app.state.worlds.sessions.get(session_id)
-    if not session or (origin and origin not in ORIGINS):
+    if not session or (origin and origin not in allowed_origins()):
         await websocket.close(code=1008)
         return
     role = None

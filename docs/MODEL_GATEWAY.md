@@ -15,8 +15,10 @@ establish project throughput limits or submission eligibility.
 ## Configure and inspect
 
 Install `backend/requirements.txt` into the project virtual environment. Copy
-`.env.example` to `.env`, then set `GEMINI_API_KEY` locally. `GOOGLE_API_KEY` is a
-fallback. Environment variables take precedence over `.env`. Neither key uses a
+`.env.example` to `.env`, then set `GEMINI_API_KEY` (primary) and optionally
+`WORKSHOP_API_KEY`. Select one explicitly with `GEMINI_KEY_PROFILE=primary` or
+`workshop`; there is no automatic project fallback. Environment variables take
+precedence over `.env`. Neither key uses a
 `VITE_` prefix or reaches the frontend. Credentials, raw upstream error bodies,
 and connection authorization tokens are excluded from the gateway records.
 
@@ -47,6 +49,11 @@ Verification is scoped to the credential fingerprint and configuration hash.
 Status also exposes recorded latency, provider/local request IDs, whether usage
 was reported, expired pricing, and budget blocks. A connected service can still
 be blocked by a spending limit. Status does not list a guessed project quota.
+
+Genie is optional and disabled by default. `GENIE_ENABLED=true` explicitly enables
+billable world requests, while `false` blocks both the probe and session manager.
+Default live smoke batches skip disabled Genie; explicit Genie requests fail without
+provider traffic. Status includes `key_profile`, service `enabled`, and `optional`.
 
 ## Live capability checks
 
@@ -80,8 +87,10 @@ workloads. There is no automatic throughput stress test.
 
 ## Backend integration contract
 
-`backend/gateway` is a server-only library. Model calls are not exposed as an
-unauthenticated paid HTTP proxy. Backend stages use `app.state.models`:
+`backend/gateway` is a server-only library. Backend stages use `app.state.models`:
+the observation route resolves retained source evidence before invoking Hydrogen.
+Local capture/observation routes are intended for a loopback development server;
+add deployment authentication before exposing these write routes publicly.
 
 ```python
 from pydantic import BaseModel, Field
@@ -131,6 +140,33 @@ that exact capture. Smoke/development traces, plain-text pings, navigation-only
 calls, and the other three services cannot satisfy that pair. The domain schemas
 and substantive output checks still belong to #5/#6; this gateway cannot judge
 whether an arbitrary caller-supplied schema describes a meaningful street edit.
+
+## Existing capture-branch configuration
+
+The merged application uses one gateway and one operational ledger at `.gateway/`.
+On startup, the former `data/gateway.sqlite3` ledger (or `MODEL_LEDGER_PATH`) is
+read-only imported once per legacy request ID. Its full token and dollar
+reservations remain charged, including failures and token overages; migration does
+not manufacture fresh headroom or reinterpret reservations as provider invoices.
+The original database and historical observation traces remain intact.
+
+Existing `MODEL_*` environment ceilings override the equivalent JSON settings.
+`MODEL_STAGE_BUDGET_USD` and `MODEL_STAGE_TOKEN_BUDGET` additionally cap each model
+service across its stages, preventing a move from observation to navigation from
+resetting the Hydrogen allowance. A legacy total request-token ceiling is split
+between bounded input and output allowances. Explicit larger JSON allowances must
+be reconciled deliberately. Copying `.env.example` therefore has stricter limits
+than constructing `GatewayConfig()` with library defaults below.
+
+`ObservationService` uses `generate(..., response_model=ExtractionOutput)` and
+`gateway.trace(...)`; provider-facing schema bounds are projected to fit the
+serving grammar while Pydantic still validates all bounds and evidence references.
+Use `qualify=False` when a stage needs domain checks after structured output. Only
+after those checks and durable artifact storage, call `accept_artifact(result,
+artifact_id=..., artifact_sha256=...)` to bind the accepted output and qualify the
+request. Observations follow this path so nonexistent frame references never count
+as accepted submission evidence. No legacy `core.py` execution path or second
+spending ledger remains active.
 
 ## Accounting and evidence
 

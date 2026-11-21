@@ -133,6 +133,7 @@ class EditBundle(BaseModel):
     streetEdit: StreetEdit
     preset: str
     captureId: str
+    sourceId: str | None = None
     captureMediaSha256: str | None
     sourceFrame: dict | None
     anchorLabels: dict[str, str] = Field(default_factory=dict)
@@ -322,11 +323,19 @@ async def compile_edit(gateway: ModelGateway, store: ArtifactStore, *, batch: Ob
     batch_hash = sha256(batch.model_dump_json().encode())
     domain_hashes = [batch_hash, *( [capture_media_sha256] if capture_media_sha256 else []),
                      *([frame["frameSha256"]] if frame else [])]
+    evidence = store.get("observation_evidence", batch.id) if store.exists("observation_evidence", batch.id) else {}
+    source_id = evidence.get("sourceId") or (frame or {}).get("sourceId")
+    if evidence and (evidence.get("captureId") != batch.captureId or
+                     (capture_media_sha256 and evidence.get("prefixSha256") != capture_media_sha256)):
+        raise EditRequestError("Observation evidence does not match this capture's retained prefix")
+    if evidence and frame and frame.get("sourceId") and evidence.get("sourceId") != frame["sourceId"]:
+        raise EditRequestError("Observation and source frame belong to different cameras")
     context = CallContext(episode_id=batch.captureId, prompt_id=PROMPT_ID, capture_id=batch.captureId,
-                          source_id=batch.captureId, purpose=purpose)
+                          source_id=source_id or batch.captureId, purpose=purpose,
+                          original_media_sha256=(capture_media_sha256.removeprefix("sha256:"),) if capture_media_sha256 else ())
     requested = utcnow()
     result = await gateway.generate(Service.CARBON, stage="compilation", input_value=input_value,
-                                    context=context, response_model=CarbonWireOutput)
+                                    context=context, response_model=CarbonWireOutput, qualify=False)
     call = from_result(gateway, Service.CARBON, result, prompt_id=PROMPT_ID, domain_hashes=domain_hashes,
                        requested_at=requested, completed_at=utcnow())
     try:
@@ -361,7 +370,7 @@ async def compile_edit(gateway: ModelGateway, store: ArtifactStore, *, batch: Ob
         errors.append(edit.rejectionReason)
     compiled = edit.status == "compiled"
     bundle = EditBundle(
-        streetEdit=edit, preset=preset.name, captureId=batch.captureId, captureMediaSha256=capture_media_sha256,
+        streetEdit=edit, preset=preset.name, captureId=batch.captureId, sourceId=source_id, captureMediaSha256=capture_media_sha256,
         sourceFrame=frame, operationResults=results,
         anchorLabels={a.id: f"{a.label} ({a.semanticClass})" for a in batch.anchors},
         crossingAnchorIds=[a.id for a in batch.anchors if a.semanticClass == "crosswalk"], laneUse=out.laneUse if compiled else None,
@@ -372,4 +381,7 @@ async def compile_edit(gateway: ModelGateway, store: ArtifactStore, *, batch: Ob
         validationErrors=errors, carbonOutput=out.model_dump(mode="json"),
         carbonResultHash="sha256:" + result.result_hash, gatewayRequestId=result.request_id)
     store.put("edits", edit_id, bundle)
+    if compiled:
+        gateway.accept_artifact(result, artifact_id=edit_id,
+                                artifact_sha256=sha256(store._path("edits", edit_id).read_bytes()).removeprefix("sha256:"))
     return bundle

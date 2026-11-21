@@ -14,7 +14,7 @@ from PIL import Image
 from pydantic import ValidationError
 
 from .config import GatewayConfig
-from .contracts import MODELS, AdapterResult, ErrorCode, GatewayError, GenieCallState, PreparedCall, Service, Usage, canonical
+from .contracts import MODELS, PROVIDER_STATUSES, AdapterResult, ErrorCode, GatewayError, GenieCallState, PreparedCall, Service, Usage, canonical
 
 BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
 
@@ -30,8 +30,51 @@ def reported_usage(raw: object) -> Usage | None:
 
 
 def safe_id(value: object, secret: str) -> str | None:
+    # Interaction IDs are interpolated into resource paths by the world runtime.
     return value if (isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9_.:-]{1,256}", value)
-                     and secret not in value) else None
+                     and (not secret or secret not in value)) else None
+
+
+def provider_id(value: object, secret: str) -> str | None:
+    # Generic provider trace IDs may be resource names; never use this broader
+    # form to construct an interaction cancellation URL.
+    return value if (isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:/-]{0,255}", value)
+                    and not any(part in {".", ".."} for part in value.split("/"))
+                    and (not secret or secret not in value)) else None
+
+
+def model_text(steps: list) -> str:
+    """Return the final consecutive model text, never source or tool content."""
+    parts = []
+    for step in reversed(steps):
+        if not isinstance(step, dict):
+            raise GatewayError(ErrorCode.INVALID_OUTPUT)
+        kind = step.get("type")
+        if kind == "user_input":
+            break
+        if kind == "thought":
+            continue
+        if kind != "model_output":
+            if parts:
+                break
+            continue
+        content = step.get("content")
+        if not isinstance(content, list):
+            raise GatewayError(ErrorCode.INVALID_OUTPUT)
+        for part in reversed(content):
+            if not isinstance(part, dict):
+                raise GatewayError(ErrorCode.INVALID_OUTPUT)
+            if part.get("type") != "text":
+                if parts:
+                    return "".join(reversed(parts))
+                continue
+            if not isinstance(part.get("text"), str):
+                raise GatewayError(ErrorCode.INVALID_OUTPUT)
+            parts.append(part["text"])
+    text = "".join(reversed(parts))
+    if not text.strip():
+        raise GatewayError(ErrorCode.INVALID_OUTPUT)
+    return text
 
 
 def decode_image(part: dict) -> tuple[bytes, tuple[int, int]]:
@@ -91,21 +134,39 @@ class HTTPAdapter:
         try:
             async with self.client.stream(
                 "POST", BASE_URL + path, content=body, follow_redirects=False,
-                headers={"x-goog-api-key": self.api_key, "Content-Type": "application/json"},
+                headers={"x-goog-api-key": self.api_key, "Content-Type": "application/json", "Api-Revision": "2026-05-20"},
                 timeout=self.config.timeout_seconds,
             ) as response:
-                identifier = safe_id(response.headers.get("x-request-id") or response.headers.get("x-goog-request-id"), self.api_key)
+                identifier = provider_id(response.headers.get("x-request-id") or response.headers.get("x-goog-request-id"), self.api_key)
                 if identifier:
                     on_id(identifier)
                 status = response.status_code
                 if status >= 300:
-                    code = ErrorCode.AUTH if status in (401, 403) else ErrorCode.QUOTA if status == 429 else ErrorCode.UPSTREAM
+                    code = (ErrorCode.AUTH if status in (401, 403) else ErrorCode.QUOTA if status == 429
+                            else ErrorCode.INVALID_INPUT if status == 400 else ErrorCode.UPSTREAM)
                     try:
                         delay = float(response.headers.get("retry-after", "0"))
                         delay = delay if math.isfinite(delay) else 0
                     except ValueError:
                         delay = 0
-                    raise GatewayError(code, retryable=status in (429, 502, 503, 504), retry_after=max(0, delay), status=status)
+                    # Bounded parsing extracts known machine codes only. Neither
+                    # provider prose nor continuation/session tokens are logged.
+                    error_data = bytearray()
+                    async for chunk in response.aiter_bytes():
+                        error_data.extend(chunk)
+                        if len(error_data) > 65536:
+                            break
+                    provider_status = None
+                    if len(error_data) <= 65536:
+                        try:
+                            body_error = json.loads(error_data).get("error", {})
+                            if isinstance(body_error, dict):
+                                provider_status = next((body_error[field] for field in ("status", "code")
+                                    if isinstance(body_error.get(field), str) and body_error[field] in PROVIDER_STATUSES), None)
+                        except (ValueError, AttributeError):
+                            pass
+                    raise GatewayError(code, retryable=status in (429, 502, 503, 504), retry_after=max(0, delay),
+                                       http_status=status, provider_status=provider_status)
                 data = bytearray()
                 async for chunk in response.aiter_bytes():
                     data.extend(chunk)
@@ -116,7 +177,7 @@ class HTTPAdapter:
             raw = json.loads(data, parse_constant=invalid_constant)
             if not isinstance(raw, dict):
                 raise GatewayError(ErrorCode.INVALID_OUTPUT)
-            identifier = safe_id(raw.get("id"), self.api_key) or identifier
+            identifier = provider_id(raw.get("id"), self.api_key) or identifier
             if identifier:
                 on_id(identifier)
             return raw
@@ -141,6 +202,8 @@ class HTTPAdapter:
         if call.service == Service.DECISIONS:
             output = validate_answers(raw, json.loads(call.body)["questions"])
         else:
+            if raw.get("status") == "incomplete":
+                raise GatewayError(ErrorCode.INCOMPLETE_OUTPUT)
             if raw.get("status") != "completed":
                 raise GatewayError(ErrorCode.INVALID_OUTPUT)
             steps = raw.get("steps", [])
@@ -157,9 +220,7 @@ class HTTPAdapter:
                 _, size = decode_image(images[0])
                 output = {**images[0], "width": size[0], "height": size[1]}
             else:
-                text = "".join(part["text"] for part in content if part.get("type") == "text" and isinstance(part.get("text"), str))
-                if not text.strip():
-                    raise GatewayError(ErrorCode.INVALID_OUTPUT)
+                text = model_text(steps)
                 try:
                     output = call.response_model.model_validate_json(text).model_dump(mode="json") if call.response_model else text
                 except ValidationError:

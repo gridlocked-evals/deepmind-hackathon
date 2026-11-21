@@ -97,8 +97,22 @@ class WorldSession:
         for queue in self.queues.values():
             # Display delivery may skip old frames. Recording never does.
             if queue.full():
-                queue.get_nowait()
+                pending = [queue.get_nowait() for _ in range(queue.qsize())]
+                if item["kind"] == "status":
+                    pending = [message for message in pending if message["kind"] != "status"]
+                else:
+                    # Fast video must not evict the latest state before a slow
+                    # browser receives the transition that enables its controls.
+                    statuses = [message for message in pending if message["kind"] == "status"]
+                    frames = [message for message in pending if message["kind"] != "status"]
+                    pending = statuses[-1:] + frames[-(queue.maxsize - 2):]
+                for message in pending[-(queue.maxsize - 1):]:
+                    queue.put_nowait(message)
             queue.put_nowait(item)
+
+    def _publish_status(self):
+        # status() deliberately excludes project keys and connect capabilities.
+        self._publish({"kind": "status", **self.status()})
 
     async def attach(self, role: str, token: str):
         expected = self.token_hashes.get(role)
@@ -120,10 +134,12 @@ class WorldSession:
         if not self.stopping.is_set():
             self.reason = reason
             self.stopping.set()
+            self.state = "stopping"
             try:
                 self.recording.event("stop_requested", reason=reason)
             except OSError:
                 self.error = ErrorCode.STORAGE.value
+            self._publish_status()
 
     async def _await_connection(self):
         try:
@@ -205,6 +221,7 @@ class WorldSession:
                     await self._release_all()
                     self.key_owner = command.owner
                     self.recording.event("takeover", owner=command.owner)
+                    self._publish_status()
                 elif command.kind == "release":
                     if role != self.key_owner and role != "human":
                         raise GatewayError(ErrorCode.AUTH)
@@ -321,6 +338,7 @@ class WorldSession:
         connection = None
         cancelled = None
         self.state = "connecting"
+        self._publish_status()
         def check_stopped():
             if self.stopping.is_set():
                 raise GatewayError(ErrorCode.CANCELLED)
@@ -353,6 +371,7 @@ class WorldSession:
                 self.state = "running"
                 self.ready.set()
                 self._save()
+                self._publish_status()
                 watcher = asyncio.create_task(self._watchdog())
                 stop_wait = asyncio.create_task(self.stopping.wait())
                 try:
@@ -377,6 +396,7 @@ class WorldSession:
         finally:
             self.stopping.set()
             self.state = "stopping"
+            self._publish_status()
             async def close_resources():
                 if watcher:
                     watcher.cancel()
@@ -469,7 +489,7 @@ class WorldManager:
     def _create(self, **kwargs):
         if not self.gateway._key:
             raise GatewayError(ErrorCode.NOT_CONFIGURED)
-        if not self.gateway.config.enabled:
+        if not self.gateway.config.enabled or not self.gateway.config.genie_enabled:
             raise GatewayError(ErrorCode.DISABLED)
         if datetime.now(timezone.utc).date() > self.gateway.config.rates_valid_through:
             raise GatewayError(ErrorCode.BUDGET)

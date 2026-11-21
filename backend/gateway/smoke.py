@@ -40,12 +40,15 @@ def fixture_image() -> dict:
     return {"type": "image", "mime_type": "image/jpeg", "data": base64.b64encode(buffer.getvalue()).decode()}
 
 
-async def run_smoke(gateway: ModelGateway, services: list[Service]) -> dict:
+async def run_smoke(gateway: ModelGateway, services: list[Service], *, skip_disabled: bool = True) -> dict:
     episode = "smoke-" + str(uuid4())
     image = fixture_image()
     reference = None
     results = []
     for service in services:
+        if service == Service.GENIE and not gateway.config.genie_enabled and skip_disabled:
+            results.append({"service": service.value, "outcome": "skipped", "reason": "disabled", "optional": True})
+            continue
         context = CallContext(episode_id=episode, prompt_id="capability-v1-" + service.value, purpose="smoke")
         try:
             if service == Service.HYDROGEN:
@@ -77,9 +80,9 @@ async def run_smoke(gateway: ModelGateway, services: list[Service]) -> dict:
             results.append({"service": service.value, "outcome": "blocked_or_failed", "error": error.public()})
     report = {"schema_version": 1, "episode_id": episode, "kind": "development_capability_smoke",
               "results": results, "status": gateway.status(),
-              "all_selected_verified": all(r["outcome"] == "success" and r["usage"] is not None
+              "all_selected_verified": any(r["outcome"] != "skipped" for r in results) and all(r["outcome"] == "success" and r["usage"] is not None
                   and r["request_id"] and (r["service"] != Service.GENIE.value or r["provider_request_id"])
-                  for r in results),
+                  for r in results if r["outcome"] != "skipped"),
               "request_id_note": "request_id is the local durable attempt ID. Stateless inference and Decisions may omit provider IDs; Genie requires an interaction ID for termination.",
               "quota_measurement": "One bounded probe per selected service, plus logged retries. Project throughput ceilings remain unmeasured.",
               "submission_evidence": False}
@@ -92,7 +95,7 @@ async def main(argv=None) -> int:
     actions = parser.add_mutually_exclusive_group()
     actions.add_argument("--live", action="store_true")
     actions.add_argument("--cancel-world", metavar="REQUEST_ID", help="Cancel a recorded interrupted Genie interaction; does not start a world.")
-    parser.add_argument("--services", nargs="+", choices=[s.value for s in Service], default=[s.value for s in Service])
+    parser.add_argument("--services", nargs="+", choices=[s.value for s in Service], default=None)
     args = parser.parse_args(argv)
     try:
         config = GatewayConfig.from_environment()
@@ -101,7 +104,8 @@ async def main(argv=None) -> int:
             if args.cancel_world:
                 report = await gateway.cancel_world(args.cancel_world)
             else:
-                report = await run_smoke(gateway, list(dict.fromkeys(Service(s) for s in args.services))) if args.live else gateway.status()
+                report = await run_smoke(gateway, list(dict.fromkeys(Service(s) for s in (args.services or list(Service)))),
+                                         skip_disabled=args.services is None) if args.live else gateway.status()
             print(json.dumps(report, indent=2))
             return 0 if not args.live or report["all_selected_verified"] else 1
     except GatewayError as error:

@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import base64
+import json
 import os
 from pathlib import Path
 import tempfile
 import time
+from uuid import UUID
 from io import BytesIO
 
 from PIL import Image
@@ -111,3 +113,35 @@ class Recording:
 
     def summary(self, value: dict):
         atomic_write(self.path / "session.json", canonical(value))
+
+
+def recorded_results(root: Path, session_id: str) -> dict:
+    """Read retained runtime evidence without claiming an unrun evaluation."""
+    if str(UUID(session_id)) != session_id:
+        raise ValueError("Invalid session id")
+    path = root / "worlds" / session_id
+    summary = json.loads((path / "session.json").read_bytes())
+    if summary.get("session_id") != session_id:
+        raise ValueError("Recording identity mismatch")
+    rows = []
+    events = path / "events.jsonl"
+    if events.exists():
+        # An active writer can leave a partial final line; only complete records
+        # are reviewable. All malformed completed rows fail closed.
+        data = events.read_bytes()
+        rows = [json.loads(line) for line in data.splitlines(keepends=True) if line.endswith(b"\n")]
+    frames = [{key: row[key] for key in ("frame_index", "received_at", "elapsed_ms", "sha256", "width", "height")}
+              for row in rows if row.get("kind") == "frame"]
+    for expected, frame in enumerate(frames):
+        if frame["frame_index"] != expected:
+            raise ValueError("Recording frame order is invalid")
+        data = (path / "frames" / f"{expected:06d}.jpg").read_bytes()
+        if digest(data) != frame["sha256"]:
+            raise ValueError("Recording frame no longer matches its hash")
+    controls = [{key: row[key] for key in ("kind", "frame_index", "elapsed_ms", "key", "owner", "hold_ms", "reason") if key in row}
+                for row in rows if row.get("kind") in {
+                    "key_down_requested", "key_down_sent", "key_up", "takeover", "stop_requested", "termination"}]
+    return {"session": summary, "mediaProvenance": "generated_recording", "frames": frames,
+            "controls": controls, "temporalJudge": {"status": "not_run", "coveredFrames": 0,
+                "uncoveredFrames": len(frames),
+                "reason": "The live temporal judge is not connected to this runtime. Recorded frames do not establish safety."}}

@@ -12,19 +12,21 @@ from backend.test_pipeline_helpers import FIXTURE, FakeProvider, answers, png, r
 def test_routes_store_evidence_and_report_unconfigured_models(tmp_path, monkeypatch):
     monkeypatch.setenv("PIPELINE_DIR", str(tmp_path / "pipeline"))
     monkeypatch.setenv("CAPTURE_DIR", str(tmp_path / "captures"))
-    monkeypatch.setattr("backend.gateway.config.backend_key", lambda: None)
-    monkeypatch.setattr("backend.gateway.service.backend_key", lambda: None)
+    monkeypatch.setattr("backend.gateway.config.backend_key", lambda profile=None: None)
+    monkeypatch.setattr("backend.gateway.service.backend_key", lambda profile=None: None)
     batch = json.loads(FIXTURE.read_text())["observationBatch"]
     with TestClient(app) as http:
         options = http.get("/api/edits/options").json()
         assert options["styles"]["photoreal"] == "supported" and options["styles"]["claymation"] == "experimental"
         assert options["genieTransport"]["width"] == 1280
-        assert http.post("/api/observations", json=batch).status_code == 200
-        assert http.post("/api/observations", json={**batch, "anchors": "x"}).status_code == 422
-        duplicates = {**batch, "anchors": [*batch["anchors"], batch["anchors"][0]]}
-        invalid = http.post("/api/observations", json=duplicates)
-        assert invalid.status_code == 422 and invalid.json()["error"] == "invalid observation batch"
-        assert any("duplicate" in error["msg"] for error in invalid.json()["detail"])
+        # Arbitrary browser-authored observations cannot enter the trusted pipeline.
+        assert http.post("/api/observations", json=batch).status_code in (404, 405)
+        app.state.artifacts.put("observations", batch["id"], batch)
+        assert http.post("/api/edits", json={"observationBatchId": batch["id"], "mayorRequest": "bike lane"}).status_code == 503
+        token = "operator-test-token-" + "x" * 32
+        monkeypatch.setenv("WORLD_API_TOKEN", token)
+        assert http.post("/api/edits", json={"observationBatchId": batch["id"], "mayorRequest": "bike lane"}).status_code == 401
+        http.headers["Authorization"] = "Bearer " + token
         bad = http.post("/api/edits", json={"observationBatchId": batch["id"], "mayorRequest": "bike lane",
                                             "permissions": {"allowed": ["bike_lane"], "forbidden": ["bike_lane"]}})
         assert bad.status_code == 422 and "contradictory" in bad.json()["error"]
@@ -57,3 +59,19 @@ def test_blinded_export_score_and_calibration(tmp_path):
     result = gate_review.calibrate(store, out, target_far=0.0)
     assert result["metrics"]["falseAcceptance"]["k"] == 0
     assert result["thresholds"]["passAt"] > 0.82 and result["developmentSet"]["examples"] == 2
+
+
+def test_corrupt_capture_blocks_edit_before_carbon(tmp_path, monkeypatch):
+    from backend.capture import CaptureIntegrityError
+    batch = json.loads(FIXTURE.read_text())['observationBatch']
+    token = 'operator-test-token-' + 'x' * 32
+    monkeypatch.setenv('WORLD_API_TOKEN', token)
+    def corrupted(*args, **kwargs):
+        raise CaptureIntegrityError('Retained bytes changed.')
+    monkeypatch.setattr('backend.pipeline_api.source_frame', corrupted)
+    with TestClient(app) as http:
+        app.state.artifacts.put('observations', batch['id'], batch)
+        response = http.post('/api/edits', headers={'Authorization': 'Bearer ' + token}, json={
+            'observationBatchId': batch['id'], 'mayorRequest': 'Add a protected bike lane.'})
+        assert response.status_code == 409
+        assert app.state.models.ledger.attempts() == []
