@@ -165,7 +165,7 @@ class DriverController:
                 Service.HYDROGEN, stage="navigation",
                 input_value=self.prompt(body.observation),
                 context=CallContext(episode_id=f"sim-driver:{body.run_id}",
-                                    prompt_id=f"sim-driver-v1:step-{body.step}", purpose="development"),
+                                    prompt_id=f"sim-driver-v2:step-{body.step}", purpose="development"),
                 response_model=DriverDecision,
             )
             try:
