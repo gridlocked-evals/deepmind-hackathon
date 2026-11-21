@@ -1,5 +1,6 @@
 import { readFile } from 'node:fs/promises';
-import { test, expect, type DriverHarness } from './fixtures';
+import { test, expect, FIXTURE_CAMERAS, type DriverHarness } from './fixtures';
+import { EVIDENCE_TOKEN } from './evidence-fixtures';
 import { NYC_STOPS } from '../../src/journey/route';
 import type { RunTrace } from '../../src/scenarios/trace';
 
@@ -146,4 +147,38 @@ test('hiding the tab stops a pending journey and returning never revives late re
   expect(await exportReport(driver)).toEqual(stopped);
   expect(driver.gateway.calls).toHaveLength(1);
   expect(driver.routeRequests).toHaveLength(1);
+});
+
+test('camera evidence hands off an active journey to its existing matching street drive', async ({ driver }) => {
+  driver.evidence.add(FIXTURE_CAMERAS.start, 'blocked', 3);
+  await openJourney(driver);
+  await driver.page.getByRole('button', { name: 'Close journey panel', exact: true }).click();
+  await driver.page.getByRole('button', { name: 'Open workspace tools', exact: true }).click();
+  await driver.page.locator('.rail-mode-switch').getByRole('button', { name: 'Cameras', exact: true }).click();
+  await driver.page.getByRole('textbox', { name: 'Search cameras', exact: true }).fill(FIXTURE_CAMERAS.start.name);
+  await driver.page.locator('.camera-row').filter({ hasText: FIXTURE_CAMERAS.start.name }).click();
+  await driver.planRoute('long');
+  await driver.page.getByRole('button', { name: 'Camera evidence', exact: true }).click();
+  await driver.page.getByRole('button', { name: /^Load cached clip/ }).click();
+  const token = driver.page.getByLabel('Operator token', { exact: true });
+  if (!await token.isVisible()) await driver.page.locator('.evidence-operator > summary').click();
+  await token.fill(EVIDENCE_TOKEN);
+  await driver.page.getByRole('button', { name: 'Load cached observations · no model call', exact: true }).click();
+  await expect(driver.page.locator('.evidence-result-summary')).toContainText('Extraction completed');
+  await driver.page.getByRole('button', { name: 'Close evidence panel', exact: true }).click();
+  await driver.page.getByRole('button', { name: 'NYC journey', exact: true }).click();
+  const old = await startJourney(driver);
+  await driver.page.getByRole('button', { name: 'Close journey panel', exact: true }).click();
+  await driver.page.getByRole('button', { name: 'Camera evidence', exact: true }).click();
+  await driver.page.getByRole('button', { name: 'Drive here with this evidence', exact: true }).click();
+  await expect(driver.page.locator('.journey-launch')).toHaveText('NYC journey');
+  await expect(driver.page.locator('.driver-panel')).toBeVisible();
+  await expect(driver.page.getByLabel('Scenario preset')).toHaveValue('stalled-vehicle');
+  await driver.gateway.reply(0, { decision: { reason: 'ABANDONED JOURNEY' } });
+  await driver.adversary.reply(0);
+  await driver.startDriver('event');
+  const fresh = await driver.gateway.waitForRequest(1);
+  expect(fresh.run_id).not.toBe(old.run_id);
+  expect(fresh.observation.route_label).toContain('traffic count from camera evidence');
+  expect(fresh.observation.lead_gap_m).toBeGreaterThan(0);
 });
