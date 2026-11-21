@@ -15,7 +15,8 @@ establish project throughput limits or submission eligibility.
 ## Configure and inspect
 
 Install `backend/requirements.txt` into the project virtual environment. Copy
-`.env.example` to `.env`, then set `GEMINI_API_KEY` (primary) and optionally
+`.env.example` to `.env`, then set `GEMINI_API_KEY` (primary, with `GOOGLE_API_KEY`
+accepted as a legacy alias) and optionally
 `WORKSHOP_API_KEY`. Select one explicitly with `GEMINI_KEY_PROFILE=primary` or
 `workshop`; there is no automatic project fallback. Environment variables take
 precedence over `.env`. Neither key uses a

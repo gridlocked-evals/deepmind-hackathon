@@ -33,3 +33,42 @@ All model checks in this integration use isolated fixtures or disabled providers
 - The isolated browser checks recorded two rejected model attempts, zero provider dispatches and zero charged dollars. Both Gemini credentials were deliberately absent from this preview.
 
 Latest screenshots remain local under ignored `data/ui-integration/gridlocked-desktop.jpg` and `gridlocked-mobile.jpg`. The real application credentials and new local operator token remain in ignored `.env`.
+
+## Windows merge validation
+
+The merge review retained the Gridlocked driver and later event/annotation provenance
+checks. Decoder pipe readers work on Windows without selectors, while immutable
+capture media stays read-only and only the pin journal can be replaced. Cancellation
+before gateway admission propagates without inventing a request record. The primary
+credential profile still accepts the existing `GOOGLE_API_KEY` alias; the workshop
+profile remains explicit. Negative human annotations check every accepted fact,
+including positive counts following a zero-count candidate.
+
+The isolated Windows preview used disabled providers, absent model credentials, and
+separate ignored capture/pipeline/ledger directories. It recorded 30.030 seconds of
+real Vestry video, stopped without losing history, and saved capture
+`cap_20261121T195059-a0ce72b3`: a 25.025-second original prefix with 375 audited frames.
+The retained HLS replay loaded and played. DOT capture
+`cap_20261121T195526-c7802d61` saved and displayed one original 640-by-352 image,
+labelled `snapshot_only`, `no_motion_evidence`, and `source_clock_unknown`.
+Switching sources cleared the previous source's evidence from view. These checks
+made no model requests.
+
+Desktop and 390-by-844 mobile browser checks found no console errors or horizontal
+overflow. The evidence drawer now owns the mobile focus trap when the camera list
+is also open; Tab and Shift-Tab stay inside, and Escape restores its opener.
+Frontend validation passed all 64 tests, the production build, and generated-contract
+drift checks. The existing Vite large-bundle advisory remains.
+
+The full Windows backend run passed 477 tests with five platform skips. After
+incorporating the later comparison-plan changes and upstream decoder test, their
+focused capture/manifest/repair checks passed 75 tests with two symlink-privilege
+skips. Four H100 shell checks require POSIX; neither symlink check is skipped when
+Windows permits creating symlinks. No H100 job or paid model acceptance was rerun.
+
+After incorporating the concurrently merged design and optional review scope, the
+full Windows suite passed 489 tests with six platform skips. The later gateway and
+annotation changes passed another 128 focused tests. The latest frontend suite
+passed 76 tests, production build, and contract drift checks. The merged light
+evidence drawer was rechecked at 390-by-844 with the camera tools also open: focus
+stayed in the drawer, Escape dismissed it, and the page had no horizontal overflow.

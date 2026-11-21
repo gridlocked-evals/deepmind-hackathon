@@ -754,6 +754,7 @@ def test_example_configuration_is_valid():
 def test_selected_workshop_key_never_falls_back_and_status_has_no_secret(tmp_path, monkeypatch):
     from backend.gateway.config import backend_key
     monkeypatch.setenv("GEMINI_API_KEY", KEY)
+    monkeypatch.setenv("GOOGLE_API_KEY", "primary-google-alias-secret")
     monkeypatch.setenv("WORKSHOP_API_KEY", "")
     monkeypatch.setenv("GEMINI_KEY_PROFILE", "workshop")
     config = GatewayConfig.from_environment()
@@ -766,6 +767,29 @@ def test_selected_workshop_key_never_falls_back_and_status_has_no_secret(tmp_pat
             with pytest.raises(GatewayError) as error:
                 await observe(gateway)
             assert error.value.code == ErrorCode.NOT_CONFIGURED
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("profile,primary,expected", [
+    ("primary", "", "primary-google-alias-secret"),
+    ("primary", KEY, KEY),
+    ("workshop", KEY, "workshop-selected-secret"),
+])
+def test_selected_profile_preserves_primary_alias_and_dispatches_only_its_key(tmp_path, monkeypatch, profile, primary, expected):
+    monkeypatch.setenv("GEMINI_API_KEY", primary)
+    monkeypatch.setenv("GOOGLE_API_KEY", "primary-google-alias-secret")
+    monkeypatch.setenv("WORKSHOP_API_KEY", "workshop-selected-secret")
+    sent_keys = []
+    def handler(request):
+        sent_keys.append(request.headers["x-goog-api-key"])
+        return httpx.Response(200, json=response())
+    async def run():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            gateway = ModelGateway(settings(tmp_path, key_profile=profile), client)
+            assert (await observe(gateway)).output == {"count": 2}
+            assert sent_keys == [expected]
+            status = json.dumps(gateway.status())
+            assert all(secret not in status for secret in (KEY, "primary-google-alias-secret", "workshop-selected-secret"))
     asyncio.run(run())
 
 

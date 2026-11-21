@@ -173,9 +173,13 @@ export const canCreateWorld = (gate: GateRecord | null, reference: ReferenceAtte
   && gate.gateDecision.outcome === 'accept' && gate.gateDecision.effect === 'allow_world_creation'
   && gate.gateDecision.checks.length > 0 && gate.gateDecision.checks.every(check => check.answer === 'pass');
 export const worldApi = {
-  async create(reference: ReferenceAttempt, gate: GateRecord, token: string): Promise<WorldCreated> {
+  async create(reference: ReferenceAttempt, gate: GateRecord, token: string, signal?: AbortSignal): Promise<WorldCreated> {
     requireToken(token); if (!canCreateWorld(gate, reference)) throw new EvidenceError('World creation requires accepted checks for this exact generated image.');
+    if (signal?.aborted) throw new EvidenceError('World creation was cancelled before the paid session started.');
     const handoff = await post('/api/worlds/accepted-references', { referenceImageId: reference.id, gateDecisionId: gate.gateDecision.id }, token) as AcceptedReference;
+    if (signal?.aborted) throw new EvidenceError('World creation was cancelled before the paid session started.');
+    // Once creation starts, keep its response so the caller can stop the exact
+    // session even if the view closes while this request is in flight.
     return await post('/api/worlds', { accepted_reference: handoff.acceptedReference, context: { ...handoff.context, prompt_id: 'interactive-world-ui-v1', purpose: 'submission' }, prompt: handoff.worldPrompt, seconds: 15, max_usd: '2.50' }, token) as WorldCreated;
   },
   async stop(sessionId: string, token: string): Promise<WorldStatus> { return await post(`/api/worlds/${encodeURIComponent(sessionId)}/stop`, {}, token) as WorldStatus; },

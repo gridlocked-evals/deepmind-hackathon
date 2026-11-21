@@ -223,6 +223,16 @@ def test_holdout_is_isolated_from_model_inputs(store):
     assert store.capture_contract(m["id"]).durationS == m["files"]["prefix"]["durationS"]
 
 
+def test_legacy_readonly_pins_can_be_updated_without_changing_evidence(store):
+    recorder, _, _ = record(20)
+    manifest = store.create_hls_episode(recorder, 10, 6)
+    directory = store.root / manifest['id']
+    (directory / 'pins.json').chmod(0o444)
+    assert store.pin(manifest['id'], 'job-retained') == ['job-retained']
+    assert store.get(manifest['id'], verify=True) == manifest
+    assert (directory / 'manifest.json').stat().st_mode & 0o222 == 0
+
+
 def test_pins_survive_cleanup_and_restart(tmp_path):
     root = tmp_path / "captures"
     probe = fake_probe
@@ -543,7 +553,12 @@ def test_manifest_and_path_integrity_rejects_damage(store, damage):
         media = store.root / manifest["id"] / manifest["files"]["prefix"]["path"]
         saved = media.with_name("source.ts")
         media.rename(saved)
-        media.symlink_to(saved)
+        try:
+            media.symlink_to(saved)
+        except OSError as exc:
+            if getattr(exc, "winerror", None) == 1314:
+                pytest.skip("This Windows account cannot create symbolic links")
+            raise
     else:
         if damage == "metadata":
             manifest["cameraId"] = OTHER

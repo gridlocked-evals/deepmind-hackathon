@@ -606,3 +606,22 @@ def test_cancel_before_admission_never_borrows_a_previous_window_trace(tmp_path,
             assert 'private cancellation detail' not in json.dumps(report)
 
     asyncio.run(run())
+
+
+@pytest.mark.parametrize('second_count,expected', [({'lower':1,'upper':2},'false_positive'),
+    ({'lower':0,'upper':2},'model_abstained')])
+@pytest.mark.parametrize('positive_first', [False, True])
+def test_absent_count_checks_every_comparable_claim(tmp_path, second_count, expected, positive_first):
+    captures,store,manifest=setup(tmp_path)
+    def rows(meta):
+        zero=fact(meta,kind='count',semanticClass='vehicle',count={'lower':0,'upper':0})
+        other=fact(meta,kind='count',semanticClass='vehicle',count=second_count)
+        return [other,zero] if positive_first else [zero,other]
+    report=asyncio.run(perform(tmp_path,captures,store,manifest,Provider([rows])))
+    annotation=manual_annotation(report,present='no',count={})
+    result=score_review(store,report,manual_review(report,annotations=[annotation]))
+    comparison=result['comparisons'][0]
+    assert comparison['outcome']==comparison['presenceOutcome']==expected
+    assert set(comparison['factIds'])=={row['id'] for row in report['facts']}
+    assert next(row for row in report['facts'] if row['id']==comparison['factId'])['count']==second_count
+    assert result['unmatchedAcceptedFacts']==[]

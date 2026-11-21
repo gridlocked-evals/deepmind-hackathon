@@ -614,7 +614,7 @@ class CaptureStore:
         (tmp / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True))
         (tmp / "pins.json").write_text("[]")
         for path in tmp.rglob("*"):
-            if path.is_file():
+            if path.is_file() and path.name != "pins.json":
                 path.chmod(0o444)
         with self._lock:
             os.replace(tmp, self.root / episode_id)  # publish under the lock: a pin can't land before the fit check
@@ -823,6 +823,10 @@ class CaptureStore:
         path = self._pins_path(episode_id)
         tmp = path.with_suffix(".tmp")
         tmp.write_text(json.dumps(pins))
+        # Pins are mutable ownership metadata. Older captures marked this file
+        # read-only alongside evidence, preventing atomic replacement on Windows.
+        if path.exists():
+            path.chmod(0o600)
         os.replace(tmp, path)
 
     def usage_bytes(self) -> int:
