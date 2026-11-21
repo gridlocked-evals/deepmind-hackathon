@@ -1,12 +1,12 @@
 import type { ScenarioBundle } from '../types';
 import type { DriverSimulation } from './physics';
-import { MAX_DRIVER_STEPS, SECONDS_PER_DECISION } from './types';
+import { DECISION_INTERVAL_SECONDS, MAX_COMMAND_AGE_SECONDS, MAX_DRIVER_STEPS, MAX_DRIVE_SECONDS } from './types';
 import type { DriverDecision, DriverObservation, DriverResponse, GuardReason } from './types';
 
-export const DRIVER_TRACE_SCHEMA = 'gridlocked-driver-trace/1';
+export const DRIVER_TRACE_SCHEMA = 'gridlocked-driver-trace/2';
 
 export type TraceTerminal =
-  | { state: 'route_complete' | 'decision_limit' | 'stopped_by_user' | 'interrupted' }
+  | { state: 'route_complete' | 'decision_limit' | 'time_limit' | 'stopped_by_user' | 'interrupted' }
   | { state: 'error'; error: string };
 
 export interface GuardEvent {
@@ -18,7 +18,7 @@ export interface GuardEvent {
 export interface DriverTraceStep {
   step: number;
   request_id: string;
-  /** Exactly the observation sent to POST /api/driver/decision; its simulation_time is the hold's start. */
+  /** Exactly the request snapshot; continuous motion can advance before this decision is applied. */
   observation: DriverObservation;
   proposed: DriverDecision;
   applied: {
@@ -44,7 +44,7 @@ export interface DriverTrace {
   };
   run_id: string;
   model_id: string | null;
-  bounds: { max_decisions: number; seconds_per_decision: number };
+  bounds: { max_decisions: number; decision_interval_seconds: number; max_command_age_seconds: number; max_simulation_seconds: number };
   steps: DriverTraceStep[];
   /** Null only while the run is still active. */
   terminal: TraceTerminal | null;
@@ -73,7 +73,8 @@ export function createTrace(runId: string, initial: DriverSimulation): DriverTra
     provenance: { source: 'synthetic_simulator_state', scenario_id: scenario.id, scenario_version: scenario.version,
       scenario_label: scenario.label, motion_source: scenario.motionSource ?? null, route_length_m: initial.path.length },
     run_id: runId, model_id: null,
-    bounds: { max_decisions: MAX_DRIVER_STEPS, seconds_per_decision: SECONDS_PER_DECISION },
+    bounds: { max_decisions: MAX_DRIVER_STEPS, decision_interval_seconds: DECISION_INTERVAL_SECONDS,
+      max_command_age_seconds: MAX_COMMAND_AGE_SECONDS, max_simulation_seconds: MAX_DRIVE_SECONDS },
     steps: [], terminal: null,
   };
 }
@@ -110,7 +111,7 @@ export function finishTrace(trace: DriverTrace | null, terminal: TraceTerminal) 
   if (trace && !trace.terminal) trace.terminal = terminal;
 }
 
-const TERMINAL_STATES = new Set(['route_complete', 'decision_limit', 'stopped_by_user', 'interrupted', 'error']);
+const TERMINAL_STATES = new Set(['route_complete', 'decision_limit', 'time_limit', 'stopped_by_user', 'interrupted', 'error']);
 const GUARDS = new Set(['leader_guard', 'red_line_guard']);
 const isObject = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value);
 const isFiniteNumber = (value: unknown): value is number => typeof value === 'number' && Number.isFinite(value);
@@ -146,7 +147,7 @@ export function readDriverTrace(json: string): DriverTrace {
     || !isObject(provenance) || !stringFields(provenance, ['scenario_id', 'scenario_version', 'scenario_label'])
     || !isFiniteNumber(provenance.route_length_m)
     || !(provenance.motion_source === null || (typeof provenance.motion_source === 'string' && ['authored', 'street-preview', 'driving-route', 'location-preview'].includes(provenance.motion_source)))
-    || !isObject(bounds) || !numericFields(bounds, ['max_decisions', 'seconds_per_decision'])
+    || !isObject(bounds) || !numericFields(bounds, ['max_decisions', 'decision_interval_seconds', 'max_command_age_seconds', 'max_simulation_seconds'])
     || !Array.isArray(value.steps) || !value.steps.every(validStep)
     || !(terminal === null || (isObject(terminal) && typeof terminal.state === 'string' && TERMINAL_STATES.has(terminal.state)
       && (terminal.state !== 'error' || typeof terminal.error === 'string')))) {

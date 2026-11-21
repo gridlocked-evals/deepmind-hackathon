@@ -125,7 +125,7 @@ consistency. Domain-specific acceptance thresholds belong to issues #8 and #11.
 | `observation`, `navigation` | Hydrogen |
 | `compilation`, `repair` | Carbon |
 | `reference` | Nano Banana |
-| `image_gate`, `temporal_gate` | Decisions |
+| `image_gate`, `temporal_gate`, `simulator_driver` | Decisions |
 | `world` | Genie |
 
 Inputs are strings or inline text/image/video parts. URLs and mutable remote file
