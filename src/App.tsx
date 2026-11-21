@@ -11,7 +11,7 @@ import { useGeminiDriver } from './agent/useGeminiDriver';
 import { DriverPanel } from './agent/DriverPanel';
 import { MAX_DRIVER_STEPS, MAX_DRIVE_SECONDS } from './agent/types';
 import { preset, withEventActors } from './scenarios/events';
-import { evidenceApplies, withEvidenceHazard, withEvidenceTraffic } from './scenarios/evidence';
+import { evidenceApplies, evidencePlan, withEvidenceTraffic } from './scenarios/evidence';
 import type { EvidenceConditions } from './scenarios/evidence';
 import { ADVERSARY_PLAN } from './scenarios/adversary';
 import type { AdversarySettings } from './scenarios/adversary';
@@ -50,7 +50,7 @@ export default function App() {
   const [scenarioPlan, setScenarioPlan] = useState(() => preset());
   const [evidenceDrive, setEvidenceDrive] = useState<EvidenceConditions | null>(null);
   const [adversary, setAdversary] = useState<AdversarySettings>({ mode: 'off', seed: 1, guardsIgnoreHazards: false });
-  const drivePlan = useMemo(() => withEvidenceHazard(scenario, evidenceDrive, scenarioPlan), [scenario, evidenceDrive, scenarioPlan]);
+  const drivePlan = useMemo(() => evidencePlan(scenario, evidenceDrive, scenarioPlan), [scenario, evidenceDrive, scenarioPlan]);
   // With an adversary, its attack slots replace the Scenario Lab plan for the run.
   const runPlan = adversary.mode === 'off' ? drivePlan : ADVERSARY_PLAN;
   const renderedScenario = useMemo(() => scenario.motionSource === 'event-replay' ? scenario

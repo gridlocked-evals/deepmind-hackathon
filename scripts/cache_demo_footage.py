@@ -95,9 +95,13 @@ def cache_video(base: str, cameras: list[dict], args) -> tuple[dict, dict]:
         start_s, start_buffered = first_media.get(cid, (None, 0))
         # Measured after first arrival: the first playlist fetch returns a backlog that would inflate the rate.
         rate = (status.get("bufferedSeconds", 0) - start_buffered) / max(1e-6, stopped_at[cid] - start_s) if start_s is not None else 0
+        # Admission allows one segment of arrival slack; retain the measured rate in metadata.
+        bounds = status.get("history", {}).get("segmentBoundariesS") or [0]
+        slack = max((b - a for a, b in zip(bounds, bounds[1:])), default=0)
+        admitted_rate = (status.get("bufferedSeconds", 0) - start_buffered + slack) / max(1e-6, stopped_at[cid] - start_s) if start_s is not None else 0
         reason = (status.get("lastError") or "no media received") if start_s is None \
             else f"first media after {start_s:.0f} s" if start_s > args.max_start_seconds \
-            else f"media at {rate:.2f}x real time" if rate < args.min_realtime_ratio \
+            else f"media at {rate:.2f}x real time" if admitted_rate < args.min_realtime_ratio \
             else f"{status.get('repeatedSegments')} repeated segments" if status.get("repeatedSegments") else None
         clip = None if reason else latest_clip(status, args.clip_seconds)
         if reason or not clip:
