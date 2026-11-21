@@ -82,9 +82,9 @@ Playlists must be UTF-8 HLS beginning with `#EXTM3U`. Relative and absolute medi
 | Playlist response | 1 MiB maximum |
 | Media response | 16 MiB maximum |
 | Resource references | 4,096 in-memory tokens; least-recently-used eviction |
-| Token lifetime | 900 seconds from issuance or renewal during playlist rewriting |
+| Token lifetime | 900 seconds from the last issuance, playlist rewrite, or successful resolution |
 
-Resolving a token updates its eviction order, but does not extend its expiration. Tokens are camera-specific and disappear on restart. Use one backend worker for this implementation: tokens and status are process-local, so requests routed across independent workers can receive unknown-token errors.
+Resolving a token updates its eviction order and slides its expiration to 900 seconds after that use, so an actively polled playlist stays valid. Tokens are camera-specific and disappear on restart. Use one backend worker for this implementation: tokens and status are process-local, so requests routed across independent workers can receive unknown-token errors.
 
 The proxy forwards only the validated `Range` request header and requests identity encoding. It accepts single ranges such as `bytes=0-4095`, `bytes=4096-`, or `bytes=-4096`; explicit ranges and suffix lengths cannot exceed 16 MiB. Media preserves upstream 200/206 status and available `Content-Range`, `Accept-Ranges`, and `Content-Length` headers. Upstream nonidentity media encoding is rejected. Allowed media types are MPEG-TS, MP4 video/audio, AAC, and octet-stream; playlists receive `application/vnd.apple.mpegurl`.
 
