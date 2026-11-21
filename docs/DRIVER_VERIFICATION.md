@@ -25,6 +25,17 @@ An earlier authored-Vestry run produced three successful model responses during 
 - Driver checks cover speed/acceleration/braking bounds, signal and lead-vehicle constraints, route completion, stale run identities, malformed responses, strict API schemas, bounded admission, idempotency, and redacted failures.
 - Browser checks covered route search/planning, route playback → Gemini control, actual decision history, the 12-decision stop, restart/Stop with a late response, return to replay, and desktop/mobile layout at 1440×900, 390×844, and 731×727.
 
+## Merge integration checks
+
+After integrating main through `0d04e04` on November 21, 2026:
+
+- `npm test`: 44 passed; `npm run build` passed with the existing bundle-size advisory.
+- Full backend suite on Windows: 394 passed, 4 skipped. The skips are the POSIX-only H100 shell-wrapper cases; Python benchmark checks ran.
+- Browser checks at 1240 × 667 and 390 × 844 covered the traffic demo, a 0.44-mile Vestry-to-Houston OSRM route, route playback, and driver initialization on the selected route.
+- An isolated backend with model calls disabled returned the expected gateway error. The UI stopped at zero decisions and simulation time zero, then returned to replay. No live model calls were repeated in this review.
+- The mobile tools panel contained keyboard focus, wrapped Shift+Tab, closed with Escape, and restored focus to its opener. Document width stayed at 390 pixels without horizontal overflow. No browser console errors were observed.
+- `git diff --check` passed. The earlier live-run evidence above remains separate from these integration checks.
+
 ## Limits and next work
 
 The model chooses longitudinal speed. Steering and safety boundaries remain local deterministic code. Route speed limits and signals are not surveyed; mapped routes report unknown signals. The authored traffic surrounding the demo ego remains replayed and can fail to react to changed ego actions. This is not safety validation.

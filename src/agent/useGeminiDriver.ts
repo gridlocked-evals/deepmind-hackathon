@@ -16,7 +16,7 @@ function initialSimulation(scenario: ScenarioBundle) {
 
 function aborted() { return new DOMException('Driving stopped', 'AbortError'); }
 
-/** A run is at most 12 model calls; neither request errors nor cancellations trigger retries. */
+/** A run has at most 12 decisions and no browser retries; gateway retry limits still apply. */
 export function useGeminiDriver(scenario: ScenarioBundle): GeminiDriver {
   const gate = useRef(new DriverRunGate());
   const simulation = useRef<DriverSimulation | null>(null);
