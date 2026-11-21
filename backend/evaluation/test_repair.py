@@ -5,6 +5,7 @@ import re
 import pytest
 from pydantic import ValidationError
 
+from backend.evaluation import manifest as manifest_module
 from backend.evaluation.attacks import AttackRecord, AttackScore, AttackScript, AttackType, save_suite
 from backend.evaluation.manifest import (Episode, FinalRun, HoldoutError, Manifest, ResultsLedger, add_fresh_capture, lock,
                                            opened_marker)
@@ -376,6 +377,42 @@ def test_fresh_capture_after_plan_registration_is_refused(tmp_path):
                     source_hashes=(digest(b"fresh"),), window_id="w2", duration_s=60, split="test")
     with pytest.raises(HoldoutError, match="register the comparison plan after the fresh capture"):
         add_fresh_capture(path, fresh, pinned)  # would add a held-out episode the plan never covers
+
+
+def test_seal_rechecks_roster_when_fresh_capture_overlaps_registration(tmp_path, monkeypatch):
+    path, pinned = locked(tmp_path, plan=None)
+    fresh = ep("fresh", "test", "cam7")
+    write = manifest_module._write
+
+    def register_before_capture_write(target, updated):
+        # Model registration running after the capture's no-plan check, before its commit.
+        register_plan(path, pinned, tmp_path / "suite.json", slots())
+        write(target, updated)
+
+    with monkeypatch.context() as m:
+        m.setattr(manifest_module, "_write", register_before_capture_write)
+        add_fresh_capture(path, fresh, pinned)
+    session = session_for(path)
+    run = session.open_holdout(path, pinned)
+    assert fresh in run.verify().episodes()
+    with pytest.raises(ValueError, match="test roster .*missing: test:fresh/") as rejected:
+        seal(tmp_path, session, run)  # neither side includes the fresh episode
+    assert all(f"fresh/{script.attack_type.value}/r0" in str(rejected.value) for script in TEST_SUITE)
+    assert not session.sealed
+
+
+def test_complete_fresh_capture_roster_can_seal(tmp_path):
+    path, pinned = locked(tmp_path, plan=None)
+    fresh = ep("fresh", "test", "cam7")
+    add_fresh_capture(path, fresh, pinned)
+    before = [scored(fresh, script, "failed", session_id="fresh-before") for script in TEST_SUITE]
+    after = [scored(fresh, script, "avoided", session_id="fresh-after") for script in TEST_SUITE]
+    register_plan(path, pinned, tmp_path / "suite.json", slots() + [row.slot for row in before])
+    session = session_for(path)
+    run = session.open_holdout(path, pinned)
+    trial = seal(tmp_path, session, run, holdout_before=HOLDOUT_BEFORE + before,
+                 holdout_after=HOLDOUT_AFTER + after)
+    assert trial.holdout_before["overall"]["n"] == trial.holdout_after["overall"]["n"] == 4
 
 
 class GatedGateway(FakeGateway):
