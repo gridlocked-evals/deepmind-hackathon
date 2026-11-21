@@ -69,8 +69,10 @@ def resource_token(camera_id: str, url: str) -> str:
 
 def resolve_token(camera_id: str, token: str) -> str:
     entry = _tokens.get(token)
-    if not entry or entry[0] != camera_id or entry[2] <= time.monotonic():
+    now = time.monotonic()
+    if not entry or entry[0] != camera_id or entry[2] <= now:
         raise HTTPException(404, "This media reference expired. Reconnect to the camera.")
+    _tokens[token] = (entry[0], entry[1], now + TOKEN_TTL)
     _tokens.move_to_end(token)
     return validate_url(camera_id, entry[1])
 
