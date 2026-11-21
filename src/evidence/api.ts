@@ -18,7 +18,7 @@ export interface FrameEvidence { captureId: string; sourceId: string; prefixSha2
 export interface EvidenceFact {
   id: string; kind: string; semanticClass: string; label: string; confidence: number; provenance: string;
   disposition: 'accepted' | 'abstained' | 'boundary_uncertain' | 'duplicate'; visibility: string; state: string;
-  time: { startS: number; endS: number }; evidence: FrameEvidence[];
+  time: { startS: number; endS: number }; evidence: FrameEvidence[]; count?: { lower: number | null; upper: number | null };
 }
 export interface ModelError { code?: string; message?: string; request_id?: string | null }
 export interface ExtractionReport {

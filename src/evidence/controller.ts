@@ -1,5 +1,6 @@
 import type { CameraSource } from '../types';
-import { EvidenceError, evidenceApi } from './api';
+import { EvidenceError, evidenceApi, parseCapture, parseExtraction } from './api';
+import type { DemoCacheEntry } from './demoCache';
 import type { CaptureHistory, SavedCapture, EvidenceApi, ExtractionReport, EditBundle, ReferenceAttempt, GateRecord } from './api';
 export type EvidenceAction = 'starting' | 'stopping' | 'sealing' | 'snapshot' | 'extracting' | 'compiling' | 'generating' | 'gating' | 'refreshing';
 export interface EvidenceState {
@@ -66,6 +67,10 @@ export class EvidenceController {
   seal = () => this.action('sealing', async (sourceId, state) => {
     if (!validInterval(state.history, state.selection)) throw new EvidenceError('Choose whole recorded segments covering no more than 120 seconds.');
     const capture = await this.api.seal(sourceId, state.history!, state.selection![0], state.selection![1]); this.update(sourceId, { capture, ...downstream });
+  });
+  loadCached = (entry: DemoCacheEntry) => this.action('refreshing', async sourceId => {
+    const capture = parseCapture(entry.saved, sourceId), extraction = entry.extraction ? parseExtraction(entry.extraction, capture) : null;
+    this.update(sourceId, { capture, ...downstream, ...(extraction && { extraction, extractions: [extraction] }) });
   });
   snapshot = () => this.action('snapshot', async sourceId => { const capture = await this.api.snapshot(sourceId); this.update(sourceId, { capture, ...downstream }); });
   extract = (token: string) => this.action('extracting', async (sourceId, state) => {

@@ -13,6 +13,7 @@ from urllib.parse import urlsplit
 import httpx
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from .capture_api import Recorders, make_store, router as capture_router
@@ -166,6 +167,15 @@ async def health():
 
 app.include_router(capture_router)
 app.include_router(pipeline_router)
+
+
+@app.get("/api/demo-cache")
+async def demo_cache():
+    """Index written by scripts/cache_demo_footage.py; absent until that script runs."""
+    path = ROOT / "var" / "demo-cache.json"
+    if not path.is_file():
+        raise HTTPException(404, "No demo cache. Run scripts/cache_demo_footage.py.")
+    return FileResponse(path, media_type="application/json", headers={"Cache-Control": "no-store"})
 
 
 @app.get("/api/contracts/element119")

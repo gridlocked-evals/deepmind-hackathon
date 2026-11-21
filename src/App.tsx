@@ -6,10 +6,13 @@ import { useCameraSources } from './media/cameras';
 import { LiveFeed } from './media/LiveFeed';
 import { usePlayback } from './hooks/usePlayback';
 import { EvidencePanel } from './evidence/EvidencePanel';
+import { useDemoCache } from './evidence/demoCache';
 import { useGeminiDriver } from './agent/useGeminiDriver';
 import { DriverPanel } from './agent/DriverPanel';
 import { MAX_DRIVER_STEPS, MAX_DRIVE_SECONDS } from './agent/types';
 import { preset, withEventActors } from './scenarios/events';
+import { evidenceApplies, withEvidenceTraffic } from './scenarios/evidence';
+import type { EvidenceConditions } from './scenarios/evidence';
 import NavigationPanel, { cameraLocation } from './components/NavigationPanel';
 import { fetchStreetRoute } from './navigation/routing';
 import { createIntersectionScenario, createRouteScenario } from './navigation/routeScenario';
@@ -24,7 +27,10 @@ const MODES: { id: ViewMode; label: string; icon: typeof Globe2 }[] = [
 const formatTime = (time: number) => `${Math.floor(time / 60).toString().padStart(2, '0')}:${Math.floor(time % 60).toString().padStart(2, '0')}`;
 
 export default function App() {
-  const { cameras, status: registryStatus } = useCameraSources();
+  const { cameras: liveCameras, status: registryStatus } = useCameraSources();
+  const demoCache = useDemoCache();
+  // The demo cache script drops cameras whose feeds were too slow.
+  const cameras = useMemo(() => demoCache ? liveCameras.filter(camera => !(camera.id in demoCache.dropped)) : liveCameras, [liveCameras, demoCache]);
   const [viewMode, setViewMode] = useState<ViewMode>('city');
   const [viewRevision, setViewRevision] = useState(0);
   const [selectedCameraId, setSelectedCameraId] = useState(demoScenario.cameraId);
@@ -40,7 +46,9 @@ export default function App() {
   const [railTab, setRailTab] = useState<'cameras' | 'route' | 'driver'>('cameras');
   const [scenario, setScenario] = useState<ScenarioBundle>(demoScenario);
   const [scenarioPlan, setScenarioPlan] = useState(() => preset());
-  const renderedScenario = useMemo(() => scenario.motionSource === 'event-replay' ? scenario : withEventActors(scenario, scenarioPlan), [scenario, scenarioPlan]);
+  const [evidenceDrive, setEvidenceDrive] = useState<EvidenceConditions | null>(null);
+  const renderedScenario = useMemo(() => scenario.motionSource === 'event-replay' ? scenario
+    : withEventActors(withEvidenceTraffic(scenario, evidenceDrive), scenarioPlan), [scenario, scenarioPlan, evidenceDrive]);
   const [pickedLocation, setPickedLocation] = useState<NavigationPoint | null>(null);
   const [navigationStart, setNavigationStart] = useState<NavigationPoint | null>(null);
   const [navigationEnd, setNavigationEnd] = useState<NavigationPoint | null>(null);
@@ -103,6 +111,16 @@ export default function App() {
     if (mode === 'start') setNavigationStart(point); else setNavigationEnd(point);
     setPickingMode('inspect'); setRailTab('route');
   }, [invalidateRoute]);
+  const driveWithEvidence = useCallback((conditions: EvidenceConditions) => {
+    driver.stop();
+    setEvidenceDrive(conditions);
+    if (conditions.obstruction) setScenarioPlan(preset('stalled-vehicle'));
+    closeEvidence(); setSidebarOpen(true);
+    // Without a drivable street here yet, start a route at the camera so the next planned drive picks up the evidence.
+    const camera = cameras.find(item => item.id === conditions.cameraId);
+    if (evidenceApplies(scenario, conditions)) setRailTab('driver');
+    else if (camera) setEndpoint('start', cameraLocation(camera));
+  }, [driver.stop, closeEvidence, scenario, cameras, setEndpoint]);
   const selectLocation = useCallback((point: NavigationPoint) => {
     if (pickingMode !== 'inspect') {
       setEndpoint(pickingMode, point);
@@ -303,7 +321,7 @@ export default function App() {
     </section>
 
     <div className="bottom-caption"><span>Simulated motion · camera evidence reviewed separately</span><span>Map context © OpenStreetMap</span></div>
-    <EvidencePanel camera={selectedCamera} open={evidenceOpen} modal={evidenceIsModal} onClose={closeEvidence} />
+    <EvidencePanel camera={selectedCamera} open={evidenceOpen} modal={evidenceIsModal} onClose={closeEvidence} onDrive={driveWithEvidence} cached={selectedCamera ? demoCache?.cameras[selectedCamera.id] : undefined} />
     {!mapReady && !mapError && <div className="map-loading"><span className="loading-orbit" /><span>Opening New York</span></div>}
     {mapError && <div className="map-notice"><span>{mapError}</span><button onClick={() => setMapError('')} aria-label="Dismiss map notice"><X size={14} /></button></div>}
     {helpOpen && <div className="help-backdrop" onClick={() => setHelpOpen(false)}><section ref={helpRef} className="help-dialog" role="dialog" aria-modal="true" aria-labelledby="help-title" onClick={event => event.stopPropagation()}><button className="icon-button help-close" onClick={() => setHelpOpen(false)} aria-label="Close information"><X size={18} /></button><h2 id="help-title">Welcome to Gridlocked.</h2><p>Explore all five boroughs through public roadway cameras. Choose Traffic demo for the original 25-vehicle Vestry scene, select a street for a local preview, or plan a driving route between two locations.</p><div className="help-item"><Video size={20} /><div><strong>Camera footage is real</strong><p>Video comes from 511NY / NYSDOT. Source delay is unknown. NYC DOT snapshots are periodic images.</p></div></div><div className="help-item"><Route size={20} /><div><strong>The simulation is illustrative</strong><p>Routes use OpenStreetMap driving geometry. Speeds and vehicle motion are simulated, without live traffic or signal timing. The Vestry example is authored. Image analysis is not yet connected to this view.</p></div></div><div className="help-item"><Bot size={20} /><div><strong>Gemini can drive the ego vehicle</strong><p>The model chooses acceleration and braking from simulated state. Route steering and safety bounds are deterministic. Each run is limited to {MAX_DRIVER_STEPS} decisions; this is separate from the camera-image navigation pipeline.</p></div></div><div className="shortcut-list"><span><kbd>Space</kbd> Play / pause</span><span><kbd>C</kbd> Cameras</span><span><kbd>1</kbd><kbd>2</kbd><kbd>3</kbd> Perspective</span></div><button className="explore-button" onClick={() => setHelpOpen(false)}>Back to the city</button></section></div>}
