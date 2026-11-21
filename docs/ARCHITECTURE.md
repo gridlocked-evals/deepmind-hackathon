@@ -1,6 +1,6 @@
 # Gotham Forge architecture
 
-Gotham Forge currently combines a geographic NYC map, one deterministic traffic demonstration, and independently advancing public camera footage. The frontend runs without model credentials. The FastAPI backend supplies camera metadata and HLS transport; it does not execute the traffic simulation.
+Gotham Forge currently combines a geographic NYC map, one deterministic traffic demonstration, and independently advancing public camera footage. The frontend runs without model credentials. The FastAPI backend supplies camera metadata, HLS transport and an optional server-only model gateway; it does not execute the traffic simulation.
 
 For setup and controls, see [RUNNING.md](../RUNNING.md). The broader reconstruction and evaluation roadmap remains in [GOTHAM_FORGE_PLAN.md](../GOTHAM_FORGE_PLAN.md).
 
@@ -57,6 +57,8 @@ The DOT directory cache retains the last successful fetch time when serving stal
 The HLS proxy accepts registered camera IDs rather than arbitrary upstream URLs. It validates source host/path and redirects, rewrites playlist URIs to camera-bound opaque tokens, supports single byte ranges, and bounds concurrency and response sizes. Tokens, source health, and caches are in memory. A server restart discards them; there is no footage archive or persistent episode store.
 
 ## Extension points and current limits
+
+The [model gateway](MODEL_GATEWAY.md) adds backend Hydrogen/Carbon/Nano Banana inference, typed Decisions judgments and a bounded Genie development probe. It records immutable request/result evidence and persistent per-stage budgets, with read-only status at `/api/models/status`. All five services passed [live capability checks](MODEL_GATEWAY_VERIFICATION.md) on November 21, 2026. It does not connect the camera capture, mayor edit or playable-world stages, and its local contracts do not replace the domain schema freeze in issue #2.
 
 - Add a backend `ScenarioProvider`, runtime payload validation, and loading/error state in `App` to replace its static bundle import. Preserve the metric axes, actor IDs, ordered frame times, provenance, and version identity.
 - Generalize the renderer before accepting arbitrary intersections. Base polygons and actor states come from the bundle, but curbs, markings, signal placement, furniture, and route-progress coloring still use Vestry-specific constants. The renderer currently supports one ego plus up to 63 surrounding actors, three vehicle kinds, and one scene-wide signal state.

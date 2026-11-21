@@ -19,6 +19,7 @@ from .capture_api import Recorders, make_store, router as capture_router
 from .contracts import json_schema
 from .feeds import HLS_SOURCES, REGISTRY_URL, public_cameras, utc_now
 from .proxy import proxy_media, resolve_token
+from .gateway import GatewayConfig, ModelGateway
 
 DOT_URL = "https://webcams.nyctmc.org/api/cameras"
 DOT_PAGE = "https://webcams.nyctmc.org/map"
@@ -35,8 +36,13 @@ async def lifespan(app: FastAPI):
         app.state.http = client
         app.state.captures = make_store()
         app.state.recorders = Recorders()
+        # Keep model traffic and camera transport on separate connection pools.
+        config = GatewayConfig.from_environment()
         try:
-            yield
+            async with httpx.AsyncClient(follow_redirects=False,
+                limits=httpx.Limits(max_connections=config.max_concurrency + 1)) as model_http:
+                app.state.models = ModelGateway(config, model_http)
+                yield
         finally:
             await app.state.recorders.stop_all()
 
@@ -147,6 +153,12 @@ async def cameras(request: Request):
         "sourceKind": "snapshot", "captureClock": "unknown",
         "notice": "NYC DOT supplies periodic images. Retrieval time is not source capture time.",
     }}
+
+
+@app.get("/api/models/status")
+async def model_status(request: Request):
+    """Read-only. Inspecting capability status never invokes a paid model."""
+    return request.app.state.models.status()
 
 
 @app.get("/api/vision/cameras")
