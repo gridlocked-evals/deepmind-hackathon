@@ -106,9 +106,10 @@ def main():
                 with open(mp4, "wb") as f:
                     for ch in c.iter_content(1 << 20): f.write(ch)
             result["download_s"] = round(time.time() - t1, 2)
-            result["video"] = probe(mp4); result["mp4"] = mp4
+            result["video"] = probe(mp4)
             n = result["video"].get("frames")
-            if n: result["throughput_fps"] = round(n / result["gen_wall_s"], 3)
+            if not n: raise RuntimeError(f"downloaded video is unreadable or empty: {result['video']}")
+            result["mp4"] = mp4; result["throughput_fps"] = round(n / result["gen_wall_s"], 3)
     except Exception as e:
         result["error"] = f"{type(e).__name__}: {e}"
     finally:

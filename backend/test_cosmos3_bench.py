@@ -26,6 +26,15 @@ class Resp:
     def json(self):
         return self.body
 
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        pass
+
+    def iter_content(self, n):
+        return [b""]  # empty HTTP-200 download
+
 
 def load_bench(monkeypatch, tmp_path, submit, status):
     class Session:
@@ -61,6 +70,16 @@ def test_failed_generation_exits_nonzero_and_keeps_diagnostics(monkeypatch, tmp_
 
     assert bench.main() == 1
     assert (tmp_path / "out" / "bench_result.json").exists()
+
+
+@pytest.mark.parametrize("video", [{"error": "moov atom not found"}, {"frames": 0}])
+def test_unreadable_video_exits_nonzero_and_keeps_probe(monkeypatch, tmp_path, video):
+    bench = load_bench(monkeypatch, tmp_path, Resp({"id": "v1"}), "completed")
+    monkeypatch.setattr(bench, "probe", lambda path: video)
+
+    assert bench.main() == 1
+    result = json.loads((tmp_path / "out" / "bench_result.json").read_text())
+    assert "mp4" not in result and result["video"] == video and "unreadable" in result["error"]
 
 
 @pytest.mark.parametrize("bench_rc,expected", [(1, 1), (0, 0)])
