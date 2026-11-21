@@ -25,8 +25,23 @@ async function openJourney(driver: DriverHarness) {
   await driver.page.getByRole('button', { name: 'NYC journey', exact: true }).click();
 }
 
-async function startJourney(driver: DriverHarness, index = 0) {
+async function startOpening(driver: DriverHarness) {
   await driver.page.getByRole('button', { name: /^(Start journey|Start new journey)$/ }).click();
+  await expect(driver.page.locator('.journey-status')).toHaveText('Scripted opening in progress');
+  await expect(driver.page.locator('.journey-opening')).toContainText('Preset hazards, steering and speed');
+  await expect(driver.page.locator('.journey-panel')).toContainText('The opening makes no model calls.');
+  // Keep the real renderer while bounding software-rendering cost during the 38 s opening.
+  await driver.page.getByRole('button', { name: 'Map', exact: true }).click();
+}
+
+async function startJourney(driver: DriverHarness, index = 0) {
+  await startOpening(driver);
+  await driver.page.clock.runFor(1000);
+  expect(driver.gateway.calls).toHaveLength(index);
+  expect(driver.adversary.calls).toHaveLength(index);
+  for (let elapsed = 1000; elapsed < 45_000 && driver.gateway.calls.length === index; elapsed += 1000) {
+    await driver.page.clock.runFor(1000);
+  }
   const request = await driver.gateway.waitForRequest(index);
   await driver.page.clock.runFor(32);
   const carbon = await driver.adversary.waitForRequest(index);
@@ -49,6 +64,51 @@ async function exportReport(driver: DriverHarness): Promise<Report> {
   return report;
 }
 
+function liveWindow(report: Report) {
+  expect(report.retainedWindows).toHaveLength(2);
+  const [opening, live] = report.retainedWindows;
+  expect(opening).toMatchObject({ modelSource: 'scripted-demo', modelPolicy: { service: 'scripted', modelId: null },
+    terminal: { reason: 'scripted-complete' }, scriptedOpening: { complete: true }, steps: [] });
+  expect(opening.adversary).toBeUndefined();
+  expect(live.modelSource).toBe('live-model');
+  expect(live.steps[0].observation.simulation_time).toBe(0);
+  return live;
+}
+
+for (const exit of ['stop', 'hidden'] as const) {
+  test(`${exit} during the labelled scripted opening prevents the transition to model calls`, async ({ driver }) => {
+    await openJourney(driver);
+    await startOpening(driver);
+    await driver.page.clock.runFor(1500);
+    expect(driver.gateway.calls).toHaveLength(0);
+    expect(driver.adversary.calls).toHaveLength(0);
+    await expect(driver.page.locator('.journey-panel')).toContainText('Scripted demonstration');
+    if (exit === 'stop') await driver.page.getByRole('button', { name: 'Stop journey', exact: true }).click();
+    else await driver.page.evaluate(() => {
+      Object.defineProperty(document, 'hidden', { configurable: true, value: true });
+      document.dispatchEvent(new Event('visibilitychange'));
+    });
+    await expect(driver.page.locator('.journey-status')).toHaveText('Journey stopped');
+    const stopped = await exportReport(driver);
+    expect(stopped.retainedWindows).toHaveLength(1);
+    expect(stopped.retainedWindows[0]).toMatchObject({ modelSource: 'scripted-demo',
+      modelPolicy: { service: 'scripted', modelId: null }, terminal: { reason: 'interrupted' },
+      scriptedOpening: { complete: false }, steps: [] });
+    expect(stopped.retainedWindows[0].adversary).toBeUndefined();
+    expect(stopped.snapshot.decisions).toBe(0);
+    expect(stopped.snapshot.seconds).toBeGreaterThan(1);
+    if (exit === 'hidden') await driver.page.evaluate(() => {
+      Object.defineProperty(document, 'hidden', { configurable: true, value: false });
+      document.dispatchEvent(new Event('visibilitychange'));
+    });
+    await driver.page.clock.runFor(45_000);
+    expect(driver.gateway.calls).toHaveLength(0);
+    expect(driver.adversary.calls).toHaveLength(0);
+    expect(driver.routeRequests).toHaveLength(1);
+    expect(await exportReport(driver)).toEqual(stopped);
+  });
+}
+
 test('journey start, stop and export preserve a frozen final window despite a late driver response', async ({ driver }) => {
   await openJourney(driver);
   await startJourney(driver);
@@ -60,14 +120,14 @@ test('journey start, stop and export preserve a frozen final window despite a la
   await driver.page.clock.runFor(1200);
   expect((await driver.gateway.waitForRequest(1)).observation.lead_gap_m).not.toBeNull();
   await expect(driver.page.locator('.journey-agents')).toContainText('1 decisions');
-  await expect(driver.page.locator('.journey-events')).toContainText('Car cutting in');
+  await expect(driver.page.locator('.journey-panel')).toContainText('Car cutting in');
   await driver.page.getByRole('button', { name: 'Stop journey', exact: true }).click();
   await expect(driver.page.locator('.journey-status')).toHaveText('Journey stopped');
   const stopped = await exportReport(driver);
-  expect(stopped.retainedWindows).toHaveLength(1);
-  expect(stopped.retainedWindows[0].terminal.reason).toBe('interrupted');
-  expect(stopped.retainedWindows[0].adversary?.decisions[0].decision.event_type).toBe('cut-in-vehicle');
-  expect(stopped.snapshot.seconds).toBeGreaterThan(1);
+  const live = liveWindow(stopped);
+  expect(live.terminal.reason).toBe('interrupted');
+  expect(live.adversary?.decisions[0].decision.event_type).toBe('cut-in-vehicle');
+  expect(stopped.snapshot.seconds).toBeGreaterThan(stopped.retainedWindows[0].frames.at(-1)!.time + 1);
   expect(stopped.snapshot.decisions).toBe(1);
   await driver.gateway.reply(1, { decision: { reason: 'STALE JOURNEY RESPONSE' } });
   await driver.page.clock.fastForward(5000);
@@ -86,9 +146,8 @@ test('a route reset retains its interrupted journey export and a new start exclu
   await driver.page.getByRole('button', { name: 'NYC journey', exact: true }).click();
   const reset = await exportReport(driver);
   expect(reset.status).toBe('idle');
-  expect(reset.retainedWindows).toHaveLength(1);
-  expect(reset.retainedWindows[0].runId).toBe(old.run_id);
-  expect(reset.retainedWindows[0].terminal.reason).toBe('interrupted');
+  expect(liveWindow(reset).runId).toBe(old.run_id);
+  expect(liveWindow(reset).terminal.reason).toBe('interrupted');
   const fresh = await startJourney(driver, 1);
   expect(fresh.run_id).not.toBe(old.run_id);
   await driver.gateway.reply(0, { decision: { reason: 'ABANDONED DRIVER' } });
@@ -99,9 +158,10 @@ test('a route reset retains its interrupted journey export and a new start exclu
   await expect(driver.page.locator('.journey-agents')).toContainText('1 decisions');
   await driver.page.getByRole('button', { name: 'Stop journey', exact: true }).click();
   const restarted = await exportReport(driver);
-  expect(restarted.retainedWindows.map(trace => trace.runId)).toEqual([fresh.run_id]);
+  expect(liveWindow(restarted).runId).toBe(fresh.run_id);
+  expect(restarted.retainedWindows.every(trace => !reset.retainedWindows.some(oldTrace => oldTrace.runId === trace.runId))).toBe(true);
   expect(JSON.stringify(restarted)).not.toContain('ABANDONED DRIVER');
-  expect(restarted.retainedWindows[0].steps[0].response?.decision.reason).toBe('CURRENT JOURNEY');
+  expect(liveWindow(restarted).steps[0].response?.decision.reason).toBe('CURRENT JOURNEY');
 });
 
 test('journey HTTP failures stop without retry and export bounded request provenance', async ({ driver }) => {
@@ -116,8 +176,8 @@ test('journey HTTP failures stop without retry and export bounded request proven
   await expect(driver.page.locator('.journey-status')).toHaveText('Journey interrupted');
   const report = await exportReport(driver);
   expect(report.status).toBe('error');
-  expect(report.retainedWindows[0].terminal.reason).toBe('error');
-  expect(report.retainedWindows[0].steps[0]).toMatchObject({ response: null, failure: {
+  expect(liveWindow(report).terminal.reason).toBe('error');
+  expect(liveWindow(report).steps[0]).toMatchObject({ response: null, failure: {
     code: 'invalid_output', requestId: '12345678-1234-4234-8234-123456789abc',
   } });
   expect(JSON.stringify(report)).not.toContain('PRIVATE_PROVIDER_BODY');
@@ -135,7 +195,7 @@ test('hiding the tab stops a pending journey and returning never revives late re
   });
   await expect(driver.page.locator('.journey-status')).toHaveText('Journey stopped');
   const stopped = await exportReport(driver);
-  expect(stopped.retainedWindows[0].steps[0].response).toBeNull();
+  expect(liveWindow(stopped).steps[0].response).toBeNull();
   await driver.page.evaluate(() => {
     Object.defineProperty(document, 'hidden', { configurable: true, value: false });
     document.dispatchEvent(new Event('visibilitychange'));
