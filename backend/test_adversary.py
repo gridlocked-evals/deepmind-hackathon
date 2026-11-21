@@ -121,6 +121,18 @@ def test_budget_refused_without_gateway_call(body):
     assert not gateway.calls
 
 
+def test_third_attack_after_two_real_attacks_is_refused_without_gateway_call():
+    client, gateway, _ = client_for()
+    assert client.post(URL, json=request_body()).status_code == 200
+    gateway.output = dict(ATTACK, trigger_seconds=19.0)
+    issued = [{"event_type": "car-crash", "trigger_seconds": 8.0}]
+    assert client.post(URL, json=request_body(1, issued, time=9.0)).status_code == 200
+    issued.append({"event_type": "car-crash", "trigger_seconds": 19.0})
+    response = client.post(URL, json=request_body(2, issued, time=21.0))
+    assert response.status_code == 409 and detail(response)["code"] == "invalid_input"
+    assert len(gateway.calls) == 2
+
+
 def test_ledger_not_request_decides_budget():
     client, gateway, _ = client_for()
     client.post(URL, json=request_body())
@@ -348,7 +360,9 @@ def test_request_strictness_rejects_before_gateway(path, value):
 
 
 @pytest.mark.parametrize("raw", [
-    "{", "[]", '{"attack_index":0,"attack_index":1}',
+    "{", "[]",
+    # Otherwise valid, so only the duplicate key can cause the rejection.
+    json.dumps(request_body()).replace('"attack_index": 0', '"attack_index": 0, "attack_index": 0'),
     json.dumps(request_body()).replace('"speed_mps": 5.0', '"speed_mps": NaN'),
     json.dumps(request_body()).replace('"speed_mps": 5.0', '"speed_mps": Infinity'),
     json.dumps(request_body()).replace('"speed_mps": 5.0', '"speed_mps": 1e999'),
@@ -397,3 +411,12 @@ def test_no_secret_or_provider_text_escapes():
     client, _, _ = client_for(leaky)
     response = client.post(URL, json=request_body())
     assert response.status_code == 502 and "secret-test-credential" not in response.text
+
+
+def test_gateway_http_exception_is_sanitized():
+    gateway = FakeGateway()
+    gateway.error = HTTPException(502, detail="secret-test-credential")
+    client, _, _ = client_for(gateway)
+    response = client.post(URL, json=request_body())
+    assert response.status_code == 502 and detail(response)["code"] == "upstream_error"
+    assert "secret" not in response.text
