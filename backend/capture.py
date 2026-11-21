@@ -494,8 +494,8 @@ class CaptureStore:
         for path in tmp.rglob("*"):
             if path.is_file():
                 path.chmod(0o444)
-        os.replace(tmp, self.root / episode_id)
         with self._lock:
+            os.replace(tmp, self.root / episode_id)  # publish under the lock: a pin can't land before the fit check
             # Check fit before evicting: evicting and then rejecting this episode anyway would lose data for nothing.
             evictable = sum(self._size(p) for p in self.root.iterdir()
                             if _EPISODE_ID.match(p.name) and p.name != episode_id and not self.pins(p.name))

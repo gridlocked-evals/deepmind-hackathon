@@ -1,6 +1,8 @@
 import asyncio
 from datetime import datetime, timedelta, timezone
 import json
+from pathlib import Path
+import os
 import shutil
 import subprocess
 import threading
@@ -270,6 +272,50 @@ def test_pin_cannot_land_between_eviction_check_and_delete(tmp_path):
     # A pin that reports success must leave its episode on disk.
     if "pins" in pin_result:
         assert (root / target / "manifest.json").is_file(), "pinned episode was evicted"
+    else:
+        assert "Unknown capture episode" in str(pin_result["error"])
+
+
+def test_pin_cannot_land_on_new_episode_before_its_fit_check(tmp_path, monkeypatch):
+    import backend.capture as capture
+    root = tmp_path / "captures"
+    probe = lambda p: {"frames": 1800, "width": 640, "height": 352, "duration": 120.0}
+    clock = FakeClock()
+    store = CaptureStore(root=root, budget_bytes=10**9, clock=clock, probe=probe)
+    rec, _, _ = record(40)
+    old = store.create_hls_episode(rec, seconds_ago=20, duration_s=10)["id"]
+    store.pin(old, "job-accepted-1")
+    clock.now += timedelta(seconds=1)
+    store.budget_bytes = store.usage_bytes() + 1  # the next episode cannot fit
+    published, pin_done, pin_result = threading.Event(), threading.Event(), {}
+    real_replace = os.replace
+
+    def hooked_replace(src, dst):  # the gap right after the new episode becomes visible
+        real_replace(src, dst)
+        if Path(dst).parent == root and not published.is_set():
+            published.set()
+            pin_result["id"] = Path(dst).name
+            pin_done.wait(1)  # without the lock the pin finishes here
+
+    monkeypatch.setattr(capture.os, "replace", hooked_replace)
+
+    def pin():
+        try:
+            pin_result["pins"] = store.pin(pin_result["id"], "job-accepted-2")
+        except CaptureError as error:
+            pin_result["error"] = error
+        pin_done.set()
+
+    create = threading.Thread(target=lambda: pytest.raises(CaptureError, store.create_hls_episode,
+                                                            rec, seconds_ago=20, duration_s=10))
+    create.start()
+    assert published.wait(5)
+    pinner = threading.Thread(target=pin)
+    pinner.start()
+    create.join(5)
+    pinner.join(5)
+    if "pins" in pin_result:  # a pin that reports success must leave its episode on disk
+        assert (root / pin_result["id"] / "manifest.json").is_file(), "pinned new episode was deleted"
     else:
         assert "Unknown capture episode" in str(pin_result["error"])
 
