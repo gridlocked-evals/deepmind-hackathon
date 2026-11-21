@@ -443,6 +443,60 @@ def test_dispatched_genie_with_expired_lease_still_blocks_with_termination(tmp_p
     asyncio.run(run())
 
 
+def test_live_genie_world_does_not_take_a_slot_from_other_calls(tmp_path):
+    answers = {"visible": {"type": "noul", "noul": .9, "confidence": .8}}
+    entered, release, both = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    in_flight = 0
+    class Blocking(WorldSession):
+        async def receive(self):
+            entered.set()
+            await release.wait()
+            async for event in super().receive():
+                yield event
+    @asynccontextmanager
+    async def connector(key, identifier, timeout):
+        yield Blocking()
+    async def handler(request):
+        nonlocal in_flight
+        if request.url.path != "/v1beta/decisions":
+            return httpx.Response(200, json={"id": "world-1", "status": "in_progress"})
+        in_flight += 1
+        if in_flight == 2:
+            both.set()
+        await both.wait()  # Each call finishes only once both run at the same time.
+        return httpx.Response(200, json={"answers": answers, "usage": {"total_input_tokens": 10, "total_output_tokens": 0, "total_tokens": 10}})
+    async def run():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            gateway = ModelGateway(settings(tmp_path, max_concurrency=2, genie_seconds=5), client,
+                                   api_key=KEY, genie_connector=connector)
+            context = CallContext(episode_id="smoke", prompt_id="world-v1", purpose="smoke")
+            world = asyncio.create_task(gateway.probe_world(prompt="A quiet street", context=context))
+            await entered.wait()
+            questions = {"visible": {"type": "noul", "instructions": "Is it visible?"}}
+            results = await asyncio.wait_for(asyncio.gather(*(gateway.judge(
+                stage="image_gate", input_value="Street", context=CONTEXT, questions=questions) for _ in range(2))), 1)
+            assert [result.output for result in results] == [answers] * 2
+            release.set()
+            await world
+    asyncio.run(run())
+
+
+def test_expired_undispatched_genie_row_is_released(tmp_path):
+    async def run():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(lambda _: pytest.fail("unexpected network request"))) as client:
+            gateway = ModelGateway(settings(tmp_path), client, api_key=KEY)
+            context = CallContext(episode_id="smoke", prompt_id="world-v1", purpose="smoke")
+            call = gateway._prepare(Service.GENIE, "world", {"create": {"model": "genie-4"}}, context, 1)
+            reserve = lambda: gateway.ledger.reserve(call, "call", "credential", "genie-4", 1, 1, 60)
+            crashed = reserve()  # The owner died after reserving, before sending anything.
+            with gateway.ledger.connection() as db:
+                db.execute("UPDATE attempts SET lease_until=? WHERE request_id=?", (time.time() - 1, crashed))
+            assert reserve() != crashed
+            assert gateway.ledger.get(crashed)["outcome"] == "cancelled"
+            assert gateway.ledger.get(crashed)["charged_microusd"] == 1
+    asyncio.run(run())
+
+
 def test_no_key_status_endpoint_and_smoke_never_send_requests(tmp_path, monkeypatch):
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
     monkeypatch.delenv("GOOGLE_API_KEY", raising=False)

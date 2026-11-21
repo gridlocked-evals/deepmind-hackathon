@@ -29,6 +29,7 @@ class ModelGateway:
         self.http = HTTPAdapter(client, self._key or "", config)
         self.genie = GenieAdapter(self.http, genie_connector) if genie_connector else GenieAdapter(self.http)
         # Queue this process's calls; the ledger's limit still guards other workers.
+        # Genie stays out: the ledger's one-world rule bounds it, and a live world must not starve judges.
         self.slots = asyncio.Semaphore(config.max_concurrency)
 
     def _input(self, value):
@@ -153,7 +154,8 @@ class ModelGateway:
             request_id = None
             started = time.monotonic()
             response_evidence = None
-            await self.slots.acquire()
+            if call.service != Service.GENIE:
+                await self.slots.acquire()
             try:
                 if not self._key:
                     raise GatewayError(ErrorCode.NOT_CONFIGURED)
@@ -219,7 +221,8 @@ class ModelGateway:
                     raise error from None
                 await asyncio.sleep(min(self.config.retry_delay_seconds, max(error.retry_after, .25 * 2 ** attempt)))
             finally:
-                self.slots.release()
+                if call.service != Service.GENIE:
+                    self.slots.release()
         raise AssertionError("unreachable")
 
     def status(self) -> dict:
