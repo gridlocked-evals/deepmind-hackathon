@@ -47,7 +47,7 @@ async def lifespan(app: FastAPI):
             async with httpx.AsyncClient(follow_redirects=False,
                 limits=httpx.Limits(max_connections=config.max_concurrency + 1)) as model_http:
                 app.state.models = ModelGateway(config, model_http)
-                app.state.worlds = WorldManager(app.state.models)
+                app.state.worlds = WorldManager(app.state.models, gates=app.state.artifacts)
                 recovery = asyncio.create_task(app.state.worlds.watch_abandoned())
                 try:
                     yield
