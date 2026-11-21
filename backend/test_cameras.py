@@ -322,6 +322,39 @@ def test_scope_cancellation_during_close_does_not_spin(monkeypatch):
     asyncio.run(run())
 
 
+def test_close_that_ignores_cancellation_cannot_hold_a_slot(monkeypatch):
+    class StubbornStream(TrackedMediaStream):
+        async def aclose(self):
+            self.close_calls += 1
+            while not self.closed:
+                try:
+                    await self.release.wait()
+                    self.closed = True
+                except asyncio.CancelledError:
+                    pass  # a close that swallows cancellation
+
+    async def run():
+        slots = asyncio.Semaphore(8)
+        monkeypatch.setattr(proxy, "_slots", slots)
+        monkeypatch.setattr(proxy, "UPSTREAM_CLOSE_SECONDS", .05)
+        stream = StubbornStream()
+        stream.release = asyncio.Event()
+        async with httpx.AsyncClient(transport=httpx.MockTransport(lambda _: httpx.Response(
+                200, stream=stream, headers={"Content-Type": "video/mp2t"}))) as client:
+            response, scope, receive = await media_response(client)
+
+            async def send(_message):
+                pass
+
+            try:
+                await asyncio.wait_for(response(scope, receive, send), timeout=1)
+                assert slots._value == 8  # released at the deadline, though the close never finished
+            finally:
+                stream.release.set()  # let the abandoned close end so the loop can shut down
+                await asyncio.sleep(0)
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize("disconnect", [False, True])
 def test_media_cleanup_timeout_does_not_hold_capacity(monkeypatch, disconnect):
     async def run():
