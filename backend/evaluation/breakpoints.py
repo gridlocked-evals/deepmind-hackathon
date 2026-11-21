@@ -41,6 +41,8 @@ class Sweep(BaseModel):
     settings: tuple[Setting, ...] = Field(min_length=1)
     baseline: dict[str, Any]
     criterion: PassCriterion
+    # Non-infrastructure errors / attempts at or above this make the setting the limit; below it the pass rule decides.
+    max_error_rate: float = Field(default=.2, gt=0, le=1)
 
     @model_validator(mode="after")
     def one_dimension(self) -> Sweep:
@@ -69,7 +71,7 @@ class SettingResult(BaseModel):
     cost_usd: float | None = None
     counts: dict[Outcome, int] = {}  # attempts by manifest.Outcome
     errors: dict[ErrorCode, int] = {}  # errored attempts by gateway ErrorCode
-    provider_outage: bool = False  # caller's suspicion; ignored unless `errors` is evidence of an outage
+    provider_outage: bool = False  # caller's suspicion; not used by classify (kept so older results still load)
 
 
 # Connection, rate-limit and quota failures say nothing about the input. UPSTREAM is excluded (it also
@@ -113,7 +115,7 @@ class SweepLog:
         earlier = [r for r in self.results() if r.setting == result.setting]
         # Only an outage may be rerun, once: a rerun after a real pass/fail would be retry-until-pass.
         if earlier and (len(earlier) > MAX_OUTAGE_RERUNS
-                        or any(classify(sweep, r, self.results())[1] != "provider_outage" for r in earlier)):
+                        or any(classify(sweep, r)[1] != "provider_outage" for r in earlier)):
             raise ValueError(f"setting {result.setting!r} already has a result; no reruns except one after an outage")
         _append(self.path, result)
 
@@ -130,32 +132,28 @@ def _append(path: Path, model: BaseModel) -> None:
 Status = Literal["pass", "fail", "inconclusive"]
 
 
-def _codes(result: SettingResult) -> set[ErrorCode]:
-    return {code for code, n in result.errors.items() if n}
+def _error_rates(result: SettingResult) -> tuple[bool, float]:
+    """(any infrastructure error, share of attempts that failed with a non-infrastructure or uncoded error)."""
+    infra = sum(n for code, n in result.errors.items() if code in INFRASTRUCTURE_ERRORS)
+    coded = sum(result.errors.values())
+    other = coded - infra + max(0, result.counts.get(Outcome.ERROR, 0) - coded)  # uncoded errors count as real
+    attempts = max(sum(result.counts.values()), coded)
+    return infra > 0, (other / attempts if attempts else 0.0)
 
 
-def _outage(result: SettingResult, others: list[SettingResult]) -> bool:
-    """Only infrastructure errors, and (if other settings have results) seen at another setting too."""
-    codes = _codes(result)
-    if not codes or not codes <= INFRASTRUCTURE_ERRORS:
-        return False
-    others = [r for r in others if r.setting != result.setting]
-    return not others or any(codes & _codes(r) for r in others)
-
-
-def classify(sweep: Sweep, result: SettingResult, others: list[SettingResult] = ()) -> tuple[Status, str]:
-    """Unsafe false acceptance fails first; evidence-backed outage -> inconclusive; errors and abstention at a limit fail.
-
-    `others` are the sweep's other recorded results, used to tell a sweep-wide outage from a limit.
-    """
+def classify(sweep: Sweep, result: SettingResult) -> tuple[Status, str]:
+    """Unsafe false acceptance fails first; then an error rate at the predeclared limit fails;
+    then any infrastructure error (transport/quota) makes the setting inconclusive (one rerun);
+    otherwise the pass rule decides. A verdict depends only on this result and the frozen sweep."""
     if result.sweep_sha256 != sweep.sha256:
         raise ValueError("result belongs to a different sweep")
     if result.false_acceptance:  # first: an unsafe acceptance is never excused (or made re-runnable) by an outage
         return "fail", "unsafe_false_acceptance"
-    if _outage(result, list(others)):
+    infra, error_rate = _error_rates(result)
+    if error_rate >= sweep.max_error_rate:
+        return "fail", "errors_at_limit"  # timeouts/invalid output at this rate are the measured limit
+    if infra:
         return "inconclusive", "provider_outage"  # an API outage is not the multimodal breakpoint
-    if result.errors or result.counts.get(Outcome.ERROR, 0):
-        return "fail", "errors_at_limit"  # timeouts/invalid output at this setting are the measured limit
     criterion = sweep.criterion
     value = getattr(result, criterion.metric)
     if value is None:
@@ -183,7 +181,7 @@ def find_breakpoint(sweep: Sweep, results: list[SettingResult]) -> Breakpoint:
         if setting not in by_setting:
             untested.append(setting)
             continue
-        status, reason = classify(sweep, by_setting[setting], results)
+        status, reason = classify(sweep, by_setting[setting])
         if status == "fail":
             return Breakpoint(status="found", last_pass=last_pass, first_fail=setting, reason=reason,
                               inconclusive=inconclusive, untested=untested)

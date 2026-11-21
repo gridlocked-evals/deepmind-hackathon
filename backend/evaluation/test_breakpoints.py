@@ -58,8 +58,8 @@ def test_outage_is_inconclusive_not_breakpoint():
     results = [res(s, 0.0, observation_quality=.9),
                res(s, .25, observation_quality=.1, **transport),
                res(s, .5, observation_quality=.1, provider_outage=True, **transport)]
-    assert classify(s, results[1]) == ("inconclusive", "provider_outage")  # no other results: code rule alone
-    bp = find_breakpoint(s, results)  # transport errors spread across settings
+    assert classify(s, results[1]) == ("inconclusive", "provider_outage")
+    bp = find_breakpoint(s, results)
     assert bp.status == "incomplete_within_tested_range" and bp.first_fail is None
     assert bp.last_pass == 0.0 and bp.inconclusive == [.25, .5] and bp.untested == [.75]
 
@@ -71,9 +71,20 @@ def test_timeouts_at_a_setting_are_the_breakpoint():
                    errors={ErrorCode.TIMEOUT: 2, ErrorCode.TRANSPORT: 1}, provider_outage=True)]
     bp = find_breakpoint(s, results)
     assert (bp.status, bp.last_pass, bp.first_fail, bp.reason) == ("found", 0.0, .25, "errors_at_limit")
-    # transport-only errors confined to one setting while others ran clean are a limit, not an outage
-    confined = res(s, .25, observation_quality=.9, errors={ErrorCode.TRANSPORT: 1})
-    assert classify(s, confined, [results[0]]) == ("fail", "errors_at_limit")
+
+
+def test_one_error_is_not_a_breakpoint():
+    # Review repro: one error among many good attempts must not become the limit.
+    s = sweep(dimension="input_length_s", baseline={"style": "photo"}, settings=(10, 20, 30))
+    ok = {Outcome.SUCCESS: 9}
+    transport = res(s, 20, observation_quality=.95, counts=ok | {Outcome.ERROR: 1}, errors={ErrorCode.TRANSPORT: 1})
+    timeout = res(s, 20, observation_quality=.95, counts=ok | {Outcome.ERROR: 1}, errors={ErrorCode.TIMEOUT: 1})
+    assert classify(s, transport) == ("inconclusive", "provider_outage")  # rerun, same verdict whatever else ran
+    assert classify(s, timeout) == ("pass", "criterion_met")  # 10% < max_error_rate 20%
+    at_limit = res(s, 20, observation_quality=.95, counts={Outcome.SUCCESS: 8, Outcome.ERROR: 2},
+                   errors={ErrorCode.TIMEOUT: 2})
+    assert classify(s, at_limit) == ("fail", "errors_at_limit")
+    assert sweep(max_error_rate=.5).sha256 != sweep().sha256  # the threshold is frozen in the hash
 
 
 def test_outage_flag_needs_evidence():
