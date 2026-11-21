@@ -135,7 +135,7 @@ export function createEvents(plan: ScenarioPlan, mode: EventState['mode']): Even
 }
 export function requestEvent(state: EventState, id: string, time: number): EventState {
   if (state.mode === 'baseline' || !state.plan.events.some(event => event.id === id && event.trigger.kind === 'manual')) throw new Error('This event cannot be manually triggered.');
-  if (id in state.pending || state.applied.some(event => event.spec.id === id)) return state;
+  if (Object.hasOwn(state.pending, id) || state.applied.some(event => event.spec.id === id)) return state;
   return { ...state, pending: { ...state.pending, [id]: time }, log: [...state.log, { eventId: id, kind: 'requested', time, frame: Math.round(time / EVENT_STEP) }] };
 }
 export function advanceEvents(state: EventState, time: number, progress: number, routeLength: number, boundary = false): EventState {
@@ -146,7 +146,9 @@ export function advanceEvents(state: EventState, time: number, progress: number,
   };
   for (const event of state.plan.events) {
     if (log.some(row => row.eventId === event.id && row.kind === 'not_applied_route_end')) continue;
-    const requestedAt = event.trigger.kind === 'manual' ? state.pending[event.id] : event.trigger.kind === 'time' ? event.trigger.seconds : event.trigger.frame * EVENT_STEP;
+    const requestedAt = event.trigger.kind === 'manual'
+      ? (Object.hasOwn(state.pending, event.id) ? state.pending[event.id] : undefined)
+      : event.trigger.kind === 'time' ? event.trigger.seconds : event.trigger.frame * EVENT_STEP;
     if (requestedAt === undefined || requestedAt > time + 1e-7 || (event.trigger.kind === 'manual' && !boundary)) continue;
     if (!applied.some(item => item.spec.id === event.id)) {
       if (progress + event.parameters.distanceAheadM + 8 >= routeLength) { record(event.id, 'not_applied_route_end'); continue; }
