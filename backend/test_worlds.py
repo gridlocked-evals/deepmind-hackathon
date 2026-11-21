@@ -328,6 +328,8 @@ def test_browser_relay_capabilities_origin_disconnect_and_secret_boundary(tmp_pa
         headers = {"Authorization": "Bearer " + "o" * 32}
         response = client.post("/api/worlds", json=app.state.request_body, headers=headers)
         assert response.status_code == 200
+        second = client.post("/api/worlds", json=app.state.request_body, headers=headers)
+        assert second.status_code == 409 and second.json()["detail"]["code"] == "concurrency_limit"
         body = response.json()
         assert KEY not in response.text and SCOPED not in response.text
         path, token = body["websocket_path"], body["connect_tokens"]["human"]

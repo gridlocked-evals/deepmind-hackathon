@@ -188,6 +188,27 @@ def test_concurrency_is_atomic_across_gateway_instances(tmp_path):
     asyncio.run(run())
 
 
+def test_parallel_calls_queue_in_process_instead_of_failing(tmp_path):
+    answers = {"visible": {"type": "noul", "noul": .9, "confidence": .8}}
+    in_flight = peak = 0
+    async def handler(_):
+        nonlocal in_flight, peak
+        in_flight += 1
+        peak = max(peak, in_flight)
+        await asyncio.sleep(.05)
+        in_flight -= 1
+        return httpx.Response(200, json={"answers": answers, "usage": {"total_input_tokens": 10, "total_output_tokens": 0, "total_tokens": 10}})
+    async def run():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            gateway = ModelGateway(settings(tmp_path, max_concurrency=2), client, api_key=KEY)
+            questions = {"visible": {"type": "noul", "instructions": "Is it visible?"}}
+            results = await asyncio.gather(*(gateway.judge(stage="image_gate", input_value="Street", context=CONTEXT,
+                                                           questions=questions) for _ in range(4)))
+            assert [result.output for result in results] == [answers] * 4
+            assert peak == 2
+    asyncio.run(run())
+
+
 def test_demo_reserve_and_stage_caps_block_before_network(tmp_path):
     requests = []
     def handler(request):
@@ -368,6 +389,36 @@ def test_genie_real_protocol_cleanup_and_unresolved_session_block(tmp_path, fail
                     assert second.value.code == ErrorCode.TERMINATION and len(calls) == count
                 else:
                     assert len(calls) == 2 and calls[-1].endswith("/cancel")
+    asyncio.run(run())
+
+
+def test_second_genie_while_one_is_live_is_concurrency_not_termination(tmp_path):
+    calls = []
+    entered, release = asyncio.Event(), asyncio.Event()
+    class Blocking(WorldSession):
+        async def receive(self):
+            entered.set()
+            await release.wait()
+            async for event in super().receive():
+                yield event
+    world = Blocking()
+    @asynccontextmanager
+    async def connector(key, identifier, timeout):
+        yield world
+    def handler(request):
+        calls.append(request.url.path)
+        return httpx.Response(200, json={"id": "world-1", "status": "in_progress"})
+    async def run():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            gateway = ModelGateway(settings(tmp_path, genie_seconds=.2), client, api_key=KEY, genie_connector=connector)
+            context = CallContext(episode_id="smoke", prompt_id="world-v1", purpose="smoke")
+            first = asyncio.create_task(gateway.probe_world(prompt="A quiet street", context=context))
+            await entered.wait()
+            with pytest.raises(GatewayError) as error:
+                await gateway.probe_world(prompt="Another street", context=context)
+            assert error.value.code == ErrorCode.CONCURRENCY and calls == ["/v1beta/interactions"]
+            release.set()
+            await first
     asyncio.run(run())
 
 

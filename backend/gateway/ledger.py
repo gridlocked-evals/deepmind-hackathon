@@ -76,10 +76,14 @@ class Ledger:
             db.execute("BEGIN IMMEDIATE")
             if db.execute("SELECT 1 FROM blocks LIMIT 1").fetchone():
                 raise GatewayError(ErrorCode.BUDGET)
-            if call.service == "genie" and db.execute(
-                "SELECT 1 FROM attempts WHERE service='genie' AND (outcome='pending' OR (outcome='termination_unconfirmed' AND dispatched=1)) LIMIT 1"
-            ).fetchone():
-                raise GatewayError(ErrorCode.TERMINATION)
+            if call.service == "genie":
+                unresolved = db.execute(
+                    "SELECT MAX(dispatched=1 AND (outcome!='pending' OR lease_until<=?)) FROM attempts WHERE service='genie' AND (outcome='pending' OR (outcome='termination_unconfirmed' AND dispatched=1))",
+                    (now,),
+                ).fetchone()[0]
+                if unresolved is not None:
+                    # A live or never-sent world only has to finish; a dispatched one nobody owns may still bill.
+                    raise GatewayError(ErrorCode.TERMINATION if unresolved else ErrorCode.CONCURRENCY)
             active = db.execute(
                 "SELECT COUNT(*) FROM attempts WHERE outcome='pending' AND lease_until>?", (now,)
             ).fetchone()[0]
