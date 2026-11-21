@@ -81,6 +81,11 @@ class ModelGateway:
         self._input(input_value)
         payload = {"model": MODELS[service], "input": input_value, "store": False,
                    "generation_config": {"max_output_tokens": self.config.output_tokens_per_call}}
+        if service == Service.HYDROGEN and stage == "observation":
+            # A live six-frame extraction exhausted 4093/4096 tokens on default
+            # thinking, leaving only three output tokens. Fix this stage's policy
+            # to low so the bounded evidence table can actually be returned.
+            payload["generation_config"]["thinking_level"] = "low"
         if service == Service.NANO_BANANA:
             if response_model:
                 raise GatewayError(ErrorCode.INVALID_INPUT)
