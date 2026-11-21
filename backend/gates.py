@@ -198,7 +198,7 @@ async def _judge(gateway, store, bundle, record, gate_id, thresholds, purpose) -
         {"type": "image", "mime_type": "image/png", "data": base64.b64encode(ref_bytes).decode()},
     ]
     context = CallContext(episode_id=bundle.captureId, prompt_id=PROMPT_ID, capture_id=bundle.captureId,
-                          source_id=bundle.captureId, purpose=purpose)
+                          source_id=bundle.sourceId or bundle.captureId, purpose=purpose)
     requested = utcnow()
     answers, judge_error = None, None
     cancelled = None
@@ -374,15 +374,17 @@ def publish_accepted(store: ArtifactStore, references, reference_id: str, gate_i
     from .worlds.contracts import AcceptedReference  # worlds depends on the gateway, not on gates
 
     auth = authorize_world(store, reference_id, gate_id)
-    capture_id = ReferenceImage.model_validate(store.get("references", reference_id)["referenceImage"]).captureId
+    reference = ReferenceImage.model_validate(store.get("references", reference_id)["referenceImage"])
+    capture_id = reference.captureId
+    bundle = EditBundle.model_validate(store.get("edits", reference.streetEditId))
+    source_id = bundle.sourceId or capture_id
     artifact = gate_artifact(store, gate_id)
     record = AcceptedReference(
-        # Same convention as the pipeline's model calls: the capture is the episode and the source.
-        episode_id=capture_id, source_id=capture_id, capture_id=capture_id, reference_id=reference_id,
+        episode_id=capture_id, source_id=source_id, capture_id=capture_id, reference_id=reference_id,
         reference_sha256=auth["imageSha256"].removeprefix("sha256:"),
         mime_type=auth["referenceImage"]["mime_type"], gate_decision_id=gate_id,
         gate_artifact_sha256=sha256(artifact).removeprefix("sha256:"), decision="accept")
     fingerprint = references.publish(record, base64.b64decode(auth["referenceImage"]["data"]), artifact)
     return {"acceptedReference": fingerprint, "worldPrompt": auth["worldPrompt"],
             "imageSha256": auth["imageSha256"], "gateDecisionId": gate_id, "referenceImageId": reference_id,
-            "context": {"episode_id": capture_id, "source_id": capture_id, "capture_id": capture_id}}
+            "context": {"episode_id": capture_id, "source_id": source_id, "capture_id": capture_id}}

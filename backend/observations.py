@@ -11,7 +11,7 @@ from .artifacts import ArtifactError, ArtifactStore, new_id, utcnow
 from .capture import CaptureStore
 from .contracts import Anchor, Observation, ObservationBatch, MediaTimeRange, Unknown
 from .gateway import CallContext, GatewayError, ModelGateway, Service
-from .gateway.contracts import ErrorCode
+from .gateway.contracts import ErrorCode, canonical, digest
 from .modelcalls import from_error, from_result
 from .observation_contracts import (ExtractRequest, HydrogenOutput, MAX_FRAMES, MAX_REINSPECTIONS,
     MAX_WINDOWS, OWNED_SECONDS, PROMPT_ID, ReinspectRequest, WINDOW_SECONDS, WireOutput)
@@ -181,7 +181,7 @@ async def extract(gateway: ModelGateway, store: ArtifactStore, captures: Capture
         'parentId': parent['id'] if parent else None, 'focus': reinspection.focus if reinspection else None,
         'clocks': manifest['clocks'], 'sourceLabels': manifest['labels'], 'createdAt': utcnow().isoformat(),
         'windows': [], 'facts': [], 'batchIds': [], 'status': 'failed', 'failures': [],
-        'manualReview': 'pending_human_annotations', 'promptId': PROMPT_ID}
+        'manualReview': 'optional_not_reviewed', 'promptId': PROMPT_ID}
     report['modelPolicy'] = {'thinking_level': 'low', 'max_output_tokens': gateway.config.output_tokens_per_call}
     try:
         index = await asyncio.to_thread(index_prefix, path, manifest)
@@ -215,14 +215,17 @@ async def extract(gateway: ModelGateway, store: ArtifactStore, captures: Capture
                     inputs.extend([{'type': 'text', 'text': f"frameIndex={frame['frameIndex']}; mediaTimeS={frame['mediaTimeS']}"},
                         {'type': 'image', 'mime_type': image['mimeType'], 'data': base64.b64encode(store.get_blob(image['sha256'])).decode()}])
                 result = await gateway.generate(Service.HYDROGEN, stage='observation', input_value=inputs,
-                    context=CallContext(episode_id=job_id, source_id=request.cameraId, capture_id=request.captureId,
-                                        prompt_id=PROMPT_ID), response_model=WireOutput)
+                    context=CallContext(episode_id=request.captureId, source_id=request.cameraId, capture_id=request.captureId,
+                                        attempt_id=attempt_id, prompt_id=PROMPT_ID,
+                                        original_media_sha256=(report['prefixSha256'].split(':',1)[1],)),
+                    response_model=WireOutput, qualify=False)
                 call = from_result(gateway, Service.HYDROGEN, result, prompt_id=PROMPT_ID,
                     domain_hashes=hashes, requested_at=requested_at, completed_at=utcnow())
                 record.update(modelCall=call.model_dump(mode='json'), gatewayRequestId=result.request_id,
                               rawOutput=result.output, inputHash=result.input_hash)
                 output = HydrogenOutput.model_validate(result.output)
-                rows = accept_facts(output, manifest, window, frames, images, motion, report['facts'])
+                previous = [*(parent['facts'] if parent else []), *report['facts']]
+                rows = accept_facts(output, manifest, window, frames, images, motion, previous)
                 batch = project_batch(job_id, manifest, call, rows, motion, output.unknowns)
                 # Persist the evidence join before exposing the compatible core batch.
                 store.put('observation_evidence', batch.id, {'batchId': batch.id, 'extractionId': job_id,
@@ -230,6 +233,13 @@ async def extract(gateway: ModelGateway, store: ArtifactStore, captures: Capture
                     'window': window, 'modelCall': call.model_dump(mode='json'), 'gatewayRequestId': result.request_id,
                     'facts': rows, 'modelImages': images, 'frameIds': record['frameIds']})
                 store.put('observations', batch.id, batch)
+                # A transport-valid response is not accepted evidence until its
+                # frame, time, source and event constraints pass and both records
+                # are durable. Abstention remains an explicitly recorded outcome.
+                record['acceptanceBinding'] = gateway.accept_artifact(result, artifact_id=batch.id,
+                    artifact_sha256=digest(canonical({'batch': batch.model_dump(mode='json'),
+                        'evidence': store.get('observation_evidence', batch.id)})),
+                    qualifying=any(row['disposition'] == 'accepted' for row in rows))
                 report['batchIds'].append(batch.id)
                 report['facts'].extend(rows)
                 record.update(status='abstained' if not any(r['disposition']=='accepted' for r in rows) else 'ok',

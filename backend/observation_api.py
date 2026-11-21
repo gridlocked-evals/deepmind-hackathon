@@ -6,7 +6,7 @@ from .artifacts import ArtifactError
 from .capture import CaptureError
 from .gateway import GatewayError
 from .observation_contracts import ExtractRequest, ManualReview, ReinspectRequest
-from .observation_review import annotation_template, review_html, score_review
+from .observation_review import annotation_template, failure_report, review_html, score_review, verified_review
 from .observations import extract
 from .pipeline_api import _fail
 from .worlds.api import authorize
@@ -67,6 +67,38 @@ async def review(job_id: str, request: Request):
 async def template(job_id: str, request: Request):
     try:
         return annotation_template(request.app.state.artifacts.get('extractions', job_id))
+    except ArtifactError as exc:
+        return _fail(exc)
+
+
+@router.get('/extractions/{job_id}/failure-report')
+async def failures(job_id: str, request: Request):
+    try:
+        return failure_report(request.app.state.artifacts.get('extractions', job_id))
+    except ArtifactError as exc:
+        return _fail(exc)
+
+
+@router.get('/extractions/{job_id}/reviews')
+async def reviews(job_id: str, request: Request):
+    store = request.app.state.artifacts
+    try:
+        report = store.get('extractions', job_id)
+        rows = [verified_review(value, report) for value in store.list('reviews')
+                if value.get('annotation', {}).get('extractionId') == job_id]
+        return {'extractionId': job_id, 'reviews': rows,
+                'status': 'reviewed_annotations_available' if rows else 'optional_not_reviewed',
+                'notice': 'Repeated reviews are separate records; their annotations are not pooled as independent samples.'}
+    except ArtifactError as exc:
+        return _fail(exc)
+
+
+@router.get('/extractions/{job_id}/reviews/{review_id}')
+async def review_record(job_id: str, review_id: str, request: Request):
+    store = request.app.state.artifacts
+    try:
+        report = store.get('extractions', job_id)
+        return verified_review(store.get('reviews', review_id), report)
     except ArtifactError as exc:
         return _fail(exc)
 

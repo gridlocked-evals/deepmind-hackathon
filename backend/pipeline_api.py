@@ -7,12 +7,12 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse, Response
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field
 
 from .artifacts import ArtifactError, ArtifactStore
-from .capture import CaptureError
+from .capture import CaptureError, CaptureNotFound
 from .contracts import ObservationBatch
 from .edits import PRESETS, EditBundle, EditRequestError, compile_edit
 from .frames import source_frame
@@ -20,6 +20,7 @@ from .gateway import GatewayError
 from .gateway.contracts import ErrorCode
 from .gates import gate_reference, load_thresholds, run_gated_reference
 from .references import GENIE_TRANSPORT, MAX_ATTEMPTS, STYLES, attempts, generate_reference
+from .worlds.api import authorize
 
 router = APIRouter(prefix="/api")
 ROOT = Path(__file__).resolve().parent.parent
@@ -59,21 +60,6 @@ async def options():
             "gateThresholds": {k: v for k, v in load_thresholds().items() if k != "questions"}}
 
 
-@router.post("/observations")
-async def register_observations(batch: dict, request: Request):
-    """Store a Hydrogen ObservationBatch (#5 writes here; tests and fixtures may too)."""
-    try:
-        parsed = ObservationBatch.model_validate(batch)
-    except ValidationError as exc:
-        return JSONResponse({"error": "invalid observation batch",
-                             "detail": exc.errors(include_url=False, include_context=False)},
-                            status_code=422)
-    try:
-        return request.app.state.artifacts.put("observations", parsed.id, parsed)
-    except ArtifactError as exc:
-        return _fail(exc)
-
-
 class EditBody(BaseModel):
     observationBatchId: str
     mayorRequest: str = Field(min_length=1, max_length=2000)
@@ -82,7 +68,7 @@ class EditBody(BaseModel):
     frameTimeS: float = Field(default=0.0, ge=0)
 
 
-@router.post("/edits")
+@router.post("/edits", dependencies=[Depends(authorize)])
 async def create_edit(body: EditBody, request: Request):
     store: ArtifactStore = request.app.state.artifacts
     try:
@@ -91,14 +77,14 @@ async def create_edit(body: EditBody, request: Request):
         try:
             frame = source_frame(store, request.app.state.captures, batch.captureId, body.frameTimeS)
             media_hash = frame["captureMediaSha256"]
-        except CaptureError:
+        except CaptureNotFound:
             frame = None  # evidence without stored media (e.g. fixtures): no image stage later
         perms = body.permissions or {}
         bundle = await compile_edit(request.app.state.models, store, batch=batch, preset_name=body.preset,
                                     mayor_request=body.mayorRequest, allowed=perms.get("allowed"),
                                     forbidden=perms.get("forbidden"), frame=frame,
                                     capture_media_sha256=media_hash)
-    except (ArtifactError, GatewayError, EditRequestError) as exc:
+    except (ArtifactError, CaptureError, GatewayError, EditRequestError) as exc:
         return _fail(exc)
     return bundle.model_dump(mode="json")
 
@@ -118,7 +104,7 @@ class ReferenceBody(BaseModel):
     feedback: str | None = Field(default=None, max_length=600)
 
 
-@router.post("/references")
+@router.post("/references", dependencies=[Depends(authorize)])
 async def create_reference(body: ReferenceBody, request: Request):
     store = request.app.state.artifacts
     try:
@@ -177,7 +163,7 @@ async def edit_source_frame(edit_id: str, request: Request):
     return Response(data, media_type=frame["mimeType"], headers={"X-Content-Sha256": frame["frameSha256"]})
 
 
-@router.post("/references/{reference_id}/gate")
+@router.post("/references/{reference_id}/gate", dependencies=[Depends(authorize)])
 async def gate(reference_id: str, request: Request):
     store = request.app.state.artifacts
     try:
@@ -194,7 +180,7 @@ class GatedBody(BaseModel):
     allowExperimental: bool = False
 
 
-@router.post("/edits/{edit_id}/gated-reference")
+@router.post("/edits/{edit_id}/gated-reference", dependencies=[Depends(authorize)])
 async def gated_reference(edit_id: str, body: GatedBody, request: Request):
     """Generate, gate and (at most twice) re-edit. Returns every attempt."""
     store = request.app.state.artifacts

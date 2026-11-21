@@ -4,7 +4,7 @@ A New York camera and driving workspace with three tools: **Cameras** for the pu
 
 ## Start locally
 
-Requires Node 22.12+ and Python 3.11+. Cameras, route previews, and traffic replay need no model key, GPU runtime, SUMO, or separate capture service. Gemini driving additionally uses the backend's existing model credential; see [Gemini driving](#gemini-driving).
+Requires Node 22.12+ and Python 3.11+. Camera browsing and the authored demo work without model credentials. Video capture also requires `ffmpeg` and `ffprobe` on PATH. GPU runtimes and SUMO are not required for the Element 119 core.
 
 ```sh
 npm ci
@@ -23,6 +23,47 @@ npm run dev
 ```
 
 Open the local URL printed by Vite. It proxies `/api` to the FastAPI service on `127.0.0.1:8000`. If port 5173 is occupied, Vite prints the next available port.
+
+## Model credentials
+
+Copy `.env.example` to `.env` in the **deepmind-hackathon repository root** if `.env` does not already exist. Enter the keys locally:
+
+```dotenv
+GEMINI_API_KEY=your-tier-3-gemini-ai-studio-key
+WORKSHOP_API_KEY=your-workshop-gemini-ai-studio-key
+GEMINI_KEY_PROFILE=primary
+```
+
+Both credentials are Gemini AI Studio keys. `primary` selects `GEMINI_API_KEY`; `workshop` selects `WORKSHOP_API_KEY`. Selection is explicit: quota failures do not switch projects automatically. Restart the backend after changing configuration. The API and smoke CLI load this checkout's `.env`; exported environment variables take precedence.
+
+Genie is optional: keep `GENIE_ENABLED=false` to prevent world-generation requests and preserve credits. The default smoke batch skips disabled Genie. Set `GENIE_ENABLED=true` deliberately when ready to test or use billable world generation; neither credential setup nor starting the app enables it.
+
+`.env` is ignored by Git. Do not put keys into `src/`, `VITE_*` variables, request URLs, or committed files. The status endpoint reports configuration and connectivity without returning credentials. Tier 3 describes the project's access tier; actual model availability and quota still need a successful project-specific smoke test. See [Model gateway](docs/MODEL_GATEWAY.md) for limits and the opt-in live smoke command.
+
+Runtime capture evidence stays in ignored `var/captures` (`CAPTURE_DIR`), and pipeline artifacts in `var/pipeline` (`PIPELINE_DIR`). The gateway uses ignored `.gateway/` and imports previous ledger reservations without resetting them. Existing `data/` evidence is retained locally; it is not silently relabeled as the new contract. Run one backend worker against a local evidence directory. See [Capture API](docs/CAPTURE_API.md) for bounded recording and prefix access.
+
+## Extract observations from a capture
+
+Model actions require a separate local operator token, independent of Gemini credentials and of whether Genie is enabled. Generate one locally and place the value in `.env` as `WORLD_API_TOKEN`:
+
+```sh
+python3 -c 'import secrets; print(secrets.token_urlsafe(32))'
+```
+
+Enter that token into the Evidence panel's operator field for the current browser session. Keep Gemini keys on the backend. Missing operator authentication blocks model actions; browsing and recording cameras still work.
+
+Create a retained episode or snapshot using the [capture routes](docs/CAPTURE_API.md), then explicitly request extraction using its ID and camera ID:
+
+```sh
+curl -X POST http://127.0.0.1:8000/api/observations/extract \
+  -H "Authorization: Bearer $WORLD_API_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"captureId":"cap_REPLACE_WITH_CAPTURE_ID","cameraId":"511ny-32998"}'
+```
+
+This makes budgeted Hydrogen requests using only the retained prefix. The extraction report preserves actual source-frame timestamps, image-space evidence, unknowns, every window outcome and gateway trace. Read a report at `/api/observations/extractions/{id}`; review the original frames beside its facts at `/api/observations/extractions/{id}/review` with operator authentication. Reinspection, manual annotation and failure accounting are documented in [the observation guide](docs/OBSERVATIONS.md).
+
+Open **Evidence** to record the selected video camera or capture its current snapshot. Recording offers only actual buffered history. Extraction retries reuse the same sealed capture. Accepted observations can feed a Carbon mayor edit, then a Nano Banana reference and a Decisions gate. These actions are explicit and budgeted. Generated references stay labeled as generated; they do not replace the illustrative map scene. A generated world requires both an accepted reference gate and explicit backend `GENIE_ENABLED=true`. Keeping Genie off leaves capture, observations, editing and reference review available.
 
 ## Explore
 
@@ -76,23 +117,21 @@ See the [architecture guide](docs/ARCHITECTURE.md), [camera API reference](docs/
 - MapLibre owns geographic projection and the shared WebGL context. A custom Three.js layer draws locally metric roads, instanced traffic, and the detailed ego vehicle. Local axes are east/north/up; headings are radians counterclockwise from east.
 - `ScenarioProvider.loadScenario()` returns the typed `ScenarioBundle`. `DemoScenarioProvider` is the initial implementation. A later backend adapter can supply compatible scene geometry and timestamped frames without rewriting the view.
 - Camera selection is separate from scene identity. Roadside video is an HTML layer above the map, not a calibrated projection onto it.
-- FastAPI supplies camera metadata, a DOT cache, bounded media transport and capture storage, plus a server-only model gateway. HLS playlists resolve server-owned camera IDs and opaque resource tokens; arbitrary URLs are not accepted. The optional gateway starts without credentials and exposes read-only capability/budget status.
-- The simulator driver calls the existing gateway's Hydrogen `navigation` stage with a structured response schema. It retains bounded per-run decisions, rejects duplicate conflicts, and returns cached results for identical retries. Credentials and usage accounting stay on the backend.
-- Backend capture, edit, reference, gate, Genie-session, and evaluation components exist independently of the map UI. The camera-image observation and generated-world workflows still need their integrated UI/controller handoffs; their outputs do not silently replace simulated scene state.
+- FastAPI supplies camera metadata, a DOT cache, bounded media transport, capture services, and model gateway status. HLS playlists resolve server-owned camera IDs and opaque resource tokens; arbitrary URLs are not accepted. The Evidence drawer connects camera captures to observations, Carbon edits, generated references and Decisions gates, independently from the authored demo. Optional worlds require explicit opt-in and an accepted gate.
+
+- The simulator driver uses the gateway’s Hydrogen navigation stage for structured simulated-state decisions. Its steering and physics remain deterministic; it is separate from camera perception and the visual Genie controller.
 
 Map and driver endpoints include `GET /api/health`, `GET /api/cameras`, `GET /api/vision/cameras`, `GET /api/models/status`, `POST /api/driver/decision`, and `/api/feeds/{camera_id}/index.m3u8` with tokenized child resources. Capture, edit/reference/gate, and authenticated world routes are documented in their linked guides. See the local `/docs` route and [Driver API request contract](docs/DRIVER_API.md#request).
 
 ## Optional model gateway
 
-See [model gateway setup and verification](docs/MODEL_GATEWAY.md) for backend-only credentials, budgets, model adapters, and the opt-in live smoke command. On Windows, inspect status with `.\.venv\Scripts\python -m backend.gateway.smoke`; this makes no model calls. Earlier service capability checks are recorded in [model gateway verification](docs/MODEL_GATEWAY_VERIFICATION.md); they are separate from verification of the new simulator driver.
-
-Capture episodes are implemented in the [camera API](docs/CAMERA_API.md#capture-episodes). Carbon edit compilation, Nano Banana reference generation, Decisions gates, bounded re-edits, immutable artifacts, and human-review calibration are implemented in the [edit/reference/gate backend](docs/EDIT_REFERENCE_GATE.md). That guide identifies the development Hydrogen anchor stand-in and the remaining full-observation integration. The [evaluation package](backend/evaluation/) includes temporal judging, breakpoints, repair comparison, adversarial attacks, and frozen evaluation manifests/holdout guards. Implemented components do not establish a completed external benchmark or integrated demonstration.
+See [model gateway setup and verification](docs/MODEL_GATEWAY.md) for backend-only credentials, budgets, model adapters, and the opt-in live smoke command. On Windows, inspect status with `.\.venv\Scripts\python -m backend.gateway.smoke`; this makes no model calls. All five services passed [live capability checks](docs/MODEL_GATEWAY_VERIFICATION.md) on November 21, 2026. Capture, observations, edits, references, gates and optional worlds share the same gateway and durable budget ledger.
 
 The [Genie runtime](docs/GENIE_RUNTIME.md) adds authenticated session creation,
 a browser WebSocket relay, frame recording, bounded controls and explicit cleanup.
-The city UI is not connected to it yet. Production creation requires the trusted
-accepted-reference handoff from the gate and a separate backend `WORLD_API_TOKEN`;
-check the runtime guide for the current handoff integration contract.
+Production creation requires the trusted accepted-reference handoff from #8,
+operator authentication and explicit `GENIE_ENABLED=true`. Keep Genie disabled
+when credits are unavailable; the earlier evidence and reference stages remain usable.
 The opt-in development command is `.\.venv\Scripts\python -m backend.worlds.spike --live`;
 it creates one bounded paid session. See its [measured verification](docs/GENIE_RUNTIME_VERIFICATION.md).
 
@@ -100,10 +139,11 @@ it creates one bounded paid session. See its [measured verification](docs/GENIE_
 
 The [Hydrogen evidence extractor](docs/OBSERVATIONS.md) implements issue #5 over
 saved camera prefixes, with authenticated extraction/reinspection routes and
-an original-pixel review export. Its explicit live checks and remaining human
-annotation work are recorded in [observation verification](docs/OBSERVATIONS_VERIFICATION.md).
+an optional original-pixel review export. Its explicit live checks and scope
+clarification are recorded in [observation verification](docs/OBSERVATIONS_VERIFICATION.md).
 
 ```sh
+npm run contracts:check
 npm run build
 npm test
 npm run test:api
@@ -115,4 +155,4 @@ For a production-style local preview, run `npm run build`, then start `npm run d
 
 Earlier UI verification (before citywide navigation): production build, six scenario tests, and 19 API tests passed. Desktop (1440 × 900) and mobile (390 × 844) views were reviewed in-browser. Vestry HLS video visibly advanced through the local proxy. Camera changes, feed toggling, seeking, layer switches, and City/Intersection/Follow transitions were exercised; the active page kept at most one video element. Chrome reported approximately 120 map render events per second in Follow with one playing feed on the development machine; this is an observed local result, not a cross-device guarantee.
 
-Remaining work includes connecting camera-derived observations and the generated-world UI, completing visual Genie navigation, and validating the integrated external-camera evaluation. SUMO execution and calibrated scene reconstruction are not part of this map simulation. The [issue tracker](https://github.com/gridlocked-evals/deepmind-hackathon/issues) tracks current ownership and acceptance; `GOTHAM_FORGE_PLAN.md` and the research notes preserve earlier design directions.
+The contracts, gateway, capture, and observation services are covered by automated tests. Historical live capability checks and real video/snapshot observation runs are recorded in [gateway verification](docs/MODEL_GATEWAY_VERIFICATION.md) and [observation verification](docs/OBSERVATIONS_VERIFICATION.md). Image processing is complete under the maintainer’s current scope. Human clip review is optional and does not block completion. The separate visual Hydrogen-to-Genie controller and integrated temporal judging remain #12 dependencies; the structured-state simulator driver is already implemented. SUMO and calibrated reconstruction are later milestones.

@@ -5,6 +5,7 @@ import base64
 from datetime import datetime, timezone
 import json
 import math
+import re
 import sqlite3
 import time
 from uuid import uuid4
@@ -19,11 +20,24 @@ from .contracts import (MODELS, STAGES, CallContext, CallResult, ErrorCode, Gate
 from .ledger import Ledger
 
 
+def provider_schema(schema: dict) -> dict:
+    """Project serving grammar; retain all stricter validation in response_model."""
+    omitted = {"title", "minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum",
+               "minItems", "maxItems", "minLength", "maxLength"}
+    def project(value):
+        if isinstance(value, dict):
+            return {key: project(item) for key, item in value.items() if key not in omitted}
+        if isinstance(value, list):
+            return [project(item) for item in value]
+        return value
+    return project(schema)
+
+
 class ModelGateway:
     def __init__(self, config: GatewayConfig, client: httpx.AsyncClient, *, api_key: str | None = None,
                  genie_connector=None):
         self.config = config
-        self._key = api_key if api_key is not None else backend_key()
+        self._key = api_key if api_key is not None else backend_key(config.key_profile)
         self._credential_hash = digest((self._key or "").encode())
         self.ledger = Ledger(config)
         self.http = HTTPAdapter(client, self._key or "", config)
@@ -38,7 +52,7 @@ class ModelGateway:
             if not value.strip() or len(value.encode()) > self.config.input_tokens_per_call:
                 raise GatewayError(ErrorCode.INVALID_INPUT)
             return
-        if not isinstance(value, list) or not 1 <= len(value) <= 32:
+        if not isinstance(value, list) or not 1 <= len(value) <= 257:
             raise GatewayError(ErrorCode.INVALID_INPUT)
         text_bytes = 0
         for part in value:
@@ -59,7 +73,7 @@ class ModelGateway:
             raise GatewayError(ErrorCode.INVALID_INPUT)
 
     def _prepare(self, service: Service, stage: str, payload: dict, context: CallContext,
-                 output_bound: int, response_model=None) -> PreparedCall:
+                 output_bound: int, response_model=None, *, qualify: bool = True) -> PreparedCall:
         if STAGES.get(stage) != service:
             raise GatewayError(ErrorCode.INVALID_INPUT)
         if context.purpose in ("submission", "demo") and (not context.source_id or not context.capture_id):
@@ -71,20 +85,27 @@ class ModelGateway:
         if len(body) > self.config.max_request_bytes or (self._key and (
             self._key.encode() in body or self._key.encode() in canonical(context.model_dump()))):
             raise GatewayError(ErrorCode.INVALID_INPUT)
+        input_bound = self.config.input_tokens_per_call
+        if service == Service.NANO_BANANA:
+            input_bound = min(input_bound, self.config.max_request_tokens - output_bound)
+            if input_bound <= 0:
+                raise GatewayError(ErrorCode.BUDGET)
         return PreparedCall(service, stage, body, context, self.config.config_hash,
-                            self.config.input_tokens_per_call, output_bound, response_model)
+                            input_bound, output_bound, response_model, qualify)
 
     async def generate(self, service: Service, *, stage: str, input_value, context: CallContext,
-                       response_model: type[BaseModel] | None = None) -> CallResult:
+                       response_model: type[BaseModel] | None = None, qualify: bool = True) -> CallResult:
+        if type(qualify) is not bool:
+            raise GatewayError(ErrorCode.INVALID_INPUT)
         if service not in (Service.HYDROGEN, Service.CARBON, Service.NANO_BANANA):
             raise GatewayError(ErrorCode.INVALID_INPUT)
         self._input(input_value)
+        output_bound = (self.config.image_output_tokens_per_call if service == Service.NANO_BANANA
+                        else self.config.output_tokens_per_call)
         payload = {"model": MODELS[service], "input": input_value, "store": False,
-                   "generation_config": {"max_output_tokens": self.config.output_tokens_per_call}}
+                   "generation_config": {"max_output_tokens": output_bound}}
         if service == Service.HYDROGEN and stage == "observation":
-            # A live six-frame extraction exhausted 4093/4096 tokens on default
-            # thinking, leaving only three output tokens. Fix this stage's policy
-            # to low so the bounded evidence table can actually be returned.
+            # Preserve the policy verified against main's six-frame extraction.
             payload["generation_config"]["thinking_level"] = "low"
         if service == Service.NANO_BANANA:
             if response_model:
@@ -93,8 +114,8 @@ class ModelGateway:
             # default returns inline image data; validate that in the adapter.
             payload["response_format"] = {"type": "image", "aspect_ratio": "16:9", "image_size": "1K"}
         elif response_model:
-            payload["response_format"] = {"type": "text", "mime_type": "application/json", "schema": response_model.model_json_schema()}
-        call = self._prepare(service, stage, payload, context, self.config.output_tokens_per_call, response_model)
+            payload["response_format"] = {"type": "text", "mime_type": "application/json", "schema": provider_schema(response_model.model_json_schema())}
+        call = self._prepare(service, stage, payload, context, output_bound, response_model, qualify=qualify)
         return await self._execute(call)
 
     async def judge(self, *, stage: str, input_value, questions: dict, context: CallContext) -> CallResult:
@@ -137,7 +158,7 @@ class ModelGateway:
     def _redact(self, value):
         if isinstance(value, dict):
             return {self._redact(key): self._redact(item) for key, item in value.items()
-                    if key.lower() not in ("api_key", "auth_token", "authorization", "access_token")}
+                    if key.lower() not in ("api_key", "auth_token", "authorization", "access_token", "continuation_token")}
         if isinstance(value, list):
             return [self._redact(item) for item in value]
         if isinstance(value, str) and self._key:
@@ -160,9 +181,16 @@ class ModelGateway:
             request_id = None
             started = time.monotonic()
             response_evidence = None
-            if call.service != Service.GENIE:
-                await self.slots.acquire()
+            acquired = False
             try:
+                if call.service != Service.GENIE:
+                    try:
+                        await asyncio.wait_for(self.slots.acquire(), timeout=timeout)
+                    except TimeoutError:
+                        raise GatewayError(ErrorCode.CONCURRENCY) from None
+                    acquired = True
+                if call.service == Service.GENIE and not self.config.genie_enabled:
+                    raise GatewayError(ErrorCode.DISABLED)
                 if not self._key:
                     raise GatewayError(ErrorCode.NOT_CONFIGURED)
                 if not self.config.enabled:
@@ -189,7 +217,7 @@ class ModelGateway:
                         result = await self.http.execute(call, on_id, on_response)
                 evidence = self._redact(result.evidence)
                 result_hash = self.ledger.artifact(canonical(evidence))
-                qualifying = bool(call.response_model and isinstance(result.output, dict) and result.output
+                qualifying = bool(call.qualify and call.response_model and isinstance(result.output, dict) and result.output
                                   and call.stage in ("observation", "compilation"))
                 self.ledger.finish(request_id, outcome="success", latency_ms=(time.monotonic() - started) * 1000,
                     result_hash=result_hash, usage=result.usage,
@@ -198,6 +226,10 @@ class ModelGateway:
                                   self._redact(result.output), result.usage,
                                   "reported_usage_upper_bound" if result.usage else "reservation_retained")
             except (GatewayError, TimeoutError, asyncio.CancelledError, OSError, sqlite3.Error) as exc:
+                # Cancellation while waiting for this process's slot was never
+                # admitted: do not invent a provider-attempt row or request ID.
+                if isinstance(exc, asyncio.CancelledError) and not acquired and request_id is None and call.service != Service.GENIE:
+                    raise
                 if isinstance(exc, GatewayError):
                     error = exc
                 elif isinstance(exc, TimeoutError):
@@ -237,7 +269,7 @@ class ModelGateway:
                     raise error from None
                 await asyncio.sleep(min(self.config.retry_delay_seconds, max(error.retry_after, .25 * 2 ** attempt)))
             finally:
-                if call.service != Service.GENIE:
+                if acquired:
                     self.slots.release()
         raise AssertionError("unreachable")
 
@@ -246,7 +278,9 @@ class ModelGateway:
         services = []
         for service, model in MODELS.items():
             last = self.ledger.latest(service.value, self._credential_hash, self.config.config_hash)
-            if not self._key:
+            if service == Service.GENIE and not self.config.genie_enabled:
+                state, reason = "unavailable", ErrorCode.DISABLED.value
+            elif not self._key:
                 state, reason = "unavailable", ErrorCode.NOT_CONFIGURED.value
             elif not self.config.enabled:
                 state, reason = "configured", ErrorCode.DISABLED.value
@@ -260,6 +294,8 @@ class ModelGateway:
             else:
                 state, reason = "unavailable", last["outcome"]
             services.append({"service": service.value, "model_id": model, "state": state, "reason": reason,
+                "optional": service == Service.GENIE,
+                "enabled": self.config.enabled and (service != Service.GENIE or self.config.genie_enabled),
                 "configured": bool(self._key), "last_request_id": last["request_id"] if last else None,
                 "last_provider_request_id": last["provider_request_id"] if last else None,
                 "last_latency_ms": last["latency_ms"] if last else None,
@@ -267,6 +303,7 @@ class ModelGateway:
                 "usage_reported": bool(last and last["usage"]),
                 "project_quota": "unmeasured; successful probes establish access, not maximum throughput"})
         return {"schema_version": 1, "services": services, "budgets": self.ledger.budget_status(),
+                "key_profile": self.config.key_profile,
                 "config_hash": self.config.config_hash,
                 "rates_expired": datetime.now(timezone.utc).date() > self.config.rates_valid_through}
 
@@ -275,6 +312,17 @@ class ModelGateway:
         if not report["ready"]:
             raise GatewayError(ErrorCode.INVALID_INPUT)
         return report
+
+    def accept_artifact(self, result: CallResult, *, artifact_id: str, artifact_sha256: str, qualifying: bool = True) -> str:
+        """Qualify only after the caller durably accepts its domain artifact.
+
+        The caller owns domain validation and storage. This records an immutable
+        binding to its envelope hash, without repeating model calls or billing.
+        """
+        if (type(qualifying) is not bool or not isinstance(artifact_id, str) or not re.fullmatch(r"[A-Za-z0-9_.:-]{1,128}", artifact_id)
+                or not isinstance(artifact_sha256, str) or not re.fullmatch(r"[a-f0-9]{64}", artifact_sha256)):
+            raise GatewayError(ErrorCode.INVALID_INPUT)
+        return self.ledger.accept_artifact(result, artifact_id, artifact_sha256, qualifying=qualifying)
 
     async def cancel_world(self, request_id: str) -> dict:
         """Recover a known interrupted development session without admitting new spend."""
