@@ -422,6 +422,27 @@ def test_second_genie_while_one_is_live_is_concurrency_not_termination(tmp_path)
     asyncio.run(run())
 
 
+def test_dispatched_genie_with_expired_lease_still_blocks_with_termination(tmp_path):
+    async def run():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(lambda _: pytest.fail("unexpected network request"))) as client:
+            gateway = ModelGateway(settings(tmp_path), client, api_key=KEY)
+            context = CallContext(episode_id="smoke", prompt_id="world-v1", purpose="smoke")
+            call = gateway._prepare(Service.GENIE, "world", {"create": {"model": "genie-4"}}, context, 1)
+            reserve = lambda: gateway.ledger.reserve(call, "call", "credential", "genie-4", 1, 1, 60)
+            identifier = reserve()
+            gateway.ledger.dispatched(identifier)
+            with pytest.raises(GatewayError) as live:
+                reserve()
+            assert live.value.code == ErrorCode.CONCURRENCY
+            # The owner crashed: nobody will finish or cancel this dispatched world.
+            with gateway.ledger.connection() as db:
+                db.execute("UPDATE attempts SET lease_until=? WHERE request_id=?", (time.time() - 1, identifier))
+            with pytest.raises(GatewayError) as expired:
+                reserve()
+            assert expired.value.code == ErrorCode.TERMINATION
+    asyncio.run(run())
+
+
 def test_no_key_status_endpoint_and_smoke_never_send_requests(tmp_path, monkeypatch):
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
     monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
