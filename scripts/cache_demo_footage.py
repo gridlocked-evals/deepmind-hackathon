@@ -132,7 +132,7 @@ def release(base: str, ids: set[str]) -> None:
             print(f"  warn: could not unpin {capture_id}", file=sys.stderr)
 
 
-def cache_snapshot(base: str, camera: dict, max_seconds: float) -> tuple[str, dict | str]:
+def cache_snapshot(base: str, camera: dict, max_seconds: float, pinned: set[str]) -> tuple[str, dict | str]:
     for attempt in range(4):
         t0 = time.monotonic()
         try:
@@ -150,6 +150,8 @@ def cache_snapshot(base: str, camera: dict, max_seconds: float) -> tuple[str, di
         call(base, f"/api/captures/{quote(saved['capture']['id'])}/pins", {"jobId": PIN_JOB})
     except (RuntimeError, URLError) as exc:
         return camera["id"], f"pin failed: {exc}"
+    # Recorded here, not via kept: pool.map results may never be consumed if the run fails.
+    pinned.add(saved["capture"]["id"])
     return camera["id"], {"kind": "snapshot", "saved": saved, "fetchS": round(took, 2)}
 
 
@@ -176,11 +178,12 @@ def main() -> int:
         previous = set()
     kept: dict = {}
     dropped: dict = {}
+    pinned: set[str] = set()
     try:
-        run(base, args, kept, dropped)
+        run(base, args, kept, dropped, pinned)
     except BaseException:
         # The old cache file and its pins stay valid; only this run's new pins are released.
-        release(base, capture_ids(kept))
+        release(base, capture_ids(kept) | pinned)
         raise
     # Release the previous run's footage only after the new cache is written.
     release(base, previous - capture_ids(kept))
@@ -188,7 +191,7 @@ def main() -> int:
     return 0 if kept else 1
 
 
-def run(base: str, args, kept: dict, dropped: dict) -> None:
+def run(base: str, args, kept: dict, dropped: dict, pinned: set[str]) -> None:
     video = call(base, "/api/vision/cameras")
     video = video.get("cameras", video) if isinstance(video, dict) else video
     cache_video(base, video, args, kept, dropped)
@@ -198,7 +201,7 @@ def run(base: str, args, kept: dict, dropped: dict) -> None:
         dot = [c for c in dot if c.get("kind") == "snapshot"]
         print(f"Saving {len(dot)} DOT snapshots (drop if slower than {args.snapshot_max_seconds:g} s)…", flush=True)
         with ThreadPoolExecutor(args.snapshot_workers) as pool:
-            for index, (cid, result) in enumerate(pool.map(lambda c: cache_snapshot(base, c, args.snapshot_max_seconds), dot), 1):
+            for index, (cid, result) in enumerate(pool.map(lambda c: cache_snapshot(base, c, args.snapshot_max_seconds, pinned), dot), 1):
                 (kept if isinstance(result, dict) else dropped)[cid] = result
                 if index % 50 == 0:
                     print(f"  {index}/{len(dot)}", flush=True)
