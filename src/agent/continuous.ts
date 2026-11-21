@@ -12,7 +12,7 @@ export interface DriverClock {
   clearTimeout: (id: number) => void;
 }
 
-const browserClock: DriverClock = {
+export const browserClock: DriverClock = {
   now: () => performance.now(),
   frame: callback => requestAnimationFrame(callback),
   cancelFrame: id => cancelAnimationFrame(id),

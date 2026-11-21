@@ -1,9 +1,23 @@
 # Continuous NYC adversarial journeys
 
-Open **NYC journey** in the top bar, then **Start journey**. The map follows the
-car on an OpenStreetMap / OSRM driving route between NYC locations. Carbon chooses
-hazards using the adversary from PR #97; Gemini Decisions controls speed. Steering,
-acceleration, and the normal safety guards remain local simulation controls.
+Open **NYC journey** in the top bar, then **Start journey**. Every new journey
+begins with a fixed, labelled **Scripted opening**: a crash, a slow pass around
+it, then a stalled vehicle and another slow pass. The second hazard appears only
+after the car has returned to the route from the first pass. The top bar shows
+**Demo** during this opening. No Carbon or Decisions calls run during it.
+
+The opening uses a straight 180 m section of the real OSRM NYC route. Ego eases
+5 m sideways to pass at 3 m/s (about 7 mph), then rejoins. Both hazards remain
+visible until after ego has passed; clearance does not stand in for avoidance.
+This is authored illustrative motion, not an autonomous driving evaluation or a
+claim that an adjacent lane is legally available. Routes without a suitable
+section report an error. Stop and hidden-tab cancellation apply during the demo.
+
+After both passes and scripted clearance, the same car continues from its actual
+position and speed with Carbon choosing hazards and Gemini Decisions controlling
+speed. The opening does not repeat at every 60-second window or random stuck
+restart; **Start new journey** runs it again. Live steering remains route following;
+the scripted passes do not give the live driver general overtaking ability.
 
 **Available scenarios (6)** lists Carbon's menu in the journey panel: car crash,
 stalled vehicle, car cutting in, sudden hard braking, slow-moving traffic, and a
@@ -51,6 +65,13 @@ gateway caps and the protected reserve remain authoritative; no budgets are rais
 last 80 attack outcomes, last 40 restarts, and last four completed/interrupted
 window traces. It is a bounded development record, not a statistically valid
 adversarial benchmark. Window traces retain #97's model request IDs and outcomes.
+
+The opening has its own window trace labelled `modelSource: scripted-demo` with
+`service: scripted`, no model ID, no model responses and no adversary score.
+Its `scriptedOpening` metadata records appearance, passing and rejoin times for
+both events; frames preserve the lateral movement for exact replay. The snapshot
+retains the opening summary even after its full trace ages out of the four-window
+retention limit.
 
 ## Validation
 
@@ -109,3 +130,14 @@ scripted removal for the cut-in and horizon censoring for hard braking. This
 verifies generation and execution, not independent physical clearance. The
 slow-traffic and roadblock types were verified with deterministic simulation
 tests; all six choices were checked in the browser UI.
+
+### Scripted opening verification
+
+Browser verification on a real Lower East Side to Tribeca route showed the crash
+at 0 s, passing at 12.3 s and rejoining at 16.3 s. The stalled vehicle then appeared
+at 16.3 s, was passed at 27.0 s, and ego rejoined at 31.0 s. The opening finished
+at 38.3 s, then handed over to the live agents. The exported opening recorded zero
+ego contacts and zero model decisions. The test was stopped at handover. Automated
+coverage checks physical separation, slow lateral motion with hazards still present,
+return to the route, deterministic replay, cancellation without API calls and a
+continuous transition into live driving.

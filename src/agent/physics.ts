@@ -32,6 +32,8 @@ export interface DriverSimulation {
   guardsIgnoreHazards?: boolean;
   /** Which local guard changed the applied motion on the last tick; trace instrumentation only. */
   guard: GuardReason;
+  /** Explicit pose for the scripted journey introduction only; removed before live driving. */
+  scriptedPose?: { x: number; y: number; heading: number };
 }
 
 export function createPath(points: Vec2[]): RoutePath {
@@ -226,7 +228,7 @@ export function advanceDriver(state: DriverSimulation, decision: DriverDecision,
 
 export function driverFrame(state: DriverSimulation): SimulationFrame {
   const background = sampleScenario(state.scenario, state.time);
-  const position = routePosition(state.path, state.progress);
+  const position = state.scriptedPose ?? routePosition(state.path, state.progress);
   const ego: ActorState = { id: state.ego.id, x: position.x, y: position.y, heading: position.heading,
     speed: state.speed, braking: state.braking };
   return { time: state.time, signal: background.signal,
