@@ -10,6 +10,7 @@ import json
 import math
 from pathlib import Path
 from typing import Any, Awaitable, Protocol
+import warnings
 
 from backend.gateway.contracts import CallContext, CallResult
 
@@ -66,9 +67,21 @@ def load_recording(session_dir: str | Path) -> tuple[list[RecordedFrame], list[d
 
     Returns frames in stream order and the `steering_sent` events; each event's
     `frame_index` (newest frame at send time) is an attack's send frame for #24.
+    A truncated last line (crashed session) is skipped with a warning.
+
+    WARNING: the raw events include plain steering text (`steering_requested`). Never pass
+    them, or anything built from them, to the defender or the repair packet.
     """
     root = Path(session_dir)
-    events = [json.loads(line) for line in (root / "events.jsonl").read_bytes().splitlines() if line]
+    lines = [line for line in (root / "events.jsonl").read_bytes().splitlines() if line]
+    events = []
+    for n, line in enumerate(lines, 1):
+        try:
+            events.append(json.loads(line))
+        except ValueError:
+            if n < len(lines):
+                raise
+            warnings.warn(f"{root}: ignoring truncated last line of events.jsonl")
     frames = [RecordedFrame(root.name, e["frame_index"], e["sha256"], str(root / e["file"]))
               for e in events if e["kind"] == "frame"]
     if [f.index for f in frames] != list(range(len(frames))):

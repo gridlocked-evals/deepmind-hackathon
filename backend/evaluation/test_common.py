@@ -31,3 +31,19 @@ def test_load_recording_reads_genie_runtime_output(tmp_path):
     assert [f.index for f in frames] == [0, 1, 2] and frames[0].session_id == "sess-1"
     assert open(frames[2].path, "rb").read() == b"c"
     assert [s["frame_index"] for s in steers] == [1]
+
+
+def test_load_recording_tolerates_only_a_truncated_last_line(tmp_path):
+    from backend.evaluation.common import load_recording
+    from backend.worlds.evidence import Recording
+    rec = Recording(tmp_path, "sess-1")
+    rec.frame(b"a", (2, 2))
+    events = rec.path / "events.jsonl"
+    with events.open("ab") as handle:
+        handle.write(b'{"kind": "fra')  # crash mid-write
+    with pytest.warns(UserWarning, match="truncated"):
+        frames, _ = load_recording(rec.path)
+    assert len(frames) == 1
+    events.write_bytes(b'{"kind": "fra\n' + events.read_bytes().split(b"\n")[0] + b"\n")
+    with pytest.raises(ValueError):
+        load_recording(rec.path)

@@ -112,7 +112,7 @@ def test_low_throughput_stops_session():
         n = len(tj.windows)
         await feed(tj, 601, 900)
         assert len(tj.windows) == n  # nothing scheduled after stop
-        assert tj.interventions[-1][2] == "stop"
+        assert tj.interventions[-1][2:] == ("stop", "low_throughput")
     asyncio.run(run())
 
 
@@ -151,13 +151,47 @@ def test_actions_release_stop_and_review():
         await tj.drain()
         assert controller.log == [("release_keys",)] * 3 + [("stop", "repeated_violation:bus_lane_entry")]
         # Logged at the frame each action happened (answer arrival), not the judged window.
-        assert tj.interventions == [(59, 59, "release_keys"), (83, 83, "release_keys"),
-                                    (107, 107, "release_keys"), (107, 107, "stop")]
+        why = "violation:bus_lane_entry"
+        assert tj.interventions == [(59, 59, "release_keys", why), (83, 83, "release_keys", why),
+                                    (107, 107, "release_keys", why), (107, 107, "stop", why)]
 
         tj, controller = make(FakeJudge(lambda n: answers(ambiguous=.9)))
         await feed(tj, 0, 59)
         await tj.drain()
-        assert controller.log == [("review", 0, 59)] and tj.interventions == [(0, 59, "review")]
+        assert controller.log == [("review", 0, 59)] and tj.interventions == [(0, 59, "review", "ambiguous")]
+    asyncio.run(run())
+
+
+def test_finished_task_awaiting_discard_does_not_block_a_window():
+    # T2: a done task can sit in in_flight until its discard callback runs.
+    async def run():
+        tj, _ = make(FakeJudge())
+        done = asyncio.get_running_loop().create_future()
+        done.set_result(None)
+        tj.in_flight.add(done)
+        await feed(tj, 0, 59)
+        assert tj.skipped == [] and len(tj.windows) == 1
+        await tj.drain()
+    asyncio.run(run())
+
+
+def test_older_result_cannot_act_after_a_newer_window_answered():
+    # T4
+    async def run():
+        gate = asyncio.Event()
+        async def judge(*, stage, input_value, questions, context):
+            first = "covering frames 0-" in input_value[0]["text"]
+            if first:
+                await gate.wait()
+            return SimpleNamespace(output=answers(bus=.95 if first else .1))
+        tj, controller = make(judge, max_in_flight=2)
+        await feed(tj, 0, 83)
+        await asyncio.sleep(0)
+        assert tj.windows[1].answers and not tj.windows[0].answers
+        gate.set()
+        await tj.drain()
+        assert tj.windows[0].outcomes["bus_lane_entry"] == OBSERVED and not tj.windows[0].stale
+        assert controller.log == [] and tj.interventions == []
     asyncio.run(run())
 
 
@@ -186,6 +220,18 @@ def test_coverage_ranges():
         assert cov["covered"] == [(0, 9)] and cov["uncovered"] == [(10, 34)]
         assert (cov["due"], cov["judged"], cov["failed"], cov["skipped"]) == (2, 1, 1, 0)
     asyncio.run(run())
+
+
+def test_coverage_needs_a_fresh_definite_answer():
+    # T3: stale windows and windows where every answer is unknown are not coverage.
+    tj, _ = make(FakeJudge())
+    clear, unknown = dict.fromkeys(["bus_lane_entry", "obstruction", "crossing_conflict"], CLEAR), \
+        dict.fromkeys(["bus_lane_entry", "obstruction", "crossing_conflict"], UNKNOWN)
+    tj.windows = [Window(0, 9, [], clear, answers()), Window(10, 19, [], unknown, answers(ambiguous=.9)),
+                  Window(20, 29, [], clear, answers(), stale=True)]
+    tj.newest = 29
+    cov = tj.coverage()
+    assert cov["covered"] == [(0, 9)] and cov["uncovered"] == [(10, 29)] and cov["judged"] == 3
 
 
 def test_window_survives_frames_arriving_before_judge_runs():
