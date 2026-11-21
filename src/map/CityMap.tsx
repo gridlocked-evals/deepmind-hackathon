@@ -600,8 +600,10 @@ export default function CityMap(props: CityMapProps) {
       map.fitBounds(NYC_BOUNDS, { padding, absolutePadding: true, duration, pitch: 0, bearing: 0, maxZoom: 11.5, essential: false });
     } else if (props.viewMode === 'intersection') {
       const firstActor = props.runtime.frameRef.current.actors[0];
-      map.flyTo({ center: props.scenario.origin, zoom: 18.8, pitch: 61,
-        bearing: props.scenario.geometryKind === 'street-route' && firstActor ? toBearing(firstActor.heading) - 35 : -35,
+      const streetRoute = props.scenario.geometryKind === 'street-route';
+      // Look along the authored corridor so nearby extruded buildings do not hide its traffic.
+      map.flyTo({ center: props.scenario.origin, zoom: streetRoute ? 18.8 : 18, pitch: streetRoute ? 61 : 40,
+        bearing: streetRoute && firstActor ? toBearing(firstActor.heading) - 35 : 8,
         padding, duration, essential: false });
     } else {
       const frame = props.runtime.frameRef.current;
