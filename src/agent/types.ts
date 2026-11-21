@@ -3,8 +3,10 @@ import type { SimulationFrame } from '../types';
 import type { RunTrace } from '../scenarios/trace';
 import type { DriverTrace } from './trace';
 
-export const MAX_DRIVER_STEPS = 12;
-export const SECONDS_PER_DECISION = 3;
+export const MAX_DRIVER_STEPS = 60;
+export const DECISION_INTERVAL_SECONDS = 1;
+export const MAX_COMMAND_AGE_SECONDS = 3;
+export const MAX_DRIVE_SECONDS = 60;
 export const SPEED_LIMIT_MPS = 11.176;
 
 /** Local controller guard that changed applied motion; route/turn shaping is not a guard. */
@@ -64,7 +66,7 @@ export interface GeminiDriver {
   modelAvailability: DriverAvailability;
   canStart: boolean;
   unavailableReason: string | null;
-  completionReason: 'route-complete' | 'decision-limit' | null;
+  completionReason: 'route-complete' | 'decision-limit' | 'time-limit' | null;
   start: (mode?: 'baseline' | 'event') => void;
   stop: () => void;
   reset: () => void;

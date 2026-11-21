@@ -28,7 +28,7 @@ export function ScenarioPanel({ plan, onChange, driver, onReplay, onBaseline }: 
       if (file.size > 8_000_000) throw new Error('Choose a JSON file smaller than 8 MB.');
       const raw = JSON.parse(await file.text());
       if (active.current || revision !== importRevision.current) return;
-      if (raw.schemaVersion === 'gridlocked-driver-trace.v1') {
+      if (['gridlocked-driver-trace.v1', 'gridlocked-driver-trace.v2'].includes(raw.schemaVersion)) {
         const scene = replayScene(raw);
         onChange(parseScenario(raw.plan));
         onReplay(scene);

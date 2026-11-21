@@ -6,6 +6,10 @@ Issue #72 is assigned to `tasosger`. Implementation is on the isolated
 including the Evidence workflow and #60 driver traces. These runs use synthetic structured state; they
 are not camera perception, Genie worlds, learned adaptation or road-safety tests.
 
+The live runs on this page predate the continuous Decisions migration and use
+Hydrogen. Current Decisions-driver checks are recorded in
+[DRIVER_VERIFICATION.md](DRIVER_VERIFICATION.md).
+
 ## Integrated verification before merge
 
 - 106 frontend tests pass, including an interrupted crash fixture that checks

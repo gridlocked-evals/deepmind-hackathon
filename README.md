@@ -2,7 +2,7 @@
 
 Explore New York through its public roadway cameras, pick a street, and give Gemini the wheel of a simulated car. **Cameras** browses the full public NYC DOT directory across all five boroughs and configured 511NY video feeds. **Route** selects a starting point and destination for a street-following journey. **Driver** lets Gemini choose the ego vehicle's target speed while deterministic steering and physics follow that route.
 
-**Traffic demo** restores the original Vestry Street scene: 24 surrounding vehicles and the ego SUV, authored signals, and a 60-second replay. **Start Gemini drive** uses the backend's existing Gemini credential for up to 12 actual model decisions, each followed by up to three simulated seconds. Camera footage runs independently; model driving uses structured simulated state. Background traffic remains authored replay, and camera-image perception is not connected to this view.
+**Traffic demo** restores the original Vestry Street scene: 24 surrounding vehicles and the ego SUV, authored signals, and a 60-second replay. **Start scenario with Gemini** uses the backend's existing Gemini credential for up to 60 Decisions model decisions and 60 simulated seconds. The car keeps moving while the next decision is requested, with a one-second refresh interval and a three-second command freshness limit. Camera footage runs independently; model driving uses structured simulated state. Background traffic remains authored replay, and camera-image perception is not connected to this view.
 
 **[Setup and controls](RUNNING.md)** · [Driver API](docs/DRIVER_API.md) · [Live driver verification](docs/DRIVER_VERIFICATION.md) · [Architecture](docs/ARCHITECTURE.md) · [Camera API](docs/CAMERA_API.md) · [Verification](docs/VERIFICATION.md)
 

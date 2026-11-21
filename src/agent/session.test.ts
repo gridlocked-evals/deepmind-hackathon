@@ -3,7 +3,7 @@ import { DriverRunGate, validateDecisionResponse } from './session';
 import { MAX_DRIVER_STEPS } from './types';
 
 function response() {
-  return { run_id: 'test-run-123', step: 0, model_id: 'gemini-test', request_id: 'req-test', max_steps: MAX_DRIVER_STEPS,
+  return { run_id: 'test-run-123', step: 0, model_id: 'gemini-decision-1', request_id: 'req-test', max_steps: MAX_DRIVER_STEPS,
     decision: { action: 'accelerate', target_speed_mps: 5, reason: 'Open road ahead.', confidence: 0.8 } };
 }
 
@@ -45,7 +45,9 @@ describe('bounded driver session protocol', () => {
       { ...response().decision, action: 'swerve' },
       { ...response().decision, confidence: 2 },
       { ...response().decision, reason: '' },
+      { ...response().decision, action: 'stop', target_speed_mps: 5 },
     ]) expect(() => validateDecisionResponse({ ...response(), decision }, 'test-run-123', 0)).toThrow(/invalid driving decision/);
+    expect(() => validateDecisionResponse({ ...response(), model_id: 'gemini-4-hydrogen' }, 'test-run-123', 0)).toThrow(/invalid driving decision/);
     expect(() => validateDecisionResponse({ ...response(), max_steps: 100 }, 'test-run-123', 0)).toThrow(/invalid driving decision/);
   });
 });

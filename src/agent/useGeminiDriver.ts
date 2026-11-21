@@ -3,14 +3,13 @@ import { mediaUrl } from '../media/cameras';
 import type { ModelGatewayStatus } from '../models/types';
 import { sampleScenario } from '../scene/DemoScenarioProvider';
 import type { ScenarioBundle } from '../types';
-import { advanceDriver, createDriverSimulation, driverEligibility, driverFrame, prepareDriverDecision, validateEventRun, MAX_PHYSICS_STEP, routeComplete } from './physics';
+import { createDriverSimulation, driverEligibility, driverFrame, validateEventRun } from './physics';
 import type { DriverSimulation } from './physics';
 import { DriverRunGate, validateDecisionResponse } from './session';
-import type { DriverRunLease } from './session';
+import { runContinuousDriver } from './continuous';
 import { createTrace, DriverRequestError, finalizeHold, finishTrace, recordTick, startHold, traceError } from './trace';
 import type { DriverTrace, HoldRecorder, TraceTerminal } from './trace';
-import { MAX_DRIVER_STEPS, SECONDS_PER_DECISION } from './types';
-import type { DecisionEntry, DriverAvailability, DriverDecision, DriverStatus, GeminiDriver } from './types';
+import type { DecisionEntry, DriverAvailability, DriverStatus, GeminiDriver } from './types';
 import { createEvents, requestEvent } from '../scenarios/events';
 import type { ScenarioPlan } from '../scenarios/events';
 import { beginDecision, createTrace as createScenarioTrace, finishTrace as finishScenarioTrace, recordFrame } from '../scenarios/trace';
@@ -20,9 +19,7 @@ function initialSimulation(scenario: ScenarioBundle) {
   return driverEligibility(scenario) === null ? createDriverSimulation(scenario) : null;
 }
 
-function aborted() { return new DOMException('Driving stopped', 'AbortError'); }
-
-/** A run has at most 12 decisions and no browser retries; gateway retry limits still apply. */
+/** Decisions update a continuously animated controller; gateway retry limits still apply. */
 export function useGeminiDriver(scenario: ScenarioBundle, plan: ScenarioPlan): GeminiDriver {
   const gate = useRef(new DriverRunGate());
   const simulation = useRef<DriverSimulation | null>(null);
@@ -40,6 +37,7 @@ export function useGeminiDriver(scenario: ScenarioBundle, plan: ScenarioPlan): G
   const [completionReason, setCompletionReason] = useState<GeminiDriver['completionReason']>(null);
   const [availabilityAttempt, setAvailabilityAttempt] = useState(0);
   const traceRef = useRef<RunTrace | null>(null);
+  const pendingDecision = useRef<{ entry: TraceStep; requestedAt: number } | null>(null);
   const [traces, setTraces] = useState<RunTrace[]>([]);
   const [, refreshEvents] = useState(0);
   const [modelAvailability, setModelAvailability] = useState<DriverAvailability>({ state: 'checking', modelId: null, reason: null });
@@ -51,6 +49,7 @@ export function useGeminiDriver(scenario: ScenarioBundle, plan: ScenarioPlan): G
   const finish = useCallback((reason: Terminal, message: string | null = null) => {
     const scenarioTrace = traceRef.current;
     if (!scenarioTrace || scenarioTrace.terminal.reason !== 'running' || !simulation.current) return;
+    if (pendingDecision.current) pendingDecision.current.entry.wallLatencyMs = performance.now() - pendingDecision.current.requestedAt;
     finishScenarioTrace(scenarioTrace, simulation.current, reason, message);
     if (trace.current) scenarioTrace.driverTrace = structuredClone(trace.current);
     const saved = structuredClone(scenarioTrace);
@@ -70,9 +69,11 @@ export function useGeminiDriver(scenario: ScenarioBundle, plan: ScenarioPlan): G
     activeRef.current = false;
     gate.current.cancel();
     finalizeCurrentHold.current?.();
+    finalizeCurrentHold.current = null;
     finishTrace(trace.current, { state: 'interrupted' });
     finish('reset');
     traceRef.current = null;
+    pendingDecision.current = null;
     trace.current = null;
     simulation.current = initialSimulation(scenario);
     frameRef.current = simulation.current ? driverFrame(simulation.current) : sampleScenario(scenario, 0);
@@ -102,7 +103,7 @@ export function useGeminiDriver(scenario: ScenarioBundle, plan: ScenarioPlan): G
         const response = await fetch(mediaUrl('/api/models/status'), { signal: controller.signal });
         if (!response.ok) throw new Error('Model gateway is unavailable. Start the API and check again.');
         const data = await response.json() as ModelGatewayStatus;
-        const service = data.services?.find(item => item.service === 'hydrogen');
+        const service = data.services?.find(item => item.service === 'decisions');
         if (disposed) return;
         setModelAvailability({ state: service?.configured ? 'available' : 'unavailable',
           modelId: service?.model_id ?? null, reason: service?.configured ? null : 'Configure the Gemini gateway on the server to start driving.' });
@@ -130,115 +131,96 @@ export function useGeminiDriver(scenario: ScenarioBundle, plan: ScenarioPlan): G
     const lease = gate.current.begin(crypto.randomUUID());
     activeRef.current = true;
     simulation.current = initial;
-    traceRef.current = createScenarioTrace(initial, lease.runId);
+    finalizeCurrentHold.current = null;
     const runTrace = trace.current = createTrace(lease.runId, initial);
+    const scenarioTrace = traceRef.current = createScenarioTrace(initial, lease.runId);
+    pendingDecision.current = null;
     frameRef.current = driverFrame(initial);
     publish(initial);
     setHasRun(true); setError(null); setDecisionLog([]); setCompletionReason(null); setStatus('thinking');
 
-    const driveSegment = (decision: DriverDecision, run: DriverRunLease, hold: HoldRecorder) => new Promise<void>((resolve, reject) => {
-      if (!gate.current.isCurrent(run) || !simulation.current) { reject(aborted()); return; }
-      const until = simulation.current.time + SECONDS_PER_DECISION;
-      let animation = 0, previous: number | null = null, published = 0, accumulator = 0;
-      const signal = run.controller.signal;
-      const cancel = () => { cancelAnimationFrame(animation); signal.removeEventListener('abort', cancel); reject(aborted()); };
-      const finish = () => { signal.removeEventListener('abort', cancel); resolve(); };
-      signal.addEventListener('abort', cancel, { once: true });
-      const tick = (now: number) => {
-        if (!gate.current.isCurrent(run) || !simulation.current) { cancel(); return; }
-        accumulator += Math.min(.25, previous === null ? 0 : (now - previous) / 1000);
-        previous = now;
-        while (accumulator >= MAX_PHYSICS_STEP && simulation.current.time < until - 1e-7 && !routeComplete(simulation.current)) {
-          const before = simulation.current;
-          simulation.current = advanceDriver(before, decision, MAX_PHYSICS_STEP);
-          recordTick(hold, before, simulation.current);
-          if (traceRef.current) recordFrame(traceRef.current, simulation.current);
-          accumulator -= MAX_PHYSICS_STEP;
-        }
-        frameRef.current = driverFrame(simulation.current);
-        const done = simulation.current.time >= until - 0.00001 || routeComplete(simulation.current);
-        if (now - published >= 100 || done) { publish(simulation.current); published = now; }
-        if (done) finish(); else animation = requestAnimationFrame(tick);
-      };
-      animation = requestAnimationFrame(tick);
-    });
-
-    void (async () => {
-      try {
-        for (let step = 0; step < MAX_DRIVER_STEPS; step++) {
-          if (!gate.current.isCurrent(lease) || !simulation.current) return;
-          simulation.current = prepareDriverDecision(simulation.current);
-          if (!traceRef.current) return;
-          recordFrame(traceRef.current, simulation.current);
-          frameRef.current = driverFrame(simulation.current);
-          setStatus('thinking');
-          const entry: TraceStep = beginDecision(traceRef.current, simulation.current, step);
-          const observation = entry.observation;
-          const requestedAt = performance.now();
-          // Simulation does not advance while awaiting the actual model response.
-          const request = new AbortController();
-          const abortRequest = () => request.abort();
-          lease.controller.signal.addEventListener('abort', abortRequest, { once: true });
-          const timeout = window.setTimeout(() => request.abort(), 130_000);
-          let payload: unknown;
-          try {
-            const response = await fetch(mediaUrl('/api/driver/decision'), {
-              method: 'POST', headers: { 'Content-Type': 'application/json' }, signal: request.signal,
-              body: JSON.stringify({ run_id: lease.runId, step, observation }),
-            });
-            payload = await response.json();
-            if (!response.ok) {
-              const detail = (payload as { detail?: { message?: unknown; code?: unknown; request_id?: unknown } })?.detail;
-              entry.failure = { code: typeof detail?.code === 'string' && /^[a-z_]{1,40}$/.test(detail.code) ? detail.code : 'request_failed',
-                requestId: typeof detail?.request_id === 'string' && /^[0-9a-f-]{36}$/i.test(detail.request_id) ? detail.request_id : null };
-              throw new DriverRequestError(typeof detail?.message === 'string' ? detail.message.slice(0, 280) : 'The model gateway could not return a driving decision.');
-            }
-          } catch (failure) {
-            if (!gate.current.isCurrent(lease)) return;
-            if (request.signal.aborted) throw new DriverRequestError('The Gemini request timed out. Driving stopped without a fallback.');
-            throw failure;
-          } finally {
-            entry.wallLatencyMs = performance.now() - requestedAt;
-            window.clearTimeout(timeout);
-            lease.controller.signal.removeEventListener('abort', abortRequest);
-          }
-          if (!gate.current.isCurrent(lease)) return;
-          const response = validateDecisionResponse(payload, lease.runId, step);
-          entry.response = response; entry.wallLatencyMs = performance.now() - requestedAt;
-          setDecisionLog(log => [...log, { ...response, simulationTime: observation.simulation_time }]);
-          setStatus('driving');
-          const hold = startHold(simulation.current);
-          // A run replaced by reset/restart owns simulation.current, so only record into the live trace.
-          const finalize = () => { if (trace.current === runTrace && simulation.current) finalizeHold(runTrace, response, observation, hold, simulation.current); };
-          finalizeCurrentHold.current = finalize;
-          try {
-            await driveSegment(response.decision, lease, hold);
-          } finally {
-            finalize();  // no-op if Stop already recorded this hold
-            if (finalizeCurrentHold.current === finalize) finalizeCurrentHold.current = null;
-          }
-          if (!gate.current.isCurrent(lease) || !simulation.current) return;
-          if (routeComplete(simulation.current)) {
-            finishTrace(runTrace, { state: 'route_complete' });
-            finish('route-complete');
-            setCompletionReason('route-complete'); setStatus('complete'); activeRef.current = false; return;
-          }
-        }
-        if (gate.current.isCurrent(lease)) {
-          finishTrace(runTrace, { state: 'decision_limit' });
-          finish('decision-limit');
-          setCompletionReason('decision-limit'); setStatus('complete'); activeRef.current = false;
-        }
-      } catch (failure) {
+    let hold: HoldRecorder | null = null;
+    void runContinuousDriver({
+      initial,
+      signal: lease.controller.signal,
+      readState: () => simulation.current ?? initial,
+      onRequest: (step, observation, state) => {
         if (!gate.current.isCurrent(lease)) return;
-        activeRef.current = false;
-        const message = traceError(failure);
-        finishTrace(runTrace, { state: 'error', error: message });
-        finish('error', message);
-        setError(message);
-        setStatus('error'); gate.current.cancel();
-      }
-    })();
+        const entry = beginDecision(scenarioTrace, state, step, observation);
+        pendingDecision.current = { entry, requestedAt: performance.now() };
+      },
+      requestDecision: async (step, observation, signal) => {
+        const pending = pendingDecision.current;
+        try {
+          const response = await fetch(mediaUrl('/api/driver/decision'), {
+            method: 'POST', headers: { 'Content-Type': 'application/json' }, signal,
+            body: JSON.stringify({ run_id: lease.runId, step, observation }),
+          });
+          const payload: unknown = await response.json();
+          if (!response.ok) {
+            const detail = (payload as { detail?: { message?: unknown; code?: unknown; request_id?: unknown } })?.detail;
+            if (pending && gate.current.isCurrent(lease) && !signal.aborted) pending.entry.failure = {
+              code: typeof detail?.code === 'string' && /^[a-z_]{1,40}$/.test(detail.code) ? detail.code : 'request_failed',
+              requestId: typeof detail?.request_id === 'string' && /^[0-9a-f-]{36}$/i.test(detail.request_id) ? detail.request_id : null,
+            };
+            throw new DriverRequestError(typeof detail?.message === 'string' ? detail.message.slice(0, 280) : 'The model gateway could not return a driving decision.');
+          }
+          return validateDecisionResponse(payload, lease.runId, step);
+        } finally {
+          if (pending && gate.current.isCurrent(lease) && !signal.aborted && scenarioTrace.terminal.reason === 'running') {
+            pending.entry.wallLatencyMs = performance.now() - pending.requestedAt;
+          }
+        }
+      },
+      onDecision: (response, observation, state) => {
+        if (!gate.current.isCurrent(lease)) return;
+        const pending = pendingDecision.current;
+        if (pending?.entry.step === response.step) {
+          pending.entry.response = response;
+          pending.entry.appliedSimulationTime = state.time;
+          pending.entry.wallLatencyMs = performance.now() - pending.requestedAt;
+          pendingDecision.current = null;
+        }
+        // Pending inference belongs to the previous command. Replacement starts a new applied interval.
+        finalizeCurrentHold.current?.();
+        const applied = hold = startHold(state);
+        const finalize = () => {
+          if (trace.current === runTrace && simulation.current) finalizeHold(runTrace, response, observation, applied, simulation.current);
+        };
+        finalizeCurrentHold.current = finalize;
+        setDecisionLog(log => [...log, { ...response, simulationTime: state.time }]);
+        setStatus('driving');
+      },
+      onFrame: (before, state) => {
+        if (!gate.current.isCurrent(lease)) return;
+        simulation.current = state;
+        if (hold) recordTick(hold, before, state);
+        recordFrame(scenarioTrace, state);
+        frameRef.current = driverFrame(state);
+      },
+      onPublish: state => { if (gate.current.isCurrent(lease)) publish(state); },
+    }).then(reason => {
+      if (!gate.current.isCurrent(lease)) return;
+      finalizeCurrentHold.current?.();
+      finalizeCurrentHold.current = null;
+      finishTrace(runTrace, { state: reason === 'route-complete' ? 'route_complete' : reason === 'time-limit' ? 'time_limit' : 'decision_limit' });
+      finish(reason);
+      setCompletionReason(reason);
+      setStatus('complete');
+      activeRef.current = false;
+      gate.current.cancel();
+    }).catch(failure => {
+      if (!gate.current.isCurrent(lease)) return;
+      finalizeCurrentHold.current?.();
+      finalizeCurrentHold.current = null;
+      activeRef.current = false;
+      const message = traceError(failure);
+      finishTrace(runTrace, { state: 'error', error: message });
+      finish('error', message);
+      setError(message);
+      setStatus('error');
+      gate.current.cancel();
+    });
   }, [modelAvailability.state, publish, scenario, plan, finish]);
 
   const unavailableReason = driverEligibility(scenario);

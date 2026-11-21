@@ -24,6 +24,7 @@ function run(mode: 'event' | 'baseline') {
     const row = beginDecision(trace, state, step);
     const decision: DriverDecision = row.observation.lead_gap_m !== null && row.observation.lead_gap_m < 35
       ? { action: 'stop', target_speed_mps: 0, reason: 'Fixture sees an obstacle', confidence: .9 } : accelerate;
+    row.appliedSimulationTime = state.time;
     row.response = { run_id: trace.runId, step, decision, model_id: 'fixture', request_id: `fixture-${step}`, max_steps: 12 };
     for (let tick = 0; tick < 30; tick++) { state = advanceDriver(state, decision, .1); recordFrame(trace, state); }
   }
@@ -145,6 +146,38 @@ describe('scenario injection boundary', () => {
 });
 
 describe('scenario trace and replay', () => {
+  it('measures reaction when a response is applied after its observation, including inference motion', () => {
+    let state = setup();
+    const trace = createTrace(state, 'fixture-overlapped-inference', 'test-fixture');
+    state = prepareDriverDecision(advance(state, 3)); recordFrame(trace, state);
+    const entry = beginDecision(trace, state, 0);
+    state = advance(state, 1.2); recordFrame(trace, state);
+    entry.response = { run_id: trace.runId, step: 0, model_id: 'gemini-decision-1', request_id: 'fixture-response', max_steps: 60,
+      decision: { action: 'stop', target_speed_mps: 0, confidence: .9, reason: 'Fixture observes obstruction.' } };
+    expect(summarizeTrace(trace).events[0].modelReactionTime).toBeNull(); // received but not applied
+    entry.appliedSimulationTime = state.time;
+    entry.wallLatencyMs = 1200;
+    const reaction = summarizeTrace(trace).events[0];
+    expect(reaction.firstModelVisibleTime).toBe(3);
+    expect(reaction.modelReactionTime).toBe(4.2);
+    expect(reaction.responseLatencySimulationSeconds).toBeCloseTo(1.2);
+    expect(reaction.responseLatencyFrames).toBe(12);
+    expect(entry.observation.simulation_time).toBe(3);
+  });
+
+  it('replays a full continuous run and retains compatibility with historical scenario traces', () => {
+    let state = setup('car-crash', 'baseline');
+    const trace = createTrace(state, 'fixture-sixty-seconds', 'test-fixture');
+    for (let tick = 0; tick < 600; tick++) { state = advanceDriver(state, accelerate, .1); recordFrame(trace, state); }
+    finishTrace(trace, state, 'time-limit');
+    expect(trace.schemaVersion).toBe('gridlocked-driver-trace.v2');
+    expect(trace.modelPolicy).toEqual({ promptVersion: 'sim-driver-decisions-v2', service: 'decisions', modelId: 'gemini-decision-1' });
+    expect(trace.frames).toHaveLength(601);
+    expect(replayScene(trace).duration).toBe(60);
+    expect(replayScene({ ...run('event'), schemaVersion: 'gridlocked-driver-trace.v1' }).duration).toBe(36);
+    expect(() => replayScene({ ...trace, frames: [...trace.frames, { ...trace.frames.at(-1), time: 60.1 }] })).toThrow();
+  });
+
   it('preserves the action trace and effective guards during an interrupted crash run', () => {
     let state = setup();
     const scenarioTrace = createTrace(state, 'fixture-both-traces', 'test-fixture');
@@ -154,7 +187,7 @@ describe('scenario trace and replay', () => {
       const entry = beginDecision(scenarioTrace, state, step);
       const response: DriverResponse = { run_id: scenarioTrace.runId, step, decision: accelerate,
         model_id: 'fixture', request_id: `fixture-${step}`, max_steps: 12 };
-      entry.response = response;
+      entry.response = response; entry.appliedSimulationTime = state.time;
       const hold = startHold(state);
       for (let tick = 0; tick < (step === 3 ? 5 : 30); tick++) {
         const before = state; state = advanceDriver(state, accelerate, .1);
