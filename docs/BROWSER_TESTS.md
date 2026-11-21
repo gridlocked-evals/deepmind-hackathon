@@ -29,9 +29,13 @@ After building, target one case with `npx playwright test --project=desktop-chro
 - The final command's applied interval and cancellation of a pending response at the time limit.
 - Event mode through its primary control, including a scheduled hazard appearing in the next model observation while motion continues during inference.
 
+- Carbon barriers freezing motion and command age while an offline response is pending, then exposing the applied hazard to the driver.
+- Stale Carbon responses after Stop/restart, adversary errors without a fallback attack, and seeded random attacks without Carbon requests.
+- Manual Scenario Lab controls staying disabled during adversary runs and working again when the adversary is Off.
+
 ## Isolation and observability
 
-`tests/browser/fixtures.ts` intercepts requests for the entire browser context. Camera lists, camera media, model availability, decision responses, OSRM routes, map style, fonts, and glyphs are local fixtures. Only the preview's static build assets pass through. Unexpected requests and WebSockets are blocked and fail the test; service workers are disabled. Route planning still selects cameras through the real UI and validates that the OSRM URL contains those selected coordinates.
+`tests/browser/fixtures.ts` intercepts requests for the entire browser context. Camera lists, camera media, model availability, driver and Carbon decision responses, OSRM routes, map style, fonts, and glyphs are local fixtures. Only the preview's static build assets pass through. Unexpected requests and WebSockets are blocked and fail the test; service workers are disabled. Route planning still selects cameras through the real UI and validates that the OSRM URL contains those selected coordinates.
 
 The gateway holds real HTTP fetches until a test releases them. Cancellation tests selectively remove the decision fetch's signal while recording that the app supplied it. This forces the run-identity guard to reject a genuinely delivered stale response; a successful transport abort alone cannot make the test pass.
 

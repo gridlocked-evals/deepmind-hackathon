@@ -125,6 +125,10 @@ export function runContinuousDriver(options: ContinuousDriverOptions): Promise<D
         nextBarrier += barrier!.everySeconds;
         const work = barrier!.run(state);
         if (work) { pause(work); animation = clock.frame(tick); return; }
+        // A synchronous barrier can inject an event through the shared state.
+        // Continue from that update instead of overwriting it with this frame's
+        // pre-barrier snapshot.
+        state = readState?.() ?? state;
       }
       if (command) {
         // Check wall-clock freshness before motion, including a delayed animation frame.
