@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { demoScenario } from '../scene/DemoScenarioProvider';
 import { advanceDriver, createDriverSimulation, driverFrame, driverObservation, prepareDriverDecision } from '../agent/physics';
 import type { DriverSimulation } from '../agent/physics';
-import { MAX_DRIVER_STEPS, SECONDS_PER_DECISION } from '../agent/types';
+import { DECISION_INTERVAL_SECONDS, MAX_DRIVER_STEPS } from '../agent/types';
 import type { DriverDecision } from '../agent/types';
 import { createEvents, preset, requestEvent, withEventActors } from './events';
 import type { EventSpec, ScenarioPlan } from './events';
@@ -17,7 +17,7 @@ function plan(type: string, patch: Partial<Omit<EventSpec, 'parameters'>> & { pa
   return { ...base, events: [{ ...event, ...patch, parameters: { ...event.parameters, ...patch.parameters } }] };
 }
 
-/** Mirrors useGeminiDriver's loop with fixed 0.1 s ticks and a stub policy that reacts to what it sees; no network.
+/** Mirrors the continuous driver (#92): one decision per DECISION_INTERVAL_SECONDS, applied over fixed 0.1 s ticks and a stub policy that reacts to what it sees; no network.
  * Returns the exact request bodies for POST /api/driver/decision and the observation at every physics tick. */
 function drive(scenarioPlan: ScenarioPlan | null, manualAt?: number) {
   let state: DriverSimulation = scenarioPlan
@@ -34,7 +34,7 @@ function drive(scenarioPlan: ScenarioPlan | null, manualAt?: number) {
     const decision: DriverDecision = observation.lead_gap_m !== null && observation.lead_gap_m < 30
       ? { action: 'stop', target_speed_mps: 0, reason: 'Stub sees an obstacle', confidence: .9 }
       : { action: 'accelerate', target_speed_mps: 10, reason: 'Stub proceeds', confidence: .8 };
-    for (let tick = 0; tick < SECONDS_PER_DECISION * 10; tick++) {
+    for (let tick = 0; tick < Math.round(DECISION_INTERVAL_SECONDS / .1); tick++) {
       state = advanceDriver(state, decision, .1);
       ticks.push({ time: state.time, body: JSON.stringify(driverObservation(state)) });
     }
