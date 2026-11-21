@@ -1,4 +1,7 @@
+import contextlib
 import importlib.util
+import os
+import signal
 import json
 import pathlib
 import sys
@@ -94,7 +97,8 @@ def test_serve_and_bench_fails_when_server_never_ready(tmp_path):
     try:
         done = subprocess.run(["bash", str(here / "serve_and_bench.sh"), "0", "1"], env=env, cwd=tmp_path, timeout=30)
     finally:
-        subprocess.run(["kill", (root / "logs" / "serve_gpu0.pid").read_text().strip()])
+        with contextlib.suppress(ProcessLookupError):  # os.kill: the test image has no kill binary
+            os.kill(int((root / "logs" / "serve_gpu0.pid").read_text()), signal.SIGTERM)
     assert done.returncode == 1
     assert not (tmp_path / "bench_ran").exists()
     log = next(root.glob("runs/*/pipeline.log")).read_text()
