@@ -15,6 +15,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
+from .capture_api import Recorders, make_store, router as capture_router
 from .contracts import json_schema
 from .feeds import HLS_SOURCES, REGISTRY_URL, public_cameras, utc_now
 from .proxy import proxy_media, resolve_token
@@ -32,13 +33,18 @@ async def lifespan(app: FastAPI):
         headers={"User-Agent": "GothamForge/0.1 public-camera-viewer"},
     ) as client:
         app.state.http = client
-        yield
+        app.state.captures = make_store()
+        app.state.recorders = Recorders()
+        try:
+            yield
+        finally:
+            await app.state.recorders.stop_all()
 
 
 app = FastAPI(title="Gotham Forge", version="0.1.0", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware, allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
-    allow_methods=["GET"], allow_headers=["Range"],
+    allow_methods=["GET", "POST", "DELETE"], allow_headers=["Range", "Content-Type"],
     expose_headers=["Content-Range", "Accept-Ranges", "Content-Length"],
 )
 
@@ -122,6 +128,9 @@ async def fetch_dot(client: httpx.AsyncClient) -> list[dict]:
 @app.get("/api/health")
 async def health():
     return {"status": "ok", "service": "gotham-forge-camera-api", "timestamp": utc_now()}
+
+
+app.include_router(capture_router)
 
 
 @app.get("/api/contracts/element119")

@@ -55,9 +55,10 @@ export interface Capture {
   mediaSha256: Sha256;
   mediaType: string;
   durationS: number;
-  frameCount: number;
-  width: number;
-  height: number;
+  /** null when the media could not be probed; then `unknowns` lists field 'frames'. */
+  frameCount: number | null;
+  width: number | null;
+  height: number | null;
   /** When we retrieved the media; never the camera's exposure time. */
   retrievalStartedAt: IsoDateTime;
   retrievalEndedAt: IsoDateTime;
@@ -283,6 +284,8 @@ export function validateVerticalSlice(input: unknown): ValidationResult<Vertical
   c.check(typeof cap.durationS === 'number' && cap.durationS >= 0 && cap.durationS <= MAX_EVIDENCE_SECONDS, `capture.durationS: must be within 0-${MAX_EVIDENCE_SECONDS} s`);
   c.check(cap.sourceKind !== 'snapshot' || cap.durationS === 0, 'capture: snapshot captures have zero media duration');
   c.check(Date.parse(cap.retrievalEndedAt) >= Date.parse(cap.retrievalStartedAt), 'capture: retrieval ends before it starts');
+  const unprobed = [cap.frameCount, cap.width, cap.height].some((v) => v === null || v === undefined);
+  c.check(!unprobed || (cap.unknowns ?? []).some((u) => u.field === 'frames'), "capture: unprobed frame count or size must be declared in unknowns (field 'frames')");
 
   c.id(obs.id, 'obs', 'observationBatch.id');
   c.check(obs.captureId === cap.id, 'observationBatch: must reference the capture');

@@ -142,9 +142,9 @@ class Capture(Strict):
     mediaSha256: Sha256
     mediaType: str = Field(min_length=1)
     durationS: float = Field(ge=0, le=MAX_EVIDENCE_SECONDS)
-    frameCount: int = Field(ge=1)
-    width: int = Field(ge=1)
-    height: int = Field(ge=1)
+    frameCount: int | None = Field(default=None, ge=1)
+    width: int | None = Field(default=None, ge=1)
+    height: int | None = Field(default=None, ge=1)
     retrievalStartedAt: datetime
     retrievalEndedAt: datetime
     captureClock: Literal["unknown", "source_reported"]
@@ -157,6 +157,9 @@ class Capture(Strict):
             raise ValueError("retrieval ends before it starts")
         if self.sourceKind == "snapshot" and self.durationS != 0:
             raise ValueError("snapshot captures have zero media duration")
+        probed = (self.frameCount, self.width, self.height)
+        if None in probed and not any(u.field == "frames" for u in self.unknowns):
+            raise ValueError("unprobed frame count or size must be declared in unknowns (field 'frames')")
         return self
 
 
