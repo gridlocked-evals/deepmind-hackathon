@@ -97,7 +97,7 @@ def validate_answers(raw: dict, questions: dict) -> dict:
     if not isinstance(answers, dict) or set(answers) != set(questions):
         raise GatewayError(ErrorCode.INVALID_OUTPUT)
     def probability(value):
-        return type(value) in (int, float) and math.isfinite(value) and 0 <= value <= 1
+        return type(value) in (int, float) and 0 <= value <= 1 and math.isfinite(value)
     for name, answer in answers.items():
         question = questions[name]
         if not isinstance(answer, dict) or answer.get("type") != question["type"] or not probability(answer.get("confidence")):
@@ -113,13 +113,14 @@ def validate_answers(raw: dict, questions: dict) -> dict:
                     or not math.isclose(sum(probabilities.values()), 1, abs_tol=.02)):
                 raise GatewayError(ErrorCode.INVALID_OUTPUT)
             if question["type"] == "choice":
-                if (answer.get("choice") not in probabilities
-                        or probabilities[answer["choice"]] < max(probabilities.values()) - .02):
+                choice = answer.get("choice")
+                if (not isinstance(choice, str) or choice not in probabilities
+                        or probabilities[choice] < max(probabilities.values()) - .02):
                     raise GatewayError(ErrorCode.INVALID_OUTPUT)
             else:
                 score = answer.get("score")
                 legend = {str(i): value for i, value in enumerate(question["criteria"])}
-                if (type(score) not in (int, float) or not math.isfinite(score) or not 0 <= score <= len(legend) - 1
+                if (type(score) not in (int, float) or not 0 <= score <= len(legend) - 1 or not math.isfinite(score)
                         or answer.get("legend") != legend
                         or not math.isclose(score, sum(int(k) * p for k, p in probabilities.items()), abs_tol=.05)):
                     raise GatewayError(ErrorCode.INVALID_OUTPUT)
@@ -174,7 +175,12 @@ class HTTPAdapter:
                         raise GatewayError(ErrorCode.INVALID_OUTPUT)
             def invalid_constant(_):
                 raise ValueError()
-            raw = json.loads(data, parse_constant=invalid_constant)
+            def finite_float(value):
+                number = float(value)
+                if not math.isfinite(number):
+                    raise ValueError()
+                return number
+            raw = json.loads(data, parse_constant=invalid_constant, parse_float=finite_float)
             if not isinstance(raw, dict):
                 raise GatewayError(ErrorCode.INVALID_OUTPUT)
             identifier = provider_id(raw.get("id"), self.api_key) or identifier
