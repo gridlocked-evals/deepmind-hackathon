@@ -25,7 +25,7 @@ The event rules say the demo may show only work built during the hackathon. This
 | Citywide camera directory and street-route playback | `src/` | #34 |
 | Shared Element 119 contracts | `docs/CONTRACTS.md`, `contracts/` | #35 |
 
-**To confirm (@Paradox560):** the starting React/Vite shell, the Vestry traffic scene, the 3D vehicle rendering and the camera/HLS proxy were all committed at once at the start of the event. If any of them were written before the event, they are reused work: list them here as reused and keep them out of the demo.
+**Maintainer confirmation:** Paradox560 confirmed on Nov 21, 2026 that the starting React/Vite app shell, the Vestry traffic scene, the 3D vehicle rendering and the camera/HLS proxy were written during the hackathon.
 
 **Not ours:** Gemini 4, Decisions API, Nano Banana and Genie models (Google); NYC DOT and 511NY camera feeds and map data (see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)).
 
