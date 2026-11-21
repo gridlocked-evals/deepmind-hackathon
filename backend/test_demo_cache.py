@@ -136,6 +136,25 @@ def test_slow_later_stop_does_not_lower_an_already_stopped_cameras_rate(monkeypa
     assert "camera-b" in dropped and len(api.saved) == 1
 
 
+def test_segment_arrival_slack_admits_boundary_feed_but_preserves_measured_rate(monkeypatch):
+    api = FakeCaptureAPI()
+    def call(base, path, body=None, **kwargs):
+        result = api(base, path, body, **kwargs)
+        if path.endswith(("/buffer", "/stop")):
+            # First media at t=2; only one 2-second segment arrives by the t=6
+            # stop. Measured rate is 2/4=.5, but one-segment slack admits 4/4=1.
+            buffered = 12 if path.endswith("/stop") else 10
+            result["bufferedSeconds"] = buffered
+            result["history"]["segmentBoundariesS"] = list(range(0, buffered + 1, 2))
+        return result
+    monkeypatch.setattr(cache, "call", call)
+    monkeypatch.setattr(cache, "time", FakeClock())
+    kept, dropped = cache.cache_video("fixture", [{"id": "camera-a"}], cache_args())
+    assert set(kept) == {"camera-a"} and not dropped and len(api.saved) == 1
+    assert kept["camera-a"]["realtimeRatio"] == .5
+    assert kept["camera-a"]["realtimeRatio"] < cache_args().min_realtime_ratio
+
+
 def test_cache_writer_persists_only_extraction_identifier(tmp_path, monkeypatch):
     entry = {"kind": "hls", "saved": {"capture": {"id": "capture-fixture"}}}
     monkeypatch.setattr(cache, "OUT", tmp_path / "demo-cache.json")
