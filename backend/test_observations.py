@@ -332,6 +332,68 @@ def test_cancellation_retains_trace_failure_and_pinned_originals(tmp_path):
     asyncio.run(run())
 
 
+@pytest.mark.parametrize('abstention_first', [False, True])
+def test_negative_review_checks_all_accepted_candidates_before_abstentions(tmp_path, abstention_first):
+    captures,store,manifest=setup(tmp_path)
+    def rows(meta):
+        accepted=[fact(meta,kind='signal',semanticClass='signal',state='red',region={**BOX,'w':.25}),
+                  fact(meta,kind='signal',semanticClass='signal',state='green',region={**BOX,'w':.2})]
+        abstention=fact(meta,kind='signal',semanticClass='signal',visibility='unobservable')
+        return [abstention,*accepted] if abstention_first else [*accepted,abstention]
+    report=asyncio.run(perform(tmp_path,captures,store,manifest,Provider([rows])))
+    review=ManualReview(**{**annotation_template(report),'reviewer':'synthetic-regression-fixture','annotations':[
+        {'kind':'signal','semanticClass':'signal','time':{'startS':0,'endS':0},'region':BOX,'present':'no'}]})
+    result=score_review(store,report,review)
+    comparison=result['comparisons'][0]
+    accepted_ids={row['id'] for row in report['facts'] if row['disposition']=='accepted'}
+    assert comparison['outcome']=='false_positive'
+    assert comparison['factId'] in accepted_ids and set(comparison['factIds'])==accepted_ids
+    assert result['unmatchedAcceptedFacts']==[]
+
+
+@pytest.mark.parametrize('abstained,expected', [(True,'model_abstained'),(False,'correct_absence')])
+def test_negative_review_keeps_abstention_distinct_from_absence(tmp_path, abstained, expected):
+    captures,store,manifest=setup(tmp_path)
+    provider=Provider([lambda meta:[fact(meta,kind='signal',semanticClass='signal',visibility='unobservable')]
+                       if abstained else []])
+    report=asyncio.run(perform(tmp_path,captures,store,manifest,provider))
+    review=ManualReview(**{**annotation_template(report),'reviewer':'synthetic-regression-fixture','annotations':[
+        {'kind':'signal','semanticClass':'signal','time':{'startS':0,'endS':0},'region':BOX,'present':'no'}]})
+    assert score_review(store,report,review)['comparisons'][0]['outcome']==expected
+
+
+@pytest.mark.parametrize('human_count,expected', [({},'human_unknown'),
+    ({'lower':1,'upper':1},'count_interval_overlap'),({'lower':4,'upper':4},'count_error')])
+def test_count_review_requires_human_quantity_and_preserves_presence(tmp_path, human_count, expected):
+    captures,store,manifest=setup(tmp_path)
+    provider=Provider([lambda meta:[fact(meta,kind='count',semanticClass='vehicle',count={'lower':1,'upper':2})]])
+    report=asyncio.run(perform(tmp_path,captures,store,manifest,provider))
+    review=ManualReview(**{**annotation_template(report),'reviewer':'synthetic-regression-fixture','annotations':[
+        {'kind':'count','semanticClass':'vehicle','time':{'startS':0,'endS':0},'region':BOX,
+         'present':'yes','count':human_count}]})
+    comparison=score_review(store,report,review)['comparisons'][0]
+    assert comparison['outcome']==expected
+    assert comparison['presenceOutcome']=='matched'
+
+
+@pytest.mark.parametrize('model_case,presence', [('missing','missed'),
+    ('unknown','model_abstained'),('partial_overlap','region_error')])
+def test_count_review_without_human_quantity_keeps_presence_errors(tmp_path, model_case, presence):
+    captures,store,manifest=setup(tmp_path)
+    def rows(meta):
+        if model_case=='missing':
+            return []
+        return [fact(meta,kind='count',semanticClass='vehicle',
+            count={} if model_case=='unknown' else {'lower':1,'upper':2},
+            region={**BOX,'w':.1} if model_case=='partial_overlap' else BOX)]
+    report=asyncio.run(perform(tmp_path,captures,store,manifest,Provider([rows])))
+    review=ManualReview(**{**annotation_template(report),'reviewer':'synthetic-regression-fixture','annotations':[
+        {'kind':'count','semanticClass':'vehicle','time':{'startS':0,'endS':0},'region':BOX,'present':'yes'}]})
+    result=score_review(store,report,review)
+    assert result['counts']=={'human_unknown':1}
+    assert result['comparisons'][0]['presenceOutcome']==presence
+
+
 @pytest.mark.parametrize('completed_windows', [0, 1])
 def test_cancel_before_admission_never_borrows_a_previous_window_trace(tmp_path, video, completed_windows):
     captures, store, _ = setup(tmp_path)
