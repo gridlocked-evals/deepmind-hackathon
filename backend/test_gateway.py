@@ -159,11 +159,13 @@ def test_cancellation_releases_slot_but_retains_unknown_usage(tmp_path):
             gateway = ModelGateway(settings(tmp_path), client, api_key=KEY)
             task = asyncio.create_task(observe(gateway))
             await entered.wait()
-            task.cancel()
-            with pytest.raises(asyncio.CancelledError):
+            task.cancel("caller cancellation")
+            with pytest.raises(asyncio.CancelledError) as cancelled:
                 await task
             record = gateway.ledger.attempts()[0]
             assert record["outcome"] == "cancelled" and record["charged_tokens"] > 0
+            assert cancelled.value.args == ("caller cancellation",)
+            assert cancelled.value.request_id == record["request_id"]
     asyncio.run(run())
 
 
@@ -497,6 +499,74 @@ def test_expired_undispatched_genie_row_is_released(tmp_path):
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("reclaimed", [False, True])
+def test_expired_genie_reservation_cannot_be_dispatched_by_its_old_worker(tmp_path, reclaimed):
+    async def run():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(lambda _: pytest.fail("unexpected network request"))) as client:
+            config = settings(tmp_path)
+            old_worker = ModelGateway(config, client, api_key=KEY)
+            new_worker = ModelGateway(config, client, api_key=KEY)
+            call = old_worker._prepare(Service.GENIE, "world", {"create": {"model": "genie-4"}},
+                CallContext(episode_id="smoke", prompt_id="world-v1", purpose="smoke"), 1)
+            reserve = lambda gateway: gateway.ledger.reserve(call, "call", "credential", "genie-4", 1, 1, 60)
+            expired = reserve(old_worker)
+            with old_worker.ledger.connection() as db:
+                db.execute("UPDATE attempts SET lease_until=? WHERE request_id=?", (time.time() - 1, expired))
+            if reclaimed:
+                current = reserve(new_worker)
+                new_worker.ledger.dispatched(current)
+            with pytest.raises(GatewayError) as error:
+                old_worker.ledger.dispatched(expired)
+            assert error.value.code == ErrorCode.CANCELLED
+            row = old_worker.ledger.get(expired)
+            assert row["dispatched"] == 0 and row["charged_microusd"] == 1
+            if reclaimed:
+                assert row["outcome"] == "cancelled"
+                assert new_worker.ledger.get(current)["outcome"] == "pending"
+                assert new_worker.ledger.budget_status()["unresolved_world_requests"] == [current]
+    asyncio.run(run())
+
+
+def test_gateway_does_not_send_after_another_worker_reclaims_its_reservation(tmp_path, monkeypatch):
+    async def run():
+        requests = []
+        async with httpx.AsyncClient(transport=httpx.MockTransport(
+                lambda request: requests.append(request) or httpx.Response(400))) as client:
+            config = settings(tmp_path)
+            old_worker = ModelGateway(config, client, api_key=KEY)
+            new_worker = ModelGateway(config, client, api_key=KEY)
+            call = old_worker._prepare(Service.GENIE, "world", {"create": {"model": "genie-4"}},
+                CallContext(episode_id="smoke", prompt_id="world-v1", purpose="smoke"), 1)
+            original_artifact = old_worker.ledger.artifact
+            reservations = []
+
+            def delayed_artifact(content):
+                fingerprint = original_artifact(content)
+                if not reservations:
+                    # The first worker resumes after a stalled pre-dispatch write;
+                    # meanwhile a second process has reclaimed its expired lease.
+                    old = old_worker.ledger.attempts()[0]
+                    with old_worker.ledger.connection() as db:
+                        db.execute("UPDATE attempts SET lease_until=? WHERE request_id=?",
+                                   (time.time() - 1, old["request_id"]))
+                    current = new_worker.ledger.reserve(call, "replacement", new_worker._credential_hash,
+                                                       "genie-4", 1, 1, 60)
+                    new_worker.ledger.dispatched(current)
+                    reservations.extend([old, current])
+                return fingerprint
+
+            monkeypatch.setattr(old_worker.ledger, "artifact", delayed_artifact)
+            with pytest.raises(GatewayError) as error:
+                await old_worker._execute(call)
+            assert error.value.code == ErrorCode.CANCELLED and not requests
+            old, current = reservations
+            row = old_worker.ledger.get(old["request_id"])
+            assert row["outcome"] == "cancelled" and row["dispatched"] == 0
+            assert row["charged_microusd"] == old["charged_microusd"]
+            assert new_worker.ledger.budget_status()["unresolved_world_requests"] == [current]
+    asyncio.run(run())
+
+
 def test_no_key_status_endpoint_and_smoke_never_send_requests(tmp_path, monkeypatch):
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
     monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
@@ -665,3 +735,97 @@ def test_example_configuration_is_valid():
     from pathlib import Path
     config = GatewayConfig.model_validate_json((Path(__file__).resolve().parent.parent / "gateway.example.json").read_text())
     assert config.rates[Service.CARBON].output_per_million == Decimal("10")
+
+
+@pytest.mark.parametrize("cleanup_outcome", ["acknowledged", "rejected", "timeout"])
+def test_cancelled_probe_finishes_bounded_cleanup_and_preserves_world_latch(tmp_path, cleanup_outcome):
+    async def run():
+        entered, release = asyncio.Event(), asyncio.Event()
+        requests = []
+
+        async def handler(request):
+            requests.append(request.url.path)
+            if request.url.path.endswith("/cancel"):
+                entered.set()
+                await release.wait()
+                if cleanup_outcome == "rejected":
+                    return httpx.Response(503)
+                return httpx.Response(200, json={"status": "cancelled", "usage": USAGE})
+            return httpx.Response(200, json={"id": "world-1"})
+
+        @asynccontextmanager
+        async def connector(*_):
+            raise RuntimeError("connection failed")
+            yield
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            config = settings(tmp_path, cleanup_seconds=.1)
+            gateway = ModelGateway(config, client, api_key=KEY, genie_connector=connector)
+            context = CallContext(episode_id="smoke", prompt_id="world-v1", purpose="smoke")
+            task = asyncio.create_task(gateway.probe_world(prompt="Street", context=context))
+            await entered.wait()
+            task.cancel()
+            await asyncio.sleep(0)
+            task.cancel()  # A second cancellation must not detach cleanup either.
+            if cleanup_outcome != "timeout":
+                release.set()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(task, 1)
+            assert task.cancelled()
+            row = gateway.ledger.attempts()[0]
+            assert row["provider_request_id"] == "world-1"
+            unresolved = gateway.ledger.budget_status()["unresolved_world_requests"]
+            if cleanup_outcome == "acknowledged":
+                assert row["outcome"] == "cancelled" and row["usage"]
+                assert unresolved == []
+            else:
+                assert row["outcome"] == "termination_unconfirmed"
+                assert unresolved == [row["request_id"]]
+                before = len(requests)
+                with pytest.raises(GatewayError) as exc:
+                    await gateway.probe_world(prompt="Another street", context=context)
+                assert exc.value.code == ErrorCode.TERMINATION
+                assert len(requests) == before
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("usage_source", ["cleanup", "terminal_failure"])
+def test_failed_probe_reconciles_reported_usage_and_latches_overrun(tmp_path, usage_source):
+    overrun = {"total_input_tokens": 1_000_000, "total_output_tokens": 2_000_000, "total_tokens": 3_000_000}
+    requests = []
+
+    def handler(request):
+        requests.append(request.url.path)
+        if request.url.path.endswith("/cancel"):
+            return httpx.Response(200, json={"status": "cancelled", "usage": overrun})
+        return httpx.Response(200, json={"id": "world-1"})
+
+    class FailedWorld(WorldSession):
+        async def receive(self):
+            yield {"event_type": "interaction.failed", "usage": overrun}
+
+    @asynccontextmanager
+    async def connector(*_):
+        if usage_source == "cleanup":
+            raise RuntimeError("connection failed")
+        yield FailedWorld()
+
+    async def run():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            gateway = ModelGateway(settings(tmp_path), client, api_key=KEY, genie_connector=connector)
+            context = CallContext(episode_id="smoke", prompt_id="world-v1", purpose="smoke")
+            with pytest.raises(GatewayError) as exc:
+                await gateway.probe_world(prompt="Street", context=context)
+            assert exc.value.code == (ErrorCode.TRANSPORT if usage_source == "cleanup" else ErrorCode.UPSTREAM)
+            row = gateway.ledger.attempts()[0]
+            assert json.loads(row["usage"])["total_tokens"] == 3_000_000
+            assert row["charged_tokens"] == 3_000_000
+            assert row["charged_microusd"] == 36_500_000
+            assert gateway.ledger.budget_status()["blocks"]
+            evidence = json.loads((gateway.config.data_dir / "artifacts" / f"{row['result_hash']}.json").read_bytes())
+            assert evidence["usage"]["total_tokens"] == 3_000_000
+            before = len(requests)
+            with pytest.raises(GatewayError) as blocked:
+                await observe(gateway)
+            assert blocked.value.code == ErrorCode.BUDGET and len(requests) == before
+    asyncio.run(run())

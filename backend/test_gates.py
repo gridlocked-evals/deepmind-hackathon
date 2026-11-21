@@ -1,15 +1,18 @@
+import asyncio
 from datetime import datetime, timezone
+import json
 import os
 
 import httpx
 import pytest
 
-from backend.artifacts import ArtifactError
-from backend.contracts import ModelCall, SessionBudget, WorldSession
+from backend.artifacts import ArtifactError, ArtifactStore
+from backend.contracts import ModelCall, Permissions, SessionBudget, WorldSession
+from backend.edits import EditBundle
 from backend.gates import (authorize_world, bind_world, check_world_session, claim_world, gate_reference,
                            load_thresholds, run_gated_reference)
 from backend.references import MAX_ATTEMPTS, generate_reference
-from backend.test_pipeline_helpers import FakeProvider, answers, png, run, setup
+from backend.test_pipeline_helpers import FakeProvider, answers, gateway, png, run, setup
 
 
 def world(ref_id, gate_id, world_id="world_test-0001"):
@@ -109,6 +112,49 @@ def test_judge_timeout_is_insufficient_evidence(tmp_path):
     assert gate["answers"] is None
 
 
+def test_cancelled_judge_persists_unknown_and_cannot_be_resampled(tmp_path):
+    provider = FakeProvider()
+    store, bundle = setup(tmp_path, provider)
+    provider.images = [png()]
+    reference = run(tmp_path, provider, lambda gw: generate_reference(gw, store, bundle, style="photoreal"))
+
+    async def exercise():
+        entered = asyncio.Event()
+        dispatched = []
+
+        async def blocked(request):
+            dispatched.append(request)
+            entered.set()
+            await asyncio.Event().wait()
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(blocked)) as http:
+            gw = gateway(tmp_path, http)
+            task = asyncio.create_task(gate_reference(gw, store, bundle, reference.id))
+            await asyncio.wait_for(entered.wait(), 1)
+            task.cancel("private judge cancellation detail")
+            with pytest.raises(asyncio.CancelledError) as cancelled:
+                await task
+            assert task.cancelled() and cancelled.value.args == ("private judge cancellation detail",)
+            request_id = cancelled.value.request_id
+            [record] = store.list("gates")
+            assert record["state"] == "insufficient_evidence" and record["answers"] is None
+            assert record["judgeError"]["code"] == "cancelled" and record["judgeError"]["request_id"] == request_id
+            decision = record["gateDecision"]
+            assert decision["outcome"] == "unknown" and decision["effect"] == "block_world_creation"
+            assert decision["modelCall"]["requestId"] == f"gateway:{request_id}"
+            assert decision["modelCall"]["costUsd"] is None and decision["modelCall"]["inputTokens"] is None
+            ledger = gw.ledger.get(request_id)
+            assert ledger["outcome"] == "cancelled" and ledger["charged_tokens"] > 0 and ledger["usage"] is None
+            assert "private judge cancellation detail" not in json.dumps(record)
+            # A restarted caller must receive the same stored decision, not spend another judge sample.
+            again = await gate_reference(gateway(tmp_path, http), ArtifactStore(store.root), bundle, reference.id)
+            assert again.model_dump(mode="json") == record and len(dispatched) == 1
+            with pytest.raises(ArtifactError):
+                authorize_world(store, reference.id, decision["id"])
+
+    asyncio.run(exercise())
+
+
 def test_deterministic_failure_rejects_without_re_edit(tmp_path):
     provider = FakeProvider()
     store, bundle = setup(tmp_path, provider)
@@ -119,6 +165,31 @@ def test_deterministic_failure_rejects_without_re_edit(tmp_path):
     blob.write_bytes(png((1280, 720), color=(0, 0, 0)))  # tampered after generation
     gate = run(tmp_path, provider, lambda gw: gate_reference(gw, store, bundle, rec.id))
     assert gate.state == "rejected" and gate.deterministic[0]["answer"] == "fail"
+    assert gate.gateDecision.modelCall.outcome == "blocked" and provider.count("gemini-decision-1") == 0
+
+
+@pytest.mark.parametrize("permission", ["forbidden", "unlisted", "missing_result"])
+def test_gate_rejects_legacy_edit_with_unpermitted_or_missing_destination(tmp_path, permission):
+    provider = FakeProvider()
+    store, bundle = setup(tmp_path, provider)
+    data = bundle.model_dump(mode="json")
+    if permission == "missing_result":
+        for operation in bundle.streetEdit.operations:
+            if operation.op == "modify":
+                del data["operationResults"][operation.id]
+    else:
+        permissions = bundle.streetEdit.permissions
+        data["streetEdit"]["permissions"] = Permissions(
+            allowed=[kind for kind in permissions.allowed if kind != "bike_lane"],
+            forbidden=[*permissions.forbidden, *(["bike_lane"] if permission == "forbidden" else [])]
+        ).model_dump(mode="json")
+    # These old bundles still satisfy StreetEdit's source-target contract; the gate must recheck results.
+    legacy = EditBundle.model_validate(data)
+    provider.images, provider.decisions = [png()], [answers()]
+    reference = run(tmp_path, provider, lambda gw: generate_reference(gw, store, legacy, style="photoreal"))
+    gate = run(tmp_path, provider, lambda gw: gate_reference(gw, store, legacy, reference.id))
+    assert gate.state == "rejected" and gate.gateDecision.effect == "block_world_creation"
+    assert next(c for c in gate.deterministic if c["name"] == "permissions")["answer"] == "fail"
     assert gate.gateDecision.modelCall.outcome == "blocked" and provider.count("gemini-decision-1") == 0
 
 
