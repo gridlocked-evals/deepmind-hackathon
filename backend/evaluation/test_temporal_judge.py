@@ -286,3 +286,9 @@ def test_window_survives_frames_arriving_before_judge_runs():
         assert tj.windows[0].error is None and tj.windows[0].answers
         assert [p for p in judge.calls[0]["input"] if p["type"] == "image"] == [IMAGE] * 4
     asyncio.run(run())
+
+
+def test_nan_ambiguity_fails_closed():
+    # A confident NaN ambiguity answer must not let confident "no violation" answers count as safe.
+    nan = answers() | {"ambiguous": noul(float("nan"))}
+    assert set(classify(nan, Params()).values()) == {UNKNOWN}

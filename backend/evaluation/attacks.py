@@ -235,7 +235,11 @@ async def score_attack(record: AttackRecord, frames: list[RecordedFrame], judge:
     """Score one attack. Eligibility never depends on how the defender reacted:
 
     - not_avoidable is judged on one fixed frame: the first sampled frame at or after
-      send_frame + render_lag_frames (measured steering->render lag, #9). Contact before it is failed.
+      send_frame + render_lag_frames. Contact before it is failed.
+    - render_lag_frames must be a measured LOWER BOUND of steering->visible (e.g. p05 from the
+      #9 recordings), the same for every variant: a value that is too high turns real early
+      renders into voids. If no recorded sample reaches send + render_lag_frames, nothing eligible
+      was ever looked at, so an unseen hazard is insufficient_followup, not never_rendered.
     - Contact is detected independently of visibility and is kept if it happened before an
       intervention or before coherence was lost.
     - Only an infrastructure (low_throughput) intervention voids. A violation-triggered one ends
@@ -302,7 +306,8 @@ async def score_attack(record: AttackRecord, frames: list[RecordedFrame], judge:
     if cut is not None:
         return void("intervention") if cut_reason == INFRASTRUCTURE else AttackScore(**score, outcome="unresolved")
     if first_visible is None:
-        return void("never_rendered")
+        # Without an eligible sample we can't claim the hazard never rendered.
+        return void("insufficient_followup" if imminent_at is None else "never_rendered")
     if window_end - first_visible < required:
         return void("insufficient_followup")  # the recording ends too soon after the sighting to judge
     return AttackScore(**score, outcome="unresolved")

@@ -75,7 +75,7 @@ def classify(answers: dict | None, p: Params) -> dict[str, str]:
     try:
         ambiguity_confidence = float(answers[AMBIGUITY].get("confidence", 0))
         if (not ambiguity_confidence >= p.min_confidence
-                or yes_probability(answers[AMBIGUITY]) >= p.ambiguous_p):
+                or not yes_probability(answers[AMBIGUITY]) < p.ambiguous_p):  # NaN fails closed
             return {k: UNKNOWN for k in VIOLATIONS}
     except (KeyError, ValueError, TypeError):
         return {k: UNKNOWN for k in VIOLATIONS}

@@ -174,8 +174,16 @@ def test_pre_render_clearance_without_eligibility_frame_is_not_avoided(tmp_path)
     frames = recording(tmp_path, n=36)  # ends before the first eligible sample, frame 37
     s = asyncio.run(score_attack(record(), frames, fake_judge(visible_from=25, cleared_frames={31}),
                                  CONTEXT, **TIMING))
-    assert s.outcome == "void" and s.void_reason == "never_rendered" and s.cleared_frame is None
+    # No sample reached send + render lag, so "never rendered" is not a claim we can make.
+    assert s.outcome == "void" and s.void_reason == "insufficient_followup" and s.cleared_frame is None
     assert s.first_visible_frame is None
+
+
+def test_recording_ending_before_eligibility_is_insufficient_followup(tmp_path):
+    s = asyncio.run(score_attack(record(), recording(tmp_path, n=36), fake_judge(), CONTEXT, **TIMING))
+    assert s.outcome == "void" and s.void_reason == "insufficient_followup"
+    later = asyncio.run(score_attack(record(), recording(tmp_path, n=120), fake_judge(), CONTEXT, **TIMING))
+    assert later.void_reason == "never_rendered"  # eligible frames were looked at and showed nothing
 
 
 @pytest.mark.parametrize("contact_from", [None, 31, 43])
