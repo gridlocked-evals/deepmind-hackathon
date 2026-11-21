@@ -105,7 +105,7 @@ class HTTPAdapter:
                         delay = delay if math.isfinite(delay) else 0
                     except ValueError:
                         delay = 0
-                    raise GatewayError(code, retryable=status in (429, 502, 503, 504), retry_after=max(0, delay))
+                    raise GatewayError(code, retryable=status in (429, 502, 503, 504), retry_after=max(0, delay), status=status)
                 data = bytearray()
                 async for chunk in response.aiter_bytes():
                     data.extend(chunk)
@@ -243,8 +243,8 @@ class GenieAdapter:
                 raise GatewayError(ErrorCode.INVALID_OUTPUT)
         except BaseException as exc:
             error = exc
-            # An explicit rejected create cannot have opened a session.
-            if not identifier and isinstance(exc, GatewayError) and exc.code in (ErrorCode.AUTH, ErrorCode.QUOTA):
+            # An explicit rejected (4xx) create cannot have opened a session.
+            if not identifier and isinstance(exc, GatewayError) and 400 <= (exc.status or 0) < 500:
                 create_started = False
         finally:
             if identifier and not confirmed:

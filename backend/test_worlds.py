@@ -70,7 +70,7 @@ async def harness(tmp_path, *, stream=None, fail=None, limits=None, config_chang
                                   json={"status": "cancelled", "usage": USAGE})
         if fail == "create_timeout":
             raise httpx.ReadTimeout("hidden " + KEY)
-        return httpx.Response(429 if fail == "quota" else 200, json={"id": "world-1"})
+        return httpx.Response(429 if fail == "quota" else 400 if fail == "rejected" else 200, json={"id": "world-1"})
 
     @asynccontextmanager
     async def connect(key, identifier, timeout):
@@ -189,7 +189,7 @@ def test_stop_paths_release_and_terminate(tmp_path, reason):
     asyncio.run(run())
 
 
-@pytest.mark.parametrize("failure", ["connect", "quota", "create_timeout", "cancel"])
+@pytest.mark.parametrize("failure", ["connect", "quota", "rejected", "create_timeout", "cancel"])
 def test_failures_cancel_or_visibly_block_new_worlds(tmp_path, failure):
     async def run():
         async with harness(tmp_path, stream=Stream(complete=False), fail=failure) as (manager, _, requests):
