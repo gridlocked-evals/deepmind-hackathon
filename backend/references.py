@@ -174,7 +174,7 @@ async def _generate(gateway, store, bundle, *, style, feedback, allow_experiment
     domain = [frame["frameSha256"], edit_hash, *([bundle.captureMediaSha256] if bundle.captureMediaSha256 else [])]
     prompt = build_prompt(bundle, style, feedback)
     context = CallContext(episode_id=bundle.captureId, prompt_id=PROMPT_ID, capture_id=bundle.captureId,
-                          source_id=bundle.captureId, purpose=purpose)
+                          source_id=bundle.sourceId or bundle.captureId, purpose=purpose)
     record_id = new_id("ref")
     base = dict(id=record_id, streetEditId=edit.id, captureId=bundle.captureId, style=style,
                 styleStatus=STYLES[style]["status"], attempt=len(previous) + 1, feedback=feedback,

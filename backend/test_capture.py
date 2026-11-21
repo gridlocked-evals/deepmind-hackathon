@@ -5,6 +5,7 @@ from pathlib import Path
 import os
 import shutil
 import subprocess
+import sys
 import threading
 
 import pytest
@@ -75,10 +76,15 @@ def record(seconds, **kw):
     return rec, cam, clock
 
 
+def fake_probe(path):
+    return {"frames": 1 if path.suffix != ".ts" else 30, "width": 640, "height": 352,
+            "duration": 0.0 if path.suffix != ".ts" else 2.0}
+
+
 @pytest.fixture
 def store(tmp_path):
     return CaptureStore(root=tmp_path / "captures", clock=FakeClock(),
-                        probe=lambda path: {"frames": 15 * 120, "width": 640, "height": 352, "duration": 120.0})
+                        probe=fake_probe)
 
 
 def test_parse_master_and_media_playlists():
@@ -158,9 +164,9 @@ def test_gaps_and_short_media_reject_truncation(store):
     asyncio.run(rec.poll_once())
     with pytest.raises(TruncatedCapture, match="gap"):
         store.create_hls_episode(rec, seconds_ago=8, duration_s=8)
-    short = CaptureStore(root=store.root.parent / "short", probe=lambda p: {"frames": 30, "width": 1, "height": 1, "duration": 2.0})
+    short = CaptureStore(root=store.root.parent / "short", probe=lambda p: {"frames": 30, "width": 1, "height": 1, "duration": 0.5})
     rec, _, _ = record(30)
-    with pytest.raises(TruncatedCapture, match="Decoded media is shorter"):
+    with pytest.raises(TruncatedCapture, match="Decoded media duration disagrees"):
         short.create_hls_episode(rec, seconds_ago=20, duration_s=10)
     assert not any(short.root.iterdir())
 
@@ -217,9 +223,19 @@ def test_holdout_is_isolated_from_model_inputs(store):
     assert store.capture_contract(m["id"]).durationS == m["files"]["prefix"]["durationS"]
 
 
+def test_legacy_readonly_pins_can_be_updated_without_changing_evidence(store):
+    recorder, _, _ = record(20)
+    manifest = store.create_hls_episode(recorder, 10, 6)
+    directory = store.root / manifest['id']
+    (directory / 'pins.json').chmod(0o444)
+    assert store.pin(manifest['id'], 'job-retained') == ['job-retained']
+    assert store.get(manifest['id'], verify=True) == manifest
+    assert (directory / 'manifest.json').stat().st_mode & 0o222 == 0
+
+
 def test_pins_survive_cleanup_and_restart(tmp_path):
     root = tmp_path / "captures"
-    probe = lambda p: {"frames": 1800, "width": 640, "height": 352, "duration": 120.0}
+    probe = fake_probe
     clock = FakeClock()
     store = CaptureStore(root=root, budget_bytes=10**9, clock=clock, probe=probe)
     rec, _, _ = record(40)
@@ -238,7 +254,7 @@ def test_pins_survive_cleanup_and_restart(tmp_path):
 
 def test_pin_cannot_land_between_eviction_check_and_delete(tmp_path):
     root = tmp_path / "captures"
-    probe = lambda p: {"frames": 1800, "width": 640, "height": 352, "duration": 120.0}
+    probe = fake_probe
     clock = FakeClock()
     store = CaptureStore(root=root, budget_bytes=10**9, clock=clock, probe=probe)
     rec, _, _ = record(40)
@@ -279,7 +295,7 @@ def test_pin_cannot_land_between_eviction_check_and_delete(tmp_path):
 def test_pin_cannot_land_on_new_episode_before_its_fit_check(tmp_path, monkeypatch):
     import backend.capture as capture
     root = tmp_path / "captures"
-    probe = lambda p: {"frames": 1800, "width": 640, "height": 352, "duration": 120.0}
+    probe = fake_probe
     clock = FakeClock()
     store = CaptureStore(root=root, budget_bytes=10**9, clock=clock, probe=probe)
     rec, _, _ = record(40)
@@ -322,7 +338,7 @@ def test_pin_cannot_land_on_new_episode_before_its_fit_check(tmp_path, monkeypat
 
 def test_create_rejected_when_pinned_episodes_fill_budget(tmp_path):
     root = tmp_path / "captures"
-    probe = lambda p: {"frames": 1800, "width": 640, "height": 352, "duration": 120.0}
+    probe = fake_probe
     clock = FakeClock()
     store = CaptureStore(root=root, budget_bytes=10**9, clock=clock, probe=probe)
     rec, _, _ = record(40)
@@ -338,7 +354,7 @@ def test_create_rejected_when_pinned_episodes_fill_budget(tmp_path):
 
 def test_rejected_create_does_not_evict_unpinned_episodes(tmp_path):
     root = tmp_path / "captures"
-    probe = lambda p: {"frames": 1800, "width": 640, "height": 352, "duration": 120.0}
+    probe = fake_probe
     clock = FakeClock()
     store = CaptureStore(root=root, budget_bytes=10**9, clock=clock, probe=probe)
     rec, _, _ = record(40)
@@ -354,37 +370,82 @@ def test_rejected_create_does_not_evict_unpinned_episodes(tmp_path):
     assert sorted(m["id"] for m in store.list()) == sorted([pinned, unpinned])
 
 
-def test_capture_contract_valid_without_probe(tmp_path):
+@pytest.mark.parametrize("damage", ["json", "hash"])
+def test_retained_invalid_manifest_is_not_reclaimable_capture_capacity(store, damage):
+    rec, _, _ = record(40)
+    old = store.create_hls_episode(rec, seconds_ago=20, duration_s=10)["id"]
+    manifest = store.root / old / "manifest.json"
+    original = manifest.read_text()
+    manifest.chmod(0o644)
+    manifest.write_text("!" + original[1:] if damage == "json" else original.replace(CAMERA, OTHER))
+    assert store.pins(old) == []
+    with pytest.raises(CaptureError):
+        store.get(old)
+    before = store.usage_bytes()
+    store.budget_bytes = before + 100  # Either capture fits alone, but both do not.
+    with pytest.raises(CaptureError, match="budget"):
+        store.create_hls_episode(rec, seconds_ago=20, duration_s=10)
+    assert store.usage_bytes() == before
+    assert [path.name for path in store.root.iterdir()] == [old]
+    assert manifest.read_text() != original
+
+
+def test_rejected_capture_preserves_valid_episode_when_damaged_retention_fills_budget(store):
+    rec, _, _ = record(40)
+    damaged = store.create_hls_episode(rec, seconds_ago=20, duration_s=10)["id"]
+    store.clock.now += timedelta(seconds=1)
+    valid = store.create_hls_episode(rec, seconds_ago=20, duration_s=10)["id"]
+    manifest = store.root / damaged / "manifest.json"
+    original = manifest.read_text()
+    manifest.chmod(0o644)
+    manifest.write_text(original.replace(CAMERA, OTHER))
+    store.budget_bytes = store.usage_bytes() - 1
+    store.clock.now += timedelta(seconds=1)
+    with pytest.raises(CaptureError, match="budget"):
+        store.create_hls_episode(rec, seconds_ago=20, duration_s=10)
+    assert sorted(path.name for path in store.root.iterdir()) == sorted([damaged, valid])
+    assert store.get(valid, verify=True)["id"] == valid
+
+
+def test_capture_rejected_without_successful_probe(tmp_path):
     store = CaptureStore(root=tmp_path / "c", probe=lambda p: None)
     rec, _, _ = record(20)
-    m = store.create_hls_episode(rec, seconds_ago=10, duration_s=6)
-    capture = store.capture_contract(m["id"])
-    assert capture.frameCount is None and any(u.field == "frames" for u in capture.unknowns)
-    Capture.model_validate(capture.model_dump(mode="json"))
+    with pytest.raises(TruncatedCapture, match="required decoded"):
+        store.create_hls_episode(rec, seconds_ago=10, duration_s=6)
+    assert not list(store.root.iterdir())
 
 
 @pytest.mark.skipif(not (shutil.which("ffmpeg") and shutil.which("ffprobe")), reason="ffmpeg not installed")
 def test_real_ts_segments_are_probed(tmp_path):
     segs = []
-    for i in range(3):
+    for i in range(6):
         out = tmp_path / f"s{i}.ts"
         subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i", f"testsrc=size=352x240:rate=15:duration=2",
                         "-c:v", "libx264", "-g", "15", "-output_ts_offset", str(2 * i), "-f", "mpegts", str(out)], check=True)
         segs.append(out.read_bytes())
     clock = FakeClock()
     cam = FakeCamera(clock)
-    cam.body = lambda seq: segs[seq % 3]
+    cam.body = lambda seq: segs[seq % len(segs)]
     rec = HlsRecorder(CAMERA, cam, clock=clock)
 
     async def run():
         await rec.poll_once()
-        cam.advance(); await rec.poll_once()
-        cam.advance(); await rec.poll_once()
+        for _ in range(5):
+            cam.advance()
+            await rec.poll_once()
     asyncio.run(run())
     store = CaptureStore(root=tmp_path / "captures")
-    m = store.create_hls_episode(rec, seconds_ago=6, duration_s=6)
+    m = store.create_hls_episode(rec, seconds_ago=12, duration_s=12, holdout_s=2)
     assert (m["width"], m["height"]) == (352, 240)
-    assert 80 <= m["frameCount"] <= 95 and 14 <= m["effectiveFps"] <= 16
+    assert m["frameCount"] == 150 and m["effectiveFps"] == 15
+    assert m["auditedPrefixDurationS"] == pytest.approx(10)
+    assert m["auditedTotalDurationS"] == pytest.approx(12)
+    assert m["segments"]["holdout"][0]["frameCount"] == 30
+    # Actual held-out decode must fail even though the >8-second prefix is valid.
+    rec.segments[-1].data = b"not decodable TS"
+    rec.segments[-1].sha = sha256(rec.segments[-1].data)
+    with pytest.raises(TruncatedCapture):
+        store.create_hls_episode(rec, seconds_ago=12, duration_s=12, holdout_s=2)
 
 
 def test_api_flow(tmp_path, monkeypatch):
@@ -398,6 +459,7 @@ def test_api_flow(tmp_path, monkeypatch):
         class Running:
             def done(self):
                 return False
+        app.state.captures.probe = fake_probe
         app.state.recorders.items[CAMERA] = (rec, Running())  # injected recorder; no network
         ok = client.post("/api/captures", json={"cameraId": CAMERA, "secondsAgo": 30, "durationS": 12, "holdoutS": 4})
         assert ok.status_code == 200, ok.text
@@ -410,5 +472,206 @@ def test_api_flow(tmp_path, monkeypatch):
         too_far = client.post("/api/captures", json={"cameraId": CAMERA, "secondsAgo": 90, "durationS": 10})
         assert too_far.status_code == 409
         assert client.post("/api/captures", json={"cameraId": CAMERA, "secondsAgo": 30, "durationS": 121}).status_code == 422
-        assert client.get("/api/captures/cap_missing-1").status_code == 400
+        assert client.get("/api/captures/cap_missing-1").status_code == 404
         del app.state.recorders.items[CAMERA]
+
+
+def test_decoded_total_cap_includes_holdout(tmp_path):
+    rec, _, _ = record(140)
+    probe = lambda p: {**fake_probe(p), "duration": 2.1}
+    store = CaptureStore(tmp_path / "captures", probe=probe)
+    with pytest.raises(TruncatedCapture, match="120-second"):
+        store.create_hls_episode(rec, seconds_ago=120, duration_s=120, holdout_s=20)
+    assert not list(store.root.iterdir())
+
+
+def test_holdout_must_decode_even_when_prefix_is_valid(tmp_path):
+    rec, _, _ = record(20)
+    store = CaptureStore(tmp_path / "captures", probe=lambda p: None if "holdout" in p.name else fake_probe(p))
+    with pytest.raises(TruncatedCapture, match="required decoded"):
+        store.create_hls_episode(rec, seconds_ago=10, duration_s=10, holdout_s=4)
+    assert not list(store.root.iterdir())
+
+
+def test_changed_buffer_revision_cannot_shift_selected_moment(store):
+    rec, cam, _ = record(20)
+    history = rec.status()["history"]
+    assert history["segmentBoundariesS"] == list(range(0, 21, 2))
+    cam.advance()
+    asyncio.run(rec.poll_once())
+    with pytest.raises(HistoryUnavailable, match="buffer changed"):
+        store.create_hls_episode(rec, 10, 6, buffer_revision=history["bufferRevision"])
+    current = rec.status()["history"]
+    assert store.create_hls_episode(rec, 10, 6, buffer_revision=current["bufferRevision"])["totalDurationS"] == 6
+
+
+def test_prefix_playlist_and_segments_never_read_holdout(store):
+    rec, _, _ = record(20)
+    manifest = store.create_hls_episode(rec, 10, 10, holdout_s=4)
+    episode = manifest["id"]
+    holdout = store.root / episode / manifest["files"]["holdout"]["path"]
+    holdout.chmod(0o644)
+    holdout.write_bytes(b"damaged suffix must never be read by prefix consumers")
+    playlist = store.prefix_playlist(episode)
+    assert playlist.count("#EXTINF:2.000000,") == 3
+    assert "holdout" not in playlist and playlist.endswith("#EXT-X-ENDLIST\n")
+    assert b"".join(store.prefix_segment(episode, index) for index in range(3)) == store.model_input(episode)[0].read_bytes()
+    with pytest.raises(AccessDenied):
+        store.prefix_segment(episode, 3)
+    path = store.model_input(episode)[0]
+    path.chmod(0o644)
+    path.write_bytes(b"bad")
+    with pytest.raises(CaptureError, match="no longer matches"):
+        store.prefix_playlist(episode)
+
+
+@pytest.mark.parametrize("damage", ["missing", "json", "shape"])
+def test_missing_or_corrupt_pin_ledger_preserves_episode(store, damage):
+    rec, _, _ = record(20)
+    episode = store.create_hls_episode(rec, 10, 6)["id"]
+    path = store.root / episode / "pins.json"
+    path.chmod(0o644)
+    if damage == "missing":
+        path.unlink()
+    else:
+        path.write_text("{" if damage == "json" else '{}')
+    restarted = CaptureStore(store.root, budget_bytes=1, probe=fake_probe)
+    assert restarted.enforce_budget() == []
+    assert restarted.pins(episode) == ["capture-recovered-retention"]
+    assert restarted.model_input(episode)[0].exists()
+
+
+@pytest.mark.parametrize("damage", ["json", "metadata", "path", "symlink"])
+def test_manifest_and_path_integrity_rejects_damage(store, damage):
+    rec, _, _ = record(20)
+    manifest = store.create_hls_episode(rec, 10, 6)
+    path = store.root / manifest["id"] / "manifest.json"
+    path.chmod(0o644)
+    if damage == "json":
+        path.write_text("{")
+    elif damage == "symlink":
+        media = store.root / manifest["id"] / manifest["files"]["prefix"]["path"]
+        saved = media.with_name("source.ts")
+        media.rename(saved)
+        try:
+            media.symlink_to(saved)
+        except OSError as exc:
+            if getattr(exc, "winerror", None) == 1314:
+                pytest.skip("This Windows account cannot create symbolic links")
+            raise
+    else:
+        if damage == "metadata":
+            manifest["cameraId"] = OTHER
+        else:
+            manifest["files"]["prefix"]["path"] = "../escape.ts"
+            manifest["manifestSha256"] = store._manifest_hash(manifest)
+        path.write_text(json.dumps(manifest))
+    with pytest.raises(CaptureError) as error:
+        store.model_input(manifest["id"])
+    assert error.value.status == 409
+
+
+def test_probe_output_and_process_lifetime_are_bounded():
+    from backend.capture import _bounded_probe
+    with pytest.raises(TruncatedCapture, match="output limit"):
+        _bounded_probe([sys.executable, "-c", "import sys; sys.stdout.write('x'*100000)"])
+    with pytest.raises(TruncatedCapture, match="time limit"):
+        _bounded_probe([sys.executable, "-c", "import os,time; os.close(1); os.close(2); time.sleep(10)"], timeout=.1)
+
+
+def test_probe_does_not_need_pipe_selectors_or_nonblocking_pipes(monkeypatch):
+    # Windows cannot select() on pipes or set them non-blocking; the probe must not rely on either.
+    import selectors
+    from backend.capture import _bounded_probe
+
+    def unsupported(*_args, **_kwargs):
+        raise OSError("unsupported on Windows pipes")
+    monkeypatch.setattr(selectors, "DefaultSelector", unsupported)
+    monkeypatch.setattr(os, "set_blocking", unsupported)
+    assert _bounded_probe([sys.executable, "-c", "import sys; sys.stdout.write('ok'*1000)"]) == b"ok" * 1000
+    with pytest.raises(TruncatedCapture, match="decoded completely"):
+        _bounded_probe([sys.executable, "-c", "import sys; sys.stderr.write('bad')"])
+
+
+def test_real_decode_failure_and_bad_snapshot_are_rejected(tmp_path):
+    store = CaptureStore(tmp_path / "captures")
+    with pytest.raises(TruncatedCapture):
+        store.create_snapshot_episode("dot-test", b"\xff\xd8\xffbroken", "image/jpeg", T0, "https://example.invalid")
+    rec, _, _ = record(20)
+    with pytest.raises(TruncatedCapture):
+        store.create_hls_episode(rec, 10, 6)
+    assert not list(store.root.iterdir())
+
+
+def test_low_cadence_is_explicit(store):
+    store.probe = lambda p: {**fake_probe(p), "frames": 4}
+    rec, _, _ = record(20)
+    manifest = store.create_hls_episode(rec, 10, 6)
+    assert manifest["effectiveFps"] == 2 and "low_effective_cadence" in manifest["labels"]
+
+
+def test_sequence_rollback_becomes_unavailable(store):
+    rec, cam, _ = record(20)
+    sealed = store.create_hls_episode(rec, 10, 6)
+    cam.seq = 0
+    for _ in range(3):
+        asyncio.run(rec.poll_once())
+    assert rec.availability() == "unavailable"
+    assert "fresh recording" in rec.status()["lastError"]
+    assert store.model_input(sealed["id"])[0].exists()
+
+
+def test_retained_playback_http_shape_and_snapshot_rejection(store):
+    from fastapi import FastAPI
+    from backend.capture_api import router
+    app = FastAPI()
+    app.include_router(router)
+    app.state.captures = store
+    rec, _, _ = record(20)
+    manifest = store.create_hls_episode(rec, 10, 10, holdout_s=4)
+    episode = manifest["id"]
+    with TestClient(app) as client:
+        playlist = client.get(f"/api/captures/{episode}/index.m3u8")
+        assert playlist.status_code == 200
+        assert playlist.headers["content-type"] == "application/vnd.apple.mpegurl"
+        assert playlist.headers["cache-control"] == "private, no-store"
+        urls = [line for line in playlist.text.splitlines() if line.startswith("/api/")]
+        assert len(urls) == 3
+        assert b"".join(client.get(url).content for url in urls) == client.get(f"/api/captures/{episode}/media").content
+        assert client.get(f"/api/captures/{episode}/segments/3").status_code == 403
+        snapshot = store.create_snapshot_episode("dot-123", b"\xff\xd8\xffx", "image/jpeg", T0, "https://example.invalid")
+        assert client.get(f"/api/captures/{snapshot['id']}/index.m3u8").status_code == 422
+
+
+def test_capture_admission_is_bounded_and_released_after_failure(store):
+    rec, _, _ = record(20)
+    store._admission.acquire()
+    store._admission.acquire()
+    try:
+        with pytest.raises(CaptureError) as error:
+            store.create_hls_episode(rec, 10, 6)
+        assert error.value.status == 503
+    finally:
+        store._admission.release()
+        store._admission.release()
+    store.probe = lambda p: None
+    for _ in range(3):
+        with pytest.raises(TruncatedCapture):
+            store.create_hls_episode(rec, 10, 6)
+    store.probe = fake_probe
+    assert store.create_hls_episode(rec, 10, 6)["totalDurationS"] == 6
+
+
+def test_stop_retains_buffer_and_restart_begins_fresh():
+    from backend.capture_api import Recorders
+    rec, _, _ = record(20)
+    async def scenario():
+        recorders = Recorders()
+        task = asyncio.create_task(asyncio.sleep(60))
+        recorders.items[CAMERA] = (rec, task)
+        await recorders.stop(CAMERA)
+        assert recorders.get(CAMERA) is rec and rec.buffered_seconds() == 20
+        fresh = recorders.start(CAMERA, None)  # scheduled task is cancelled before any transport
+        assert fresh is not rec and fresh.buffered_seconds() == 0
+        await recorders.stop_all()
+    asyncio.run(scenario())

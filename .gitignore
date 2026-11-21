@@ -8,6 +8,7 @@ __pycache__/
 .env
 .env.*
 !.env.example
+data/
 var/
 .gateway/
 gateway.local.json

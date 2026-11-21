@@ -83,7 +83,8 @@ does not execute arbitrary code or register executable event handlers.
 
 ## Trace, comparison and replay
 
-`gridlocked-driver-trace.v1` provides the export foundation requested in #60:
+**Export trace** in Scenario Lab downloads `gridlocked-driver-trace.v1`, which
+extends the merged #60 action-trace workflow with the event and replay data:
 
 - Synthetic provenance, live-model versus fixture label, run/scenario/route
   identity, scene seed and version, complete event plan and configured bounds.
@@ -95,6 +96,15 @@ does not execute arbitrary code or register executable event handlers.
   records, and the first observation in which an event affected the model input.
 - A real terminal reason: route completion, decision limit, interruption, reset,
   or error. An interrupted pending request has no fabricated response.
+
+New completed exports include the compatible `gridlocked-driver-trace/1` action
+trace under `driverTrace`. The existing **Download trace (JSON)** button still
+downloads that compact format separately. Its effective leader/signal guards,
+partial-hold finalization and redacted errors are preserved. Scenario Lab's
+controller counts also include target-speed constraints and route shaping;
+these differ from the compact trace's guards that changed applied motion.
+Use the extended Scenario Lab export for **Import scenario / replay**; the
+compact action trace does not contain recorded scene frames.
 
 Exports include no gateway credentials or provider response bodies. Model
 reaction means a braking/stopping or reduced-speed proposal after receiving the

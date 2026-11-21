@@ -1,13 +1,17 @@
 import asyncio
 import json
+import re
 
 import pytest
+from pydantic import ValidationError
 
+from backend.evaluation import manifest as manifest_module
 from backend.evaluation.attacks import AttackRecord, AttackScore, AttackScript, AttackType, save_suite
-from backend.evaluation.manifest import Episode, FinalRun, HoldoutError, Manifest, ResultsLedger, lock
-from backend.evaluation.repair import (ChoiceField, NumberField, RepairSession, RepairSurface, RepairTrial,
-                                       ScoredEpisode, TextField, build_packet)
-from backend.gateway.contracts import CallContext, CallResult, digest
+from backend.evaluation.manifest import (Episode, FinalRun, HoldoutError, Manifest, ResultsLedger, add_fresh_capture, lock,
+                                           opened_marker)
+from backend.evaluation.repair import (ChoiceField, ComparisonPlan, NumberField, PlanSlot, RepairSession, RepairSurface, RepairTrial,
+                                       ScoredEpisode, TextField, build_packet, plan_path, register_plan)
+from backend.gateway.contracts import CallContext, CallResult, canonical, digest
 
 CONTEXT = CallContext(episode_id="d1", prompt_id="repair-v1")
 SURFACE = RepairSurface(fields={"brake_lead_s": NumberField(min=.5, max=3), "mode": ChoiceField(options=("calm", "alert")),
@@ -25,12 +29,12 @@ def ep(episode_id, split="dev", camera="cam1"):
                    window_id="w1", duration_s=60, split=split)
 
 
-def scored(episode, script, outcome, actions=(), *, comparison_id="replicate-1", session_id=None):
+def scored(episode, script, outcome, actions=(), *, replicate=0, session_id=None):
     record = AttackRecord(script=script, session_id=session_id or episode.episode_id, send_frame=script.trigger_frame,
                           source="adaptive" if episode.split == "dev" else "frozen")
     score = AttackScore(record=record, outcome=outcome, first_visible_frame=60, contact_frame=80 if outcome == "failed" else None,
                         lead_frames=20, required_lead_frames=36, sample_every=6, window_end=300)
-    return ScoredEpisode(episode=episode, comparison_id=comparison_id, score=score, defender_actions=actions)
+    return ScoredEpisode(episode=episode, replicate=replicate, score=score, defender_actions=actions)
 
 
 DEV = ep("d1")
@@ -87,8 +91,8 @@ def test_unseen_hazard_and_send_timing_stay_out_of_packet():
     script = AttackScript(attack_type=PED, steering_text=DEV_TEXT, trigger_frame=24)
     record = AttackRecord(script=script, session_id="d1", send_frame=24, source="adaptive")
     unseen = dict(record=record, required_lead_frames=36, sample_every=6, window_end=264)  # 264 = send + window
-    never = ScoredEpisode(episode=DEV, comparison_id="never-rendered", score=AttackScore(**unseen, outcome="void", void_reason="never_rendered"))
-    paired = ScoredEpisode(episode=DEV, comparison_id="paired-void", score=AttackScore(**unseen, outcome="unresolved",
+    never = ScoredEpisode(episode=DEV, replicate=0, score=AttackScore(**unseen, outcome="void", void_reason="never_rendered"))
+    paired = ScoredEpisode(episode=DEV, replicate=1, score=AttackScore(**unseen, outcome="unresolved",
                                                           paired_void_reason="never_rendered"))
     packet = build_packet([never, paired], TEST_SUITE)  # also runs check_packet
     for row in packet:
@@ -119,18 +123,28 @@ def test_attempt_cap_and_every_proposal_recorded():
 
 TEST = ep("b1", "test", "cam9")
 HOLDOUT_BEFORE = [scored(TEST, TEST_SUITE[0], "avoided"), scored(TEST, TEST_SUITE[1], "failed")]
-HOLDOUT_AFTER = [scored(TEST, TEST_SUITE[0], "failed"), scored(TEST, TEST_SUITE[1], "failed")]
+HOLDOUT_AFTER = [scored(TEST, s, "failed", session_id="b1-after") for s in TEST_SUITE]  # its own rollout
 
 
-def locked(tmp_path):
+
+def slots(replicates=(0,)):
+    return [i.slot for r in replicates for i in [scored(DEV, DEV_FAIL.score.record.script, "failed", replicate=r)]
+            + [scored(TEST, s, "failed", replicate=r) for s in TEST_SUITE]]
+
+
+def locked(tmp_path, plan=slots()):
+    """Lock the manifest and, unless `plan` is None, register the comparison plan."""
     suite_sha = save_suite(tmp_path / "suite.json", TEST_SUITE)
     manifest = Manifest(episodes=(DEV, TEST), prompts={"p": "a" * 64}, thresholds={}, attack_suite_sha256=suite_sha)
     path = tmp_path / "manifest.json"
-    return path, lock(manifest, path)
+    pinned = lock(manifest, path)
+    if plan is not None:
+        register_plan(path, pinned, tmp_path / "suite.json", plan)
+    return path, pinned
 
 
 def seal(tmp_path, session, run, **override):
-    kwargs = dict(dev_before=[DEV_FAIL], dev_after=[scored(DEV, DEV_FAIL.score.record.script, "avoided")],
+    kwargs = dict(dev_before=[DEV_FAIL], dev_after=[scored(DEV, DEV_FAIL.score.record.script, "avoided", session_id="d1-after")],
                   holdout_before=HOLDOUT_BEFORE, holdout_after=HOLDOUT_AFTER)
     return session.seal(run, tmp_path / "suite.json", **(kwargs | override))
 
@@ -179,9 +193,9 @@ def test_open_holdout_blocks_tuning(tmp_path):
 def test_seal_rejects_cherry_picked_holdout_and_test_dev_scores(tmp_path):
     session = session_for(tmp_path / "manifest.json")
     run = session.open_holdout(*locked(tmp_path))
-    with pytest.raises(ValueError, match="same"):  # dropped the slot that regressed
+    with pytest.raises(ValueError, match="holdout after.*missing"):  # dropped the slot that regressed
         seal(tmp_path, session, run, holdout_after=HOLDOUT_AFTER[1:])
-    with pytest.raises(ValueError, match="same"):  # same count, different slots
+    with pytest.raises(ValueError, match="duplicate: test:b1"):  # same count, different slots
         seal(tmp_path, session, run, holdout_after=[HOLDOUT_AFTER[1], HOLDOUT_AFTER[1]])
     with pytest.raises(ValueError, match="dev-split"):
         seal(tmp_path, session, run, dev_after=[scored(TEST, DEV_FAIL.score.record.script, "avoided")])
@@ -192,18 +206,18 @@ def test_dev_before_after_must_be_paired(tmp_path):
     session = session_for(tmp_path / "manifest.json")
     propose(session, FakeGateway(change("brake_lead_s", 2.0)))
     run = session.open_holdout(*locked(tmp_path))
-    with pytest.raises(ValueError, match="dev before/after"):  # an after-set with the failure dropped
+    with pytest.raises(ValueError, match="dev after must cover"):  # an after-set with the failure dropped
         seal(tmp_path, session, run, dev_after=[])
 
 
 def test_seal_pairs_replicates_across_distinct_runtime_sessions(tmp_path):
     session = session_for(tmp_path / "manifest.json")
-    run = session.open_holdout(*locked(tmp_path))
+    run = session.open_holdout(*locked(tmp_path, slots((0, 1))))
 
     def rows(episode, scripts, variant):
         return [scored(episode, script, "failed" if variant == "before" else "avoided",
-                       comparison_id=replicate, session_id=f"{variant}-{episode.episode_id}-{replicate}")
-                for replicate in ("replicate-1", "replicate-2") for script in scripts]
+                       replicate=replicate, session_id=f"{variant}-{episode.episode_id}-{replicate}")
+                for replicate in (0, 1) for script in scripts]
 
     dev_before, dev_after = (rows(DEV, [DEV_FAIL.score.record.script], variant) for variant in ("before", "after"))
     holdout_before, holdout_after = (rows(TEST, TEST_SUITE, variant) for variant in ("before", "after"))
@@ -219,19 +233,191 @@ def test_seal_pairs_replicates_across_distinct_runtime_sessions(tmp_path):
 def test_seal_rejects_replaced_and_duplicated_replicates(tmp_path):
     session = session_for(tmp_path / "manifest.json")
     run = session.open_holdout(*locked(tmp_path))
-    replaced = [i.model_copy(update={"comparison_id": "different-replicate"}) for i in HOLDOUT_AFTER]
-    with pytest.raises(ValueError, match="same.*comparison"):
+    replaced = [i.model_copy(update={"replicate": 5}) for i in HOLDOUT_AFTER]
+    with pytest.raises(ValueError, match="extra: test:b1.*r5"):
         seal(tmp_path, session, run, holdout_after=replaced)
-    with pytest.raises(ValueError, match="unique"):
+    with pytest.raises(ValueError, match="duplicate"):
         seal(tmp_path, session, run, holdout_before=HOLDOUT_BEFORE * 2, holdout_after=HOLDOUT_AFTER * 2)
     assert not session.sealed
 
 
-def test_comparison_id_is_explicit_not_inferred_from_runtime_session():
+def test_replicate_is_explicit_not_inferred_from_runtime_session():
     data = DEV_FAIL.model_dump()
-    del data["comparison_id"]
-    with pytest.raises(ValueError, match="comparison_id"):
+    del data["replicate"]
+    with pytest.raises(ValueError, match="replicate"):
         ScoredEpisode.model_validate(data)
+
+
+def test_forged_or_relabelled_comparison_id_rejected(tmp_path):
+    with pytest.raises(ValidationError, match="comparison_id"):  # callers cannot supply the id
+        ScoredEpisode.model_validate(DEV_FAIL.model_dump() | {"comparison_id": "replicate-1"})
+    good, regressed = HOLDOUT_AFTER[1], HOLDOUT_AFTER[0]
+    assert good.comparison_id != regressed.comparison_id
+    forged = good.model_copy(update={"comparison_id": regressed.comparison_id})  # bypasses validation: still ignored
+    assert forged.comparison_id == good.comparison_id
+    session = session_for(tmp_path / "manifest.json")
+    run = session.open_holdout(*locked(tmp_path))
+    with pytest.raises(ValueError, match="missing: test:b1/double_parked_truck/r0"):
+        seal(tmp_path, session, run, holdout_after=[forged, good])
+    assert not session.sealed
+
+
+def test_dropping_a_planned_slot_from_both_sides_rejected(tmp_path):
+    session = session_for(tmp_path / "manifest.json")
+    run = session.open_holdout(*locked(tmp_path))
+    truck = str(HOLDOUT_BEFORE[0].slot)
+    with pytest.raises(ValueError, match=f"holdout before .*missing: {re.escape(truck)};"):
+        seal(tmp_path, session, run, holdout_before=HOLDOUT_BEFORE[1:], holdout_after=HOLDOUT_AFTER[1:])
+    with pytest.raises(ValueError, match="dev before .*missing: dev:d1"):
+        seal(tmp_path, session, run, dev_before=[], dev_after=[])
+    assert not session.sealed
+
+
+def test_plan_registered_once_and_frozen_after_final_run(tmp_path):
+    path, pinned = locked(tmp_path, plan=None)
+    suite = tmp_path / "suite.json"
+    with pytest.raises(HoldoutError, match="register the comparison plan"):  # no plan, no holdout
+        session_for(path).open_holdout(path, pinned)
+    with pytest.raises(ValueError, match="frozen-suite"):
+        register_plan(path, pinned, suite, [scored(TEST, DEV_FAIL.score.record.script, "failed").slot])
+    with pytest.raises(ValueError, match="test-split episode"):
+        register_plan(path, pinned, suite, [PlanSlot(split="test", episode_id="d1", script=TEST_SUITE[0], replicate=0)])
+    register_plan(path, pinned, suite, slots())
+    with pytest.raises(FileExistsError):  # written once
+        register_plan(path, pinned, suite, slots()[1:])
+    FinalRun(path, pinned)
+    plan_path(path).unlink()
+    with pytest.raises(HoldoutError, match="already opened"):  # same tripwire as manifest additions
+        register_plan(path, pinned, suite, slots()[1:])
+
+
+def test_edited_plan_file_fails_at_seal(tmp_path):
+    session = session_for(tmp_path / "manifest.json")
+    path, pinned = locked(tmp_path)
+    run = session.open_holdout(path, pinned)
+    plan = json.loads(plan_path(path).read_text())
+    plan["slots"] = [s for s in plan["slots"] if s["script"]["attack_type"] != TRUCK.value]  # drop the regressed slot
+    plan_path(path).write_bytes(canonical(plan))
+    with pytest.raises(ValueError, match="plan changed"):
+        seal(tmp_path, session, run, holdout_before=HOLDOUT_BEFORE[1:], holdout_after=HOLDOUT_AFTER[1:])
+    assert not session.sealed
+
+
+def test_plan_edited_after_another_final_run_is_rejected_at_open(tmp_path):
+    path, pinned = locked(tmp_path)
+    FinalRun(path, pinned)  # someone else opens the holdout and sees the truck regression
+    plan = json.loads(plan_path(path).read_text())
+    plan["slots"] = [s for s in plan["slots"] if s["script"]["attack_type"] != TRUCK.value]
+    plan_path(path).write_bytes(canonical(plan))
+    with pytest.raises(ValueError, match="plan changed"):
+        session_for(path).open_holdout(path, pinned)
+
+
+def test_plan_written_after_a_null_commitment_is_rejected(tmp_path):
+    path, pinned = locked(tmp_path, plan=None)
+    FinalRun(path, pinned)  # opened before any plan existed: the marker commits plan_sha256 = null
+    assert json.loads(opened_marker(path).read_text())["plan_sha256"] is None
+    late = ComparisonPlan(manifest_sha256=pinned, slots=tuple(slots()))  # e.g. a registration that lost the race
+    plan_path(path).write_bytes(canonical(late.model_dump(mode="json")))
+    with pytest.raises(ValueError, match="plan changed after the holdout was opened"):
+        session_for(path).open_holdout(path, pinned)
+
+
+def test_incomplete_test_roster_rejected_at_registration(tmp_path):
+    path, pinned = locked(tmp_path, plan=None)
+    suite = tmp_path / "suite.json"
+    no_truck = [s for s in slots() if s.script != TEST_SUITE[0]]
+    with pytest.raises(ValueError, match="missing: test:b1/double_parked_truck/r0"):
+        register_plan(path, pinned, suite, no_truck)
+    uneven = slots() + [scored(TEST, TEST_SUITE[0], "failed", replicate=1).slot]  # r1 for one script only
+    with pytest.raises(ValueError, match="missing: test:b1/pedestrian_steps_out/r1"):
+        register_plan(path, pinned, suite, uneven)
+    assert not plan_path(path).exists()
+
+
+def test_missing_held_out_episode_rejected_at_registration(tmp_path):
+    suite_sha = save_suite(tmp_path / "suite.json", TEST_SUITE)
+    second = ep("b2", "test", "cam8")
+    path = tmp_path / "manifest.json"
+    pinned = lock(Manifest(episodes=(DEV, TEST, second), prompts={"p": "a" * 64}, thresholds={},
+                           attack_suite_sha256=suite_sha), path)
+    with pytest.raises(ValueError, match="missing: test:b2/"):
+        register_plan(path, pinned, tmp_path / "suite.json", slots())  # covers b1 only
+
+
+def test_runtime_sessions_cannot_be_reused(tmp_path):
+    session = session_for(tmp_path / "manifest.json")
+    run = session.open_holdout(*locked(tmp_path, slots((0, 1))))
+    rep0 = [scored(TEST, s, "failed", replicate=0, session_id="before-0") for s in TEST_SUITE]
+    before = rep0 + [scored(TEST, s, "failed", replicate=1, session_id="before-1") for s in TEST_SUITE]
+    after = [scored(TEST, s, "avoided", replicate=r, session_id=f"after-{r}") for r in (0, 1) for s in TEST_SUITE]
+    dev = dict(dev_before=[scored(DEV, DEV_FAIL.score.record.script, "failed", replicate=r, session_id=f"db{r}") for r in (0, 1)],
+               dev_after=[scored(DEV, DEV_FAIL.score.record.script, "avoided", replicate=r, session_id=f"da{r}") for r in (0, 1)])
+    with pytest.raises(ValueError, match="holdout before and after reuse runtime sessions"):
+        seal(tmp_path, session, run, holdout_before=before, holdout_after=before, **dev)  # before passed as after
+    relabelled = rep0 + [i.model_copy(update={"replicate": 1}) for i in rep0]  # rep0's rollout fills rep1 too
+    with pytest.raises(ValueError, match="holdout before reuses one runtime attack"):
+        seal(tmp_path, session, run, holdout_before=relabelled, holdout_after=after, **dev)
+    assert not session.sealed
+    assert seal(tmp_path, session, run, holdout_before=before, holdout_after=after, **dev).holdout_delta["overall"] == 1
+
+
+def test_symlink_alias_shares_the_freeze(tmp_path):
+    path, pinned = locked(tmp_path, plan=None)
+    alias = tmp_path / "alias.json"
+    try:
+        alias.symlink_to(path)
+    except OSError as error:
+        if getattr(error, "winerror", None) == 1314:
+            pytest.skip("Creating symlinks requires Windows developer mode or administrator privileges")
+        raise
+    FinalRun(path, pinned)
+    with pytest.raises(HoldoutError, match="already opened"):
+        register_plan(alias, pinned, tmp_path / "suite.json", slots())
+
+
+def test_fresh_capture_after_plan_registration_is_refused(tmp_path):
+    path, pinned = locked(tmp_path)  # plan registered for b1 only
+    fresh = Episode(episode_id="fresh", source_id="cam7", provider="nyc_dot", modality="continuous",
+                    source_hashes=(digest(b"fresh"),), window_id="w2", duration_s=60, split="test")
+    with pytest.raises(HoldoutError, match="register the comparison plan after the fresh capture"):
+        add_fresh_capture(path, fresh, pinned)  # would add a held-out episode the plan never covers
+
+
+def test_seal_rechecks_roster_when_fresh_capture_overlaps_registration(tmp_path, monkeypatch):
+    path, pinned = locked(tmp_path, plan=None)
+    fresh = ep("fresh", "test", "cam7")
+    write = manifest_module._write
+
+    def register_before_capture_write(target, updated):
+        # Model registration running after the capture's no-plan check, before its commit.
+        register_plan(path, pinned, tmp_path / "suite.json", slots())
+        write(target, updated)
+
+    with monkeypatch.context() as m:
+        m.setattr(manifest_module, "_write", register_before_capture_write)
+        add_fresh_capture(path, fresh, pinned)
+    session = session_for(path)
+    run = session.open_holdout(path, pinned)
+    assert fresh in run.verify().episodes()
+    with pytest.raises(ValueError, match="test roster .*missing: test:fresh/") as rejected:
+        seal(tmp_path, session, run)  # neither side includes the fresh episode
+    assert all(f"fresh/{script.attack_type.value}/r0" in str(rejected.value) for script in TEST_SUITE)
+    assert not session.sealed
+
+
+def test_complete_fresh_capture_roster_can_seal(tmp_path):
+    path, pinned = locked(tmp_path, plan=None)
+    fresh = ep("fresh", "test", "cam7")
+    add_fresh_capture(path, fresh, pinned)
+    before = [scored(fresh, script, "failed", session_id="fresh-before") for script in TEST_SUITE]
+    after = [scored(fresh, script, "avoided", session_id="fresh-after") for script in TEST_SUITE]
+    register_plan(path, pinned, tmp_path / "suite.json", slots() + [row.slot for row in before])
+    session = session_for(path)
+    run = session.open_holdout(path, pinned)
+    trial = seal(tmp_path, session, run, holdout_before=HOLDOUT_BEFORE + before,
+                 holdout_after=HOLDOUT_AFTER + after)
+    assert trial.holdout_before["overall"]["n"] == trial.holdout_after["overall"]["n"] == 4
 
 
 class GatedGateway(FakeGateway):

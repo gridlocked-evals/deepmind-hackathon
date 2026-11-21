@@ -1,11 +1,31 @@
 # Scenario injection verification — November 21, 2026
 
 Issue #72 is assigned to `tasosger`. Implementation is on the isolated
-`issue-72-crash-scenarios` branch, based on main through `01dc3cf` (including
-the merged Gridlocked driver). These runs use synthetic structured state; they
+`issue-72-crash-scenarios` branch. The live runs below used main through
+`01dc3cf`; integration subsequently incorporated main through `5d813ef`,
+including the Evidence workflow and #60 driver traces. These runs use synthetic structured state; they
 are not camera perception, Genie worlds, learned adaptation or road-safety tests.
 
-## Automated and browser verification
+## Integrated verification before merge
+
+- 106 frontend tests pass, including an interrupted crash fixture that checks
+  matching observations, partial applied holds and effective obstacle guards
+  across both trace formats, plus exact attribution for event IDs sharing a prefix.
+- The full integrated backend suite passes: 500 passed, six skipped. The contract
+  generation check and production build pass; the existing bundle-size advisory remains.
+- The integrated browser loads successfully and exposes Traffic demo, the Gemini
+  scenario controls and the upstream Evidence panel. Merge markers briefly broke
+  the running development page during integration; they were resolved and the
+  page was reloaded and checked before publishing.
+- Upstream partial-hold export ordering, effective guard attribution, nested
+  trace validation and error redaction are retained. Extended scenario exports
+  embed the compatible action trace; both downloads remain available.
+- No additional paid model calls were made for integration. The live results below
+  describe the earlier implementation. Hard-boundary intervention accounting now
+  follows the upstream rule that the boundary must change applied motion; the
+  original exports and their historical counts remain unchanged.
+
+## Earlier automated and browser verification
 
 - 57 frontend tests pass. Added cases exercise validated import, visible
   two-vehicle contact and clearance, sideways obstacles, hidden event schedules,

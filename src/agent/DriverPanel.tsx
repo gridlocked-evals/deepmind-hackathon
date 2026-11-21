@@ -1,4 +1,4 @@
-import { ArrowUpRight, BrainCircuit, Play, Square } from 'lucide-react';
+import { ArrowUpRight, BrainCircuit, Download, Play, Square } from 'lucide-react';
 import { MAX_DRIVER_STEPS } from './types';
 import type { GeminiDriver } from './types';
 import { ScenarioPanel } from '../scenarios/ScenarioPanel';
@@ -11,6 +11,15 @@ export interface DriverPanelProps {
   plan: ScenarioPlan;
   onPlanChange: (plan: ScenarioPlan) => void;
   onReplay: (scene: ScenarioBundle) => void;
+}
+
+function downloadTrace(driver: GeminiDriver) {
+  const trace = driver.exportTrace();
+  if (!trace) return;
+  const url = URL.createObjectURL(new Blob([JSON.stringify(trace, null, 2)], { type: 'application/json' }));
+  const link = Object.assign(document.createElement('a'), { href: url, download: `gridlocked-driver-trace-${trace.run_id}.json` });
+  link.click();
+  setTimeout(() => URL.revokeObjectURL(url), 0);
 }
 
 export function DriverPanel({ driver, onStart, plan, onPlanChange, onReplay }: DriverPanelProps) {
@@ -48,6 +57,7 @@ export function DriverPanel({ driver, onStart, plan, onPlanChange, onReplay }: D
     <div className="driver-controls">
       {driver.active ? <button type="button" className="driver-stop" onClick={driver.stop}><Square size={14} aria-hidden="true" />Stop drive</button>
         : <button type="button" className="driver-start" disabled={!driver.canStart} onClick={() => (onStart ?? driver.start)('event')}><Play size={14} aria-hidden="true" />{driver.hasRun ? 'Restart scenario' : 'Start scenario with Gemini'}</button>}
+      {driver.hasRun && !driver.active && <button type="button" className="driver-retry driver-trace" onClick={() => downloadTrace(driver)}><Download size={14} aria-hidden="true" />Download trace (JSON)</button>}
       <span className="driver-model">{latest?.model_id ?? driver.modelAvailability.modelId ?? 'Server-side Gemini'}</span>
     </div>
     <ScenarioPanel plan={plan} onChange={onPlanChange} driver={driver} onReplay={onReplay} onBaseline={() => (onStart ?? driver.start)('baseline')} />

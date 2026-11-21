@@ -125,16 +125,38 @@ class Annotation(Strict):
     semanticClass: SemanticClass
     time: Span
     region: BoxRegion
+    frameIds: list[str] = Field(min_length=1, max_length=MAX_FRAMES)
     present: Literal["yes", "no", "unknown"]
     count: CountInterval = Field(default_factory=CountInterval)
     state: str | None = Field(default=None, max_length=32)
     note: str = Field(default="", max_length=500)
+
+    @model_validator(mode="after")
+    def semantics(self):
+        if len(self.frameIds) != len(set(self.frameIds)):
+            raise ValueError("Annotation frames must be distinct")
+        if self.kind != "count" and (self.count.lower is not None or self.count.upper is not None):
+            raise ValueError("Only count annotations may contain count bounds")
+        if self.kind == "count" and (self.semanticClass not in ACTORS or self.time.startS != self.time.endS):
+            raise ValueError("Visible counts describe one original frame and an actor class")
+        if self.present != "yes" and (self.count.lower is not None or self.state not in {None, "unknown"}):
+            raise ValueError("Absent or unknown annotations cannot assert a count or state")
+        if self.kind == "signal" and (self.semanticClass != "signal" or self.state not in {None, "unknown", "red", "amber", "green", "off"}):
+            raise ValueError("Invalid annotated signal state")
+        if self.kind == "event" and self.present == "yes" and (self.state not in EVENTS or self.time.startS >= self.time.endS):
+            raise ValueError("Event annotations require a bounded interval and event type")
+        if self.kind in {"anchor", "lane", "crosswalk", "count"} and self.state not in {None, "unknown"}:
+            raise ValueError("Geometry and visible counts do not assert dynamic states")
+        return self
 
 
 class ManualReview(Strict):
     extractionId: str = Field(pattern=r"^extract_[A-Za-z0-9-]{4,64}$")
     captureId: CaptureId
     prefixSha256: Sha256
+    extractionSha256: Sha256
     reviewer: str = Field(min_length=1, max_length=100)
     provenance: Literal["human_annotation"]
+    reviewedOriginalPixels: Literal[True]
+    reviewMode: Literal["independent_raw_pixels", "model_assisted"]
     annotations: list[Annotation] = Field(min_length=1, max_length=100)

@@ -129,6 +129,42 @@ The registry is intentionally process-local: use a single local API worker for
 testing. It is reset by a backend restart and is not a distributed idempotency
 store. The durable gateway ledger continues to enforce spending across calls.
 
+## Trace export
+
+After a run ends, the driver panel shows **Download trace (JSON)**. This applies
+to a completed, decision-limited, stopped, failed or interrupted run. The file
+uses schema `gridlocked-driver-trace/1` (`src/agent/trace.ts`) and is labelled
+`provenance.source: "synthetic_simulator_state"`. It is structured simulator
+state. It is not camera or pixel input, a Hydrogen/Genie visual trace, or a
+Decisions safety score. Each step holds the following:
+
+- the exact observation sent to this endpoint, whose `simulation_time` starts
+  the hold;
+- the request ID and the model's **proposed** decision;
+- the **applied** motion: start and end simulation time, start and end speed,
+  and distance travelled;
+- `guard`: whether the local leader or red-line guard changed the applied
+  motion. The reason is `leader_guard`, `red_line_guard` or `none`, and each
+  event records the simulation time it started.
+
+`terminal.state` is `route_complete`, `decision_limit`, `stopped_by_user`,
+`error` or `interrupted` (the tab was hidden). An `error` carries only the
+server's redacted message or the panel's own fixed text; any other failure,
+such as a non-JSON response, is recorded as "The driving request failed." The
+panel displays that same sanitized error. A
+request still pending when the run ends adds no step, and a hold cut short ends
+at the stop time. A hold stopped before its first physics tick still appears,
+with zero applied motion, because the model's decision was received. The bounds come from the 12-decision and 3-second constants. The
+export carries no credentials or provider data beyond the model ID, request ID
+and decision.
+
+The compact download refers to the latest run and clears when returning to
+replay or changing scene. Scenario Lab also retains the last four completed or
+interrupted runs in this tab, including this action trace under `driverTrace`
+in its extended export. Download before reloading the page. The extended
+[scenario export](SCENARIO_INJECTION.md#trace-comparison-and-replay) includes
+event state and recorded frames for playback; the compact format alone does not.
+
 ## Local setup and provenance
 
 Configure `GEMINI_API_KEY` or `GOOGLE_API_KEY` on the backend only, as documented

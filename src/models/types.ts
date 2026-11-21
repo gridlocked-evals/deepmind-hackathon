@@ -4,6 +4,7 @@ export type CapabilityState = 'configured' | 'unverified' | 'connected' | 'stale
 
 export interface ModelGatewayStatus {
   schema_version: 1;
+  key_profile: 'primary' | 'workshop';
   config_hash: string;
   rates_expired: boolean;
   services: {
@@ -12,6 +13,8 @@ export interface ModelGatewayStatus {
     state: CapabilityState;
     reason: string | null;
     configured: boolean;
+    enabled: boolean;
+    optional: boolean;
     last_request_id: string | null;
     last_provider_request_id: string | null;
     last_latency_ms: number | null;

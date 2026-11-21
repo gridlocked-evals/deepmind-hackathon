@@ -1,10 +1,14 @@
 import type { MutableRefObject } from 'react';
 import type { SimulationFrame } from '../types';
 import type { RunTrace } from '../scenarios/trace';
+import type { DriverTrace } from './trace';
 
 export const MAX_DRIVER_STEPS = 12;
 export const SECONDS_PER_DECISION = 3;
 export const SPEED_LIMIT_MPS = 11.176;
+
+/** Local controller guard that changed applied motion; route/turn shaping is not a guard. */
+export type GuardReason = 'leader_guard' | 'red_line_guard' | 'none';
 
 export interface DriverObservation {
   scenario_id: string;
@@ -64,6 +68,8 @@ export interface GeminiDriver {
   start: (mode?: 'baseline' | 'event') => void;
   stop: () => void;
   reset: () => void;
+  /** The finished run's trace, or null while active / after reset. */
+  exportTrace: () => DriverTrace | null;
   refreshAvailability: () => void;
   inject: (id: string) => void;
   trace: RunTrace | null;

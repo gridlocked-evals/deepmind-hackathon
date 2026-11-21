@@ -22,6 +22,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -81,6 +82,18 @@ class AccessDenied(CaptureError):
     status = 403
 
 
+class CaptureIntegrityError(CaptureError):
+    status = 409
+
+
+class CaptureNotFound(CaptureError):
+    status = 404
+
+
+class CaptureBusy(CaptureError):
+    status = 503
+
+
 # --------------------------------------------------------------- HLS parsing
 
 @dataclass(frozen=True)
@@ -121,6 +134,8 @@ def parse_playlist(text: str, base_url: str) -> MediaPlaylist:
             raise CaptureError("Fragmented-MP4 HLS (EXT-X-MAP) is not supported by the recorder.")
         if line.startswith("#EXT-X-KEY") and "METHOD=NONE" not in line:
             raise CaptureError("Encrypted HLS media is not supported by the recorder.")
+        if line.startswith("#EXT-X-BYTERANGE"):
+            raise CaptureError("Byte-range HLS is not supported by the recorder.")
     target, sequence, segments = 0.0, 0, []
     duration: float | None = None
     program_time: datetime | None = None
@@ -129,10 +144,14 @@ def parse_playlist(text: str, base_url: str) -> MediaPlaylist:
     for line in lines[1:]:
         if line.startswith("#EXT-X-TARGETDURATION:"):
             target = float(line.split(":", 1)[1])
+            if not math.isfinite(target) or not 0 < target <= MAX_EVIDENCE_SECONDS:
+                raise CaptureError("Invalid HLS target duration.")
         elif line.startswith("#EXT-X-MEDIA-SEQUENCE:"):
             sequence = int(line.split(":", 1)[1])
         elif line.startswith("#EXTINF:"):
             duration = float(line.split(":", 1)[1].split(",", 1)[0])
+            if not math.isfinite(duration) or not 0 < duration <= MAX_EVIDENCE_SECONDS:
+                raise CaptureError("Invalid HLS segment duration.")
         elif line.startswith("#EXT-X-PROGRAM-DATE-TIME:"):
             program_time = _parse_time(line.split(":", 1)[1])
         elif line.startswith("#EXT-X-DISCONTINUITY") and not line.startswith("#EXT-X-DISCONTINUITY-SEQUENCE"):
@@ -207,13 +226,15 @@ class HlsRecorder:
                 data, final = await self.fetch(self.media_url)
                 playlist = parse_playlist(data.decode("utf-8-sig"), final)
             self.health.target_duration = playlist.target_duration
+            if self.last_sequence is not None and playlist.segments and playlist.segments[-1].sequence < self.last_sequence:
+                raise CaptureError("Source sequence reset; start a fresh recording.")
             added = 0
             for item in playlist.segments:
                 if self.last_sequence is not None and item.sequence <= self.last_sequence:
                     continue
                 gap = self.last_sequence is not None and item.sequence != self.last_sequence + 1
                 body, _ = await self.fetch(item.uri)
-                if len(body) > MAX_SEGMENT_BYTES:
+                if not body or len(body) > MAX_SEGMENT_BYTES:
                     raise CaptureError("Camera segment exceeded the byte limit.")
                 await self._append(item, body, discontinuity=item.discontinuity or gap)
                 added += 1
@@ -225,7 +246,7 @@ class HlsRecorder:
             return added
         except Exception as exc:  # recorded, never raised into the poll loop
             self.health.consecutive_failures += 1
-            self.health.last_error = str(exc) or exc.__class__.__name__
+            self.health.last_error = str(exc) if isinstance(exc, CaptureError) else "Camera retrieval failed."
             return 0
 
     async def _append(self, item: PlaylistSegment, body: bytes, discontinuity: bool):
@@ -258,6 +279,9 @@ class HlsRecorder:
         self.touched = time.monotonic()
         segs = list(self.segments)
         repeated = sum(s.repeated for s in segs)
+        boundaries = [0.0]
+        for segment in segs:
+            boundaries.append(boundaries[-1] + segment.duration)
         return {
             "cameraId": self.camera_id,
             "coordinates": HLS_SOURCES[self.camera_id]["coordinates"],
@@ -272,16 +296,23 @@ class HlsRecorder:
             "repeatedSegments": repeated,
             "lastError": self.health.last_error,
             # Offsets measure back from the end of the newest buffered segment.
-            "history": {"maxSecondsAgo": round(self.buffered_seconds(), 3), "maxDurationS": MAX_EVIDENCE_SECONDS},
+            "history": {"maxSecondsAgo": round(sum(s.duration for s in segs), 6), "maxDurationS": MAX_EVIDENCE_SECONDS,
+                        "segmentBoundariesS": boundaries, "bufferRevision": self._revision(segs)},
         }
 
-    def select(self, seconds_ago: float, duration_s: float) -> list[Segment]:
+    def _revision(self, segments: list[Segment]) -> str:
+        return sha256(json.dumps([self.camera_id, self.health.started_at.isoformat(),
+                                  [(s.sequence, s.sha) for s in segments]], separators=(",", ":")).encode())
+
+    def select(self, seconds_ago: float, duration_s: float, buffer_revision: str | None = None) -> list[Segment]:
         """Whole segments covering [now - seconds_ago, now - seconds_ago + duration]."""
-        if duration_s <= 0 or duration_s > MAX_EVIDENCE_SECONDS:
+        if not math.isfinite(duration_s) or not math.isfinite(seconds_ago) or duration_s <= 0 or duration_s > MAX_EVIDENCE_SECONDS:
             raise CaptureError(f"Duration must be within (0, {MAX_EVIDENCE_SECONDS:g}] seconds.")
         if seconds_ago < duration_s:
             raise CaptureError("The interval would end in the future; secondsAgo must be at least durationS.")
         segs = list(self.segments)
+        if buffer_revision is not None and buffer_revision != self._revision(segs):
+            raise HistoryUnavailable("The recording buffer changed; refresh the selected boundaries.")
         total = sum(s.duration for s in segs)
         if seconds_ago > total + 1e-6:
             raise HistoryUnavailable("Requested history is not buffered for this camera.",
@@ -289,8 +320,7 @@ class HlsRecorder:
         start, end = total - seconds_ago, total - seconds_ago + duration_s
         chosen, cursor = [], 0.0
         for s in segs:
-            mid = cursor + s.duration / 2
-            if start - 1e-6 <= mid <= end + 1e-6:
+            if cursor < end - 1e-6 and cursor + s.duration > start + 1e-6:
                 chosen.append(s)
             cursor += s.duration
         return chosen
@@ -298,21 +328,66 @@ class HlsRecorder:
 
 # --------------------------------------------------------------- probing
 
-def probe_media(path: Path) -> dict | None:
-    """Frame count, size and duration via ffprobe, or None if unavailable."""
-    if not shutil.which("ffprobe"):
-        return None
+def _bounded_probe(command: list[str], timeout: float = 20.0) -> bytes:
+    """Bound both decoder output and its entire process lifetime."""
+    # Reader threads, not selectors: Windows cannot select() on pipes.
+    process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    limits = {"stdout": 65536, "stderr": 262144}
+    output = {name: bytearray() for name in limits}
+    overflow = threading.Event()
+
+    def drain(name: str) -> None:
+        fd = getattr(process, name).fileno()
+        while not overflow.is_set() and (chunk := os.read(fd, 8192)):
+            output[name].extend(chunk)
+            if len(output[name]) > limits[name]:
+                overflow.set()
+                process.kill()
+
+    readers = [threading.Thread(target=drain, args=(name,), daemon=True) for name in limits]
+    deadline = time.monotonic() + timeout
     try:
-        out = subprocess.run(
-            ["ffprobe", "-v", "error", "-select_streams", "v:0", "-count_packets",
-             "-show_entries", "stream=width,height,nb_read_packets:format=duration", "-of", "json", str(path)],
-            capture_output=True, timeout=60, check=True, text=True)
-        info = json.loads(out.stdout)
+        for reader in readers:
+            reader.start()
+        try:
+            process.wait(timeout)
+        except subprocess.TimeoutExpired:
+            raise TruncatedCapture("Media decoding exceeded its time limit.") from None
+        for reader in readers:
+            reader.join(max(0, deadline - time.monotonic()))
+        if overflow.is_set():
+            raise TruncatedCapture("Media decoding exceeded its output limit.")
+        if any(reader.is_alive() for reader in readers):
+            raise TruncatedCapture("Media decoding exceeded its time limit.")
+        if process.returncode or output["stderr"]:
+            raise TruncatedCapture("Media could not be decoded completely.")
+        return bytes(output["stdout"])
+    finally:
+        if process.poll() is None:
+            process.kill()
+        process.wait()
+        for reader in readers:
+            if reader.is_alive():
+                reader.join(1)
+        process.stdout.close()
+        process.stderr.close()
+
+
+def probe_media(path: Path) -> dict:
+    """Mandatory actual decoded frame and duration audit, including snapshots."""
+    if not shutil.which("ffprobe"):
+        raise TruncatedCapture("ffprobe is required to audit capture media.")
+    try:
+        info = json.loads(_bounded_probe(
+            ["ffprobe", "-v", "error", "-max_alloc", "67108864", "-protocol_whitelist", "file,pipe",
+             "-f", "mpegts" if path.suffix == ".ts" else "png_pipe" if path.suffix == ".png" else "jpeg_pipe",
+             "-select_streams", "v:0", "-count_frames", "-show_entries",
+             "stream=width,height,nb_read_frames:format=duration", "-of", "json", str(path)]))
         stream = (info.get("streams") or [{}])[0]
-        return {"frames": int(stream["nb_read_packets"]), "width": int(stream["width"]),
-                "height": int(stream["height"]), "duration": float(info["format"]["duration"])}
+        return {"frames": int(stream["nb_read_frames"]), "width": int(stream["width"]),
+                "height": int(stream["height"]), "duration": float(info.get("format", {}).get("duration", 0))}
     except (subprocess.SubprocessError, OSError, KeyError, ValueError, IndexError, TypeError):
-        return None
+        raise TruncatedCapture("Media could not be decoded completely.") from None
 
 
 # ------------------------------------------------------------------- store
@@ -331,6 +406,7 @@ class CaptureStore:
     # Guards pins and eviction: episodes are written in to_thread, so a pin can race the check-then-delete.
     # Reentrant because _write_episode holds it across its fit check and enforce_budget. Disk only, no network.
     _lock: threading.RLock = field(default_factory=threading.RLock, repr=False, compare=False)
+    _admission: threading.BoundedSemaphore = field(default_factory=lambda: threading.BoundedSemaphore(2), repr=False, compare=False)
 
     def __post_init__(self):
         self.root = Path(self.root)
@@ -342,7 +418,8 @@ class CaptureStore:
     # -- creation ---------------------------------------------------------
 
     def create_hls_episode(self, recorder: HlsRecorder, seconds_ago: float, duration_s: float,
-                           holdout_s: float = 0.0, scene_camera_id: str | None = None) -> dict:
+                           holdout_s: float = 0.0, scene_camera_id: str | None = None,
+                           buffer_revision: str | None = None) -> dict:
         if scene_camera_id and scene_camera_id != recorder.camera_id:
             raise SceneMismatch("The selected scene belongs to a different camera.",
                                 sceneCameraId=scene_camera_id, cameraId=recorder.camera_id)
@@ -351,7 +428,7 @@ class CaptureStore:
         if recorder.availability() == "unavailable":
             raise HistoryUnavailable("The camera is unavailable.", cameraId=recorder.camera_id,
                                      lastError=recorder.health.last_error)
-        segments = recorder.select(seconds_ago, duration_s)
+        segments = recorder.select(seconds_ago, duration_s, buffer_revision)
         self._audit(segments, duration_s, recorder.health.target_duration)
         split = len(segments)
         if holdout_s > 0:
@@ -382,6 +459,9 @@ class CaptureStore:
             raise CaptureError("The snapshot was not a JPEG or PNG image.")
         if not image or len(image) > MAX_SNAPSHOT_BYTES:
             raise CaptureError("The snapshot was empty or exceeded the size limit.")
+        if (content_type == "image/jpeg" and not image.startswith(b"\xff\xd8\xff")) or (
+                content_type == "image/png" and not image.startswith(b"\x89PNG\r\n\x1a\n")):
+            raise TruncatedCapture("Snapshot bytes disagree with the declared image format.")
         digest = sha256(image)
         labels = ["snapshot_only", "no_motion_evidence", "source_clock_unknown"]
         if self._last_snapshot.get(camera_id) == digest:
@@ -429,7 +509,15 @@ class CaptureStore:
                 "receivedAt": s.received_at.isoformat(),
                 "sourceTime": s.program_time.isoformat() if s.program_time else None, "repeated": s.repeated}
 
-    def _write_episode(self, *, camera_id, source_kind, media_type, ext, prefix_bytes, holdout_bytes, segments,
+    def _write_episode(self, **kwargs) -> dict:
+        if not self._admission.acquire(blocking=False):
+            raise CaptureBusy("Capture decoding is busy; retry this retained interval later.")
+        try:
+            return self._persist_episode(**kwargs)
+        finally:
+            self._admission.release()
+
+    def _persist_episode(self, *, camera_id, source_kind, media_type, ext, prefix_bytes, holdout_bytes, segments,
                        prefix_duration, holdout_duration, received, source_clock, request, labels,
                        coordinates=None) -> dict:
         episode_id = f"cap_{self.clock().strftime('%Y%m%dT%H%M%S')}-{secrets.token_hex(4)}"
@@ -444,24 +532,53 @@ class CaptureStore:
             (tmp / "holdout" / f"media.{ext}").write_bytes(holdout_bytes)
             files["holdout"] = {"path": f"holdout/media.{ext}", "bytes": len(holdout_bytes),
                                 "sha256": sha256(holdout_bytes), "durationS": round(holdout_duration, 6)}
-        probe = self.probe(prefix_path) if source_kind == "hls" else None
+        audited = {}
+        try:
+            deadline = time.monotonic() + 90
+            if sum(len(s) for s in segments.values()) > 1000:
+                raise TruncatedCapture("Capture contains too many segments for a bounded audit.")
+            for partition, raw in (("prefix", prefix_bytes), ("holdout", holdout_bytes)):
+                if raw is None:
+                    continue
+                if source_kind == "snapshot":
+                    audited[partition] = self._validate_probe(self.probe(prefix_path), snapshot=True)
+                    continue
+                offset, results = 0, []
+                for index, segment in enumerate(segments[partition]):
+                    if time.monotonic() >= deadline:
+                        raise TruncatedCapture("Capture decoding exceeded its overall time limit.")
+                    data = raw[offset:offset + segment["bytes"]]
+                    if len(data) != segment["bytes"] or sha256(data) != segment["sha256"]:
+                        raise CaptureIntegrityError("Segment bytes do not match their source hash.")
+                    audit_path = tmp / f"audit-{partition}-{index}.ts"
+                    audit_path.write_bytes(data)
+                    result = self._validate_probe(self.probe(audit_path))
+                    audit_path.unlink()
+                    tolerance = max(.25, segment["durationS"] * .05)
+                    if abs(result["duration"] - segment["durationS"]) > tolerance:
+                        raise TruncatedCapture("Decoded media duration disagrees with the playlist.")
+                    segment["auditedDurationS"] = result["duration"]
+                    segment["frameCount"] = result["frames"]
+                    results.append(result)
+                    offset += segment["bytes"]
+                if offset != len(raw) or not results:
+                    raise CaptureIntegrityError("Segment byte boundaries are incomplete.")
+                if len({(r["width"], r["height"]) for r in results}) != 1:
+                    raise TruncatedCapture("Video dimensions changed inside the capture.")
+                audited[partition] = {**results[0], "duration": sum(r["duration"] for r in results),
+                                      "frames": sum(r["frames"] for r in results)}
+            if sum(p["duration"] for p in audited.values()) > MAX_EVIDENCE_SECONDS + 1e-6:
+                raise TruncatedCapture("Decoded original media exceeds the 120-second evidence cap.")
+            if sum(p["frames"] for p in audited.values()) > 100000:
+                raise TruncatedCapture("Decoded original media exceeds the frame audit limit.")
+        except BaseException:
+            shutil.rmtree(tmp, ignore_errors=True)
+            raise
+        probe = audited["prefix"]
         unknowns = []
         if source_clock == "unknown":
             unknowns.append({"field": "exposureTime", "reason": "The source does not report capture time; only server receipt time is known."})
-        if probe:
-            # Reject truncation found by actually decoding, not just by playlist durations.
-            if probe["duration"] < prefix_duration - max(1.0, 0.1 * prefix_duration):
-                shutil.rmtree(tmp, ignore_errors=True)
-                raise TruncatedCapture("Decoded media is shorter than the playlist durations.",
-                                       playlistS=round(prefix_duration, 3), decodedS=round(probe["duration"], 3))
-        elif source_kind == "hls":
-            unknowns.append({"field": "frames", "reason": "ffprobe was unavailable or could not read the media."})
-        if source_kind == "snapshot":
-            frames = {"frameCount": 1, "width": None, "height": None}
-            unknowns.append({"field": "frames", "reason": "Snapshot pixel size is not decoded by the recorder."})
-        else:
-            frames = {"frameCount": probe["frames"], "width": probe["width"], "height": probe["height"]} if probe else \
-                     {"frameCount": None, "width": None, "height": None}
+        frames = {"frameCount": probe["frames"], "width": probe["width"], "height": probe["height"]}
         cadence = None
         if probe and prefix_duration > 0:
             cadence = round(probe["frames"] / prefix_duration, 3)
@@ -485,41 +602,123 @@ class CaptureStore:
             "files": files,
             "segments": segments,
             "totalDurationS": round(prefix_duration + holdout_duration, 6),
+            "auditedTotalDurationS": sum(p["duration"] for p in audited.values()),
+            "auditedPrefixDurationS": probe["duration"],
+            "integrityVersion": 1,
             "effectiveFps": cadence,
             **frames,
             "labels": labels,
             "unknowns": unknowns,
         }
+        manifest["manifestSha256"] = self._manifest_hash(manifest)
         (tmp / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True))
+        (tmp / "pins.json").write_text("[]")
         for path in tmp.rglob("*"):
-            if path.is_file():
+            if path.is_file() and path.name != "pins.json":
                 path.chmod(0o444)
         with self._lock:
             os.replace(tmp, self.root / episode_id)  # publish under the lock: a pin can't land before the fit check
             # Check fit before evicting: evicting and then rejecting this episode anyway would lose data for nothing.
             evictable = sum(self._size(p) for p in self.root.iterdir()
-                            if _EPISODE_ID.match(p.name) and p.name != episode_id and not self.pins(p.name))
+                            if _EPISODE_ID.match(p.name) and p.name != episode_id and self._can_evict(p.name))
             if self.usage_bytes() - evictable > self.budget_bytes:
                 self._remove(self.root / episode_id)
                 raise CaptureError("Capture budget is exhausted by pinned episodes.", budgetBytes=self.budget_bytes)
             self.enforce_budget(protect=episode_id)
         return manifest
 
+    @staticmethod
+    def _validate_probe(probe: dict | None, snapshot: bool = False) -> dict:
+        try:
+            valid = (probe and all(type(probe[key]) is int for key in ("frames", "width", "height"))
+                     and 0 < probe["frames"] <= 100000 and 0 < probe["width"] <= 8192
+                     and 0 < probe["height"] <= 8192 and probe["width"] * probe["height"] <= 16_000_000
+                     and math.isfinite(probe["duration"]))
+            if not valid or (snapshot and (probe["frames"] != 1 or probe["duration"] != 0)) or (
+                    not snapshot and probe["duration"] <= 0):
+                raise ValueError("invalid decoded metadata")
+            return probe
+        except (KeyError, TypeError, ValueError):
+            raise TruncatedCapture("Media failed the required decoded frame/duration audit.") from None
+
+    @staticmethod
+    def _manifest_hash(manifest: dict) -> str:
+        return sha256(json.dumps({k: v for k, v in manifest.items() if k != "manifestSha256"},
+                                 sort_keys=True, separators=(",", ":"), allow_nan=False).encode())
+
     # -- access -----------------------------------------------------------
 
     def _dir(self, episode_id: str) -> Path:
         if not _EPISODE_ID.match(episode_id or "") or not (self.root / episode_id / "manifest.json").is_file():
-            raise CaptureError("Unknown capture episode.", episodeId=episode_id)
-        return self.root / episode_id
+            raise CaptureNotFound("Unknown capture episode.", episodeId=episode_id)
+        directory = self.root / episode_id
+        if directory.is_symlink() or (directory / "manifest.json").is_symlink():
+            raise CaptureIntegrityError("Capture paths must be regular retained files.")
+        return directory
 
     def get(self, episode_id: str, verify: bool = False) -> dict:
         directory = self._dir(episode_id)
-        manifest = json.loads((directory / "manifest.json").read_text())
+        try:
+            path = directory / "manifest.json"
+            if path.stat().st_size > 4 * 1024 * 1024:
+                raise ValueError("large manifest")
+            manifest = json.loads(path.read_text())
+            if manifest["id"] != episode_id or manifest["manifestVersion"] != MANIFEST_VERSION:
+                raise ValueError("identity")
+            if manifest.get("integrityVersion") is not None and (
+                    manifest["integrityVersion"] != 1 or manifest.get("manifestSha256") != self._manifest_hash(manifest)):
+                raise ValueError("manifest hash")
+            files = manifest["files"]
+            if not isinstance(files, dict) or "prefix" not in files or set(files) - {"prefix", "holdout"}:
+                raise ValueError("partitions")
+            for partition, info in files.items():
+                expected = f"{partition}/media."
+                if info["path"] not in {expected + ext for ext in ("ts", "jpg", "png")}:
+                    raise ValueError("path")
+                if not isinstance(info["bytes"], int) or not 0 < info["bytes"] <= DEFAULT_RING_BYTES:
+                    raise ValueError("bytes")
+                if not re.fullmatch(r"sha256:[0-9a-f]{64}", info["sha256"]):
+                    raise ValueError("hash")
+                if not math.isfinite(info["durationS"]) or not 0 <= info["durationS"] <= MAX_EVIDENCE_SECONDS:
+                    raise ValueError("duration")
+                segments = manifest["segments"][partition]
+                if manifest["sourceKind"] == "hls":
+                    if not segments or sum(s["bytes"] for s in segments) != info["bytes"]:
+                        raise ValueError("segments")
+                    if abs(sum(s["durationS"] for s in segments) - info["durationS"]) > 1e-5:
+                        raise ValueError("segment duration")
+                    if any(not isinstance(s["bytes"], int) or s["bytes"] <= 0 or
+                           not math.isfinite(s["durationS"]) or s["durationS"] <= 0 or
+                           not re.fullmatch(r"sha256:[0-9a-f]{64}", s["sha256"]) for s in segments):
+                        raise ValueError("segment metadata")
+            total = sum(info["durationS"] for info in files.values())
+            if total > MAX_EVIDENCE_SECONDS or not math.isfinite(manifest["totalDurationS"]) or abs(total - manifest["totalDurationS"]) > 1e-5:
+                raise ValueError("total duration")
+        except (OSError, ValueError, KeyError, TypeError, OverflowError):
+            raise CaptureIntegrityError("Capture manifest is missing, damaged, or inconsistent.") from None
         if verify:
-            for name, info in manifest["files"].items():
-                if sha256((directory / info["path"]).read_bytes()) != info["sha256"]:
-                    raise CaptureError("Episode media no longer matches its manifest hash.", file=name)
+            for name in manifest["files"]:
+                self._read_partition(manifest, name)
         return manifest
+
+    def _read_partition(self, manifest: dict, partition: str) -> bytes:
+        info = manifest["files"][partition]
+        path = self._dir(manifest["id"]) / info["path"]
+        try:
+            if path.is_symlink() or path.parent.is_symlink() or path.stat().st_size != info["bytes"]:
+                raise ValueError("file identity")
+            data = path.read_bytes()
+            if sha256(data) != info["sha256"]:
+                raise ValueError("file hash")
+            offset = 0
+            for segment in manifest["segments"][partition]:
+                end = offset + segment["bytes"]
+                if sha256(data[offset:end]) != segment["sha256"]:
+                    raise ValueError("segment hash")
+                offset = end
+            return data
+        except (OSError, ValueError):
+            raise CaptureIntegrityError("Episode media no longer matches its manifest hash.", file=partition) from None
 
     def list(self) -> list[dict]:
         return [self.get(p.name) for p in sorted(self.root.iterdir()) if _EPISODE_ID.match(p.name)]
@@ -529,11 +728,39 @@ class CaptureStore:
 
         Re-verifies bytes so an inference retry always sees the original moment.
         """
-        manifest = self.get(episode_id, verify=True)
+        manifest = self.get(episode_id)
         if camera_id and manifest["cameraId"] != camera_id:
             raise SceneMismatch("Episode belongs to a different camera.", episodeCameraId=manifest["cameraId"], cameraId=camera_id)
         info = manifest["files"]["prefix"]
+        self._read_partition(manifest, "prefix")
         return self._dir(episode_id) / info["path"], info["sha256"]
+
+    def prefix_bytes(self, episode_id: str) -> tuple[bytes, str]:
+        manifest = self.get(episode_id)
+        return self._read_partition(manifest, "prefix"), manifest["mediaType"]
+
+    def prefix_segment(self, episode_id: str, index: int) -> bytes:
+        manifest = self.get(episode_id)
+        segments = manifest["segments"]["prefix"]
+        if manifest["sourceKind"] != "hls" or index < 0 or index >= len(segments):
+            raise AccessDenied("Only retained prefix segments are available.")
+        data = self._read_partition(manifest, "prefix")
+        start = sum(s["bytes"] for s in segments[:index])
+        return data[start:start + segments[index]["bytes"]]
+
+    def prefix_playlist(self, episode_id: str) -> str:
+        manifest = self.get(episode_id)
+        if manifest["sourceKind"] != "hls":
+            raise TruncatedCapture("Snapshots do not have a video playlist.")
+        self._read_partition(manifest, "prefix")
+        segments = manifest["segments"]["prefix"]
+        lines = ["#EXTM3U", "#EXT-X-VERSION:3", "#EXT-X-PLAYLIST-TYPE:VOD",
+                 f"#EXT-X-TARGETDURATION:{math.ceil(max(s['durationS'] for s in segments))}",
+                 "#EXT-X-MEDIA-SEQUENCE:0"]
+        for index, segment in enumerate(segments):
+            lines.extend([f"#EXTINF:{segment['durationS']:.6f},",
+                          f"/api/captures/{episode_id}/segments/{index}"])
+        return "\n".join([*lines, "#EXT-X-ENDLIST", ""])
 
     def holdout(self, episode_id: str, role: str) -> tuple[Path, str]:
         if role != "evaluation":
@@ -562,7 +789,21 @@ class CaptureStore:
 
     def pins(self, episode_id: str) -> list[str]:
         path = self._pins_path(episode_id)
-        return json.loads(path.read_text()) if path.exists() else []
+        with self._lock:
+            try:
+                if path.is_symlink() or path.stat().st_size > 1024 * 1024:
+                    raise ValueError("invalid pins")
+                pins = json.loads(path.read_text())
+                if not isinstance(pins, list) or any(not isinstance(p, str) or not _JOB_ID.fullmatch(p) for p in pins):
+                    raise ValueError("invalid pins")
+                return pins
+            except (OSError, ValueError, TypeError):
+                # Missing ownership is never evidence that media may be deleted.
+                if path.exists() or path.is_symlink():
+                    path.rename(path.with_name(f"pins.corrupt-{secrets.token_hex(4)}.json"))
+                pins = ["capture-recovered-retention"]
+                self._write_pins(episode_id, pins)
+                return pins
 
     def pin(self, episode_id: str, job_id: str) -> list[str]:
         if not _JOB_ID.match(job_id):
@@ -582,6 +823,10 @@ class CaptureStore:
         path = self._pins_path(episode_id)
         tmp = path.with_suffix(".tmp")
         tmp.write_text(json.dumps(pins))
+        # Pins are mutable ownership metadata. Older captures marked this file
+        # read-only alongside evidence, preventing atomic replacement on Windows.
+        if path.exists():
+            path.chmod(0o600)
         os.replace(tmp, path)
 
     def usage_bytes(self) -> int:
@@ -596,17 +841,27 @@ class CaptureStore:
             f.chmod(0o644) if f.is_file() else None
         shutil.rmtree(path)
 
+    def _can_evict(self, episode_id: str) -> bool:
+        """Use the same retained-capacity rule for admission and deletion, under _lock."""
+        try:
+            if self.pins(episode_id):
+                return False
+            self.get(episode_id)
+        except CaptureError:
+            return False  # damaged ownership/provenance requires explicit recovery
+        return True
+
     def enforce_budget(self, protect: str | None = None) -> list[str]:
         """Delete the oldest unpinned episodes (never ``protect``) until usage fits the budget."""
         with self._lock:  # the pins() check and the delete must not interleave with pin()
             removed = []
             episodes = sorted((p for p in self.root.iterdir() if _EPISODE_ID.match(p.name)),
-                              key=lambda p: json.loads((p / "manifest.json").read_text())["createdAt"])
+                              key=lambda p: p.name)
             usage = self.usage_bytes()
             for path in episodes:
                 if usage <= self.budget_bytes:
                     break
-                if path.name == protect or self.pins(path.name):
+                if path.name == protect or not self._can_evict(path.name):
                     continue
                 size = self._size(path)
                 self._remove(path)

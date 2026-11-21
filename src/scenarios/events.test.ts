@@ -3,6 +3,7 @@ import { demoScenario } from '../scene/DemoScenarioProvider';
 import { advanceDriver, createDriverSimulation, driverFrame, driverObservation, observedEventIds, prepareDriverDecision, validateEventRun } from '../agent/physics';
 import type { DriverSimulation } from '../agent/physics';
 import type { DriverDecision, DriverResponse } from '../agent/types';
+import { createTrace as createActionTrace, finalizeHold, finishTrace as finishActionTrace, readDriverTrace, recordTick, startHold } from '../agent/trace';
 import { advanceEvents, createEvents, parseScenario, preset, registerEvent, requestEvent, sampleEvents, withEventActors } from './events';
 import { beginDecision, compareTraces, createTrace, finishTrace, footprintContact, recordFrame, replayScene, summarizeTrace } from './trace';
 
@@ -72,6 +73,15 @@ describe('scenario injection boundary', () => {
     expect(observedEventIds(state)).toEqual(['hazard-1']);
     expect(driverObservation(state).lead_speed_mps).toBe(0);
   });
+  it('attributes an observed actor only to its exact event when IDs share a prefix', () => {
+    const plan = preset();
+    const event = plan.events[0];
+    plan.events = [{ ...event, id: 'hazard', parameters: { ...event.parameters, distanceAheadM: 80 } },
+      { ...event, id: 'hazard-near' }];
+    let state = { ...createDriverSimulation(withEventActors(demoScenario, plan)), events: createEvents(plan, 'event') };
+    state = advance(state, 5) as typeof state;
+    expect(observedEventIds(state)).toEqual(['hazard-near']);
+  });
   it('queues manual injection across in-flight decisions and applies it once at a boundary', () => {
     let state = setup();
     const plan = preset(); plan.events[0].trigger = { kind: 'manual' };
@@ -119,6 +129,34 @@ describe('scenario injection boundary', () => {
 });
 
 describe('scenario trace and replay', () => {
+  it('preserves the action trace and effective guards during an interrupted crash run', () => {
+    let state = setup();
+    const scenarioTrace = createTrace(state, 'fixture-both-traces', 'test-fixture');
+    const actionTrace = createActionTrace(scenarioTrace.runId, state);
+    for (let step = 0; step < 4; step++) {
+      state = prepareDriverDecision(state); recordFrame(scenarioTrace, state);
+      const entry = beginDecision(scenarioTrace, state, step);
+      const response: DriverResponse = { run_id: scenarioTrace.runId, step, decision: accelerate,
+        model_id: 'fixture', request_id: `fixture-${step}`, max_steps: 12 };
+      entry.response = response;
+      const hold = startHold(state);
+      for (let tick = 0; tick < (step === 3 ? 5 : 30); tick++) {
+        const before = state; state = advanceDriver(state, accelerate, .1);
+        recordTick(hold, before, state); recordFrame(scenarioTrace, state);
+      }
+      finalizeHold(actionTrace, response, entry.observation, hold, state);
+      finalizeHold(actionTrace, response, entry.observation, hold, state);
+    }
+    finishActionTrace(actionTrace, { state: 'stopped_by_user' });
+    finishTrace(scenarioTrace, state, 'interrupted');
+    const exported = readDriverTrace(JSON.stringify(actionTrace));
+    expect(exported.steps).toHaveLength(4);
+    expect(exported.steps.map(step => step.observation)).toEqual(scenarioTrace.steps.map(step => step.observation));
+    expect(exported.steps.some(step => step.guard.events.some(event => event.reason === 'leader_guard'))).toBe(true);
+    expect(exported.steps.at(-1)!.applied.end_time).toBe(scenarioTrace.frames.at(-1)!.time);
+    expect(exported.steps.at(-1)!.applied.end_time).toBe(9.5);
+    expect(replayScene(scenarioTrace).frames).toEqual(scenarioTrace.frames);
+  });
   it('separates proposed action, intervention, scripted contact and ego contact', () => {
     let state = setup();
     const trace = createTrace(state, 'fixture-override', 'test-fixture');

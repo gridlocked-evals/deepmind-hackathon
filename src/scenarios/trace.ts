@@ -1,6 +1,7 @@
 import type { ActorDefinition, ActorState, ScenarioBundle, SimulationFrame } from '../types';
 import { driverFrame, driverObservation, observedEventIds } from '../agent/physics';
 import type { DriverSimulation } from '../agent/physics';
+import type { DriverTrace } from '../agent/trace';
 import { MAX_DRIVER_STEPS, SECONDS_PER_DECISION } from '../agent/types';
 import type { DriverObservation, DriverResponse } from '../agent/types';
 import { EVENT_STEP, parseScenario } from './events';
@@ -38,6 +39,8 @@ export interface RunTrace {
   telemetry: Telemetry[];
   frames: SimulationFrame[];
   initialFrame?: SimulationFrame;
+  /** The compatible #60 action/guard trace; absent in exports made before integration. */
+  driverTrace?: DriverTrace;
   eventLog: EventRecord[];
   appliedEvents: { id: string; appliedAt: number; anchorProgress: number }[];
   terminal: { reason: Terminal; simulationTime: number; message: string | null };

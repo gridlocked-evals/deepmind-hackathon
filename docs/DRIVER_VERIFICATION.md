@@ -44,3 +44,18 @@ The model chooses longitudinal speed. Steering and safety boundaries remain loca
 - [#60](https://github.com/gridlocked-evals/deepmind-hackathon/issues/60): portable decision trace export with synthetic provenance.
 - [#61](https://github.com/gridlocked-evals/deepmind-hackathon/issues/61): automated browser lifecycle regressions.
 - [#10](https://github.com/gridlocked-evals/deepmind-hackathon/issues/10): separate visual Hydrogen → Genie navigation loop.
+## Scripted browser trace export, November 21, 2026
+
+The merged trace UI was exercised against a local ASGI fixture with model credentials
+absent and providers disabled. All driver responses were labelled `fixture-no-provider`;
+this was not live Gemini acceptance. A stopped six-decision run exported
+`stopped_by_user`, synthetic simulator provenance, exact observations/decisions/request
+IDs matching the fixture log, and the final partial hold from 15 to 16.4326 simulation
+seconds. A scripted first-request failure exported `error` with zero steps. Returning
+to replay removed the export control. Both JSON downloads were parsed and checked.
+
+The trace-correction follow-up passed 80 frontend tests, the production build, and
+contract drift checks. A malformed-response browser fixture returned an HTML body
+with a test canary. Both the panel and downloaded trace showed only the fixed
+"The driving request failed." message; the trace contained zero steps and no canary.
+No provider was called.

@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ArrowUpRight, Camera, CarFront, Check, ChevronDown, ChevronLeft, ChevronRight, CircleHelp, CircleStop, Crosshair, Focus, Globe2, Layers3, MapPin, Maximize2, Menu, Minus, Bot, Navigation, Pause, Pin, Play, Radio, RotateCcw, Route, Search, Video, X } from 'lucide-react';
+import { ArrowUpRight, Camera, CarFront, Check, ChevronDown, ChevronLeft, ChevronRight, CircleHelp, CircleStop, Crosshair, Focus, Globe2, Layers3, MapPin, Maximize2, Menu, Minus, Bot, Navigation, Pause, Pin, Play, Radio, RotateCcw, Route, ScanEye, Search, Video, X } from 'lucide-react';
 import CityMap from './map/CityMap';
 import { demoScenario } from './scene/DemoScenarioProvider';
 import { useCameraSources } from './media/cameras';
 import { LiveFeed } from './media/LiveFeed';
 import { usePlayback } from './hooks/usePlayback';
+import { EvidencePanel } from './evidence/EvidencePanel';
 import { useGeminiDriver } from './agent/useGeminiDriver';
 import { DriverPanel } from './agent/DriverPanel';
 import { preset, withEventActors } from './scenarios/events';
@@ -54,6 +55,9 @@ export default function App() {
   const [routesVisible, setRoutesVisible] = useState(true);
   const [layersOpen, setLayersOpen] = useState(false);
   const [helpOpen, setHelpOpen] = useState(false);
+  const [evidenceOpen, setEvidenceOpen] = useState(false);
+  const evidenceToggleRef = useRef<HTMLButtonElement>(null);
+  const closeEvidence = useCallback(() => { setEvidenceOpen(false); evidenceToggleRef.current?.focus(); }, []);
   const helpRef = useRef<HTMLElement>(null);
   const workspaceRef = useRef<HTMLElement>(null);
   const railRef = useRef<HTMLElement>(null);
@@ -82,7 +86,8 @@ export default function App() {
   const liveCount = cameras.filter(c => c.kind === 'hls').length;
   const docked = viewMode !== 'city' || feedPinned || viewport.width < 760;
   const trafficDemoActive = scenario.id === demoScenario.id && viewMode !== 'city';
-  const railIsModal = sidebarOpen && viewport.width <= 760;
+  const evidenceIsModal = evidenceOpen && viewport.width <= 760;
+  const railIsModal = sidebarOpen && viewport.width <= 760 && !evidenceOpen;
 
   const invalidateRoute = useCallback(() => {
     driver.reset();
@@ -179,9 +184,12 @@ export default function App() {
   const onViewport = useCallback((next: MapViewport) => setViewport(next), []);
 
   useEffect(() => {
-    if (!railIsModal || !railRef.current || !workspaceRef.current) return;
-    const rail = railRef.current;
-    const opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    if (!workspaceRef.current) return;
+    const rail = evidenceIsModal ? workspaceRef.current.querySelector<HTMLElement>('#camera-evidence-panel')
+      : railIsModal ? railRef.current : null;
+    if (!rail) return;
+    const opener = evidenceIsModal ? evidenceToggleRef.current
+      : document.activeElement instanceof HTMLElement ? document.activeElement : null;
     const covered = [...workspaceRef.current.children].filter((node): node is HTMLElement =>
       node instanceof HTMLElement && node !== rail && !node.classList.contains('sidebar-backdrop'));
     const inertBefore = covered.map(node => node.inert);
@@ -189,7 +197,9 @@ export default function App() {
     rail.focus({ preventScroll: true });
     const containFocus = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {
-        event.preventDefault(); event.stopPropagation(); setSidebarOpen(false); return;
+        event.preventDefault(); event.stopPropagation();
+        if (evidenceIsModal) setEvidenceOpen(false); else setSidebarOpen(false);
+        return;
       }
       if (event.key !== 'Tab') return;
       const controls = [...rail.querySelectorAll<HTMLElement>('button:not(:disabled),a[href],input:not(:disabled),select:not(:disabled),summary,[tabindex="0"]')]
@@ -208,7 +218,7 @@ export default function App() {
       covered.forEach((node, index) => { node.inert = inertBefore[index]; });
       if (opener?.isConnected) opener.focus({ preventScroll: true });
     };
-  }, [railIsModal]);
+  }, [railIsModal, evidenceIsModal]);
 
   useEffect(() => {
     if (!helpOpen) return;
@@ -228,8 +238,8 @@ export default function App() {
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') { setHelpOpen(false); setLayersOpen(false); setPickedLocation(null); setPickingMode('inspect'); return; }
-      if (event.target instanceof HTMLElement && /INPUT|TEXTAREA|SELECT|BUTTON/.test(event.target.tagName)) return;
+      if (event.key === 'Escape') { setHelpOpen(false); setLayersOpen(false); setPickedLocation(null); setPickingMode('inspect'); if (evidenceOpen) closeEvidence(); return; }
+      if (event.target instanceof HTMLElement && (/INPUT|TEXTAREA|SELECT|BUTTON/.test(event.target.tagName) || event.target.closest('.evidence-panel'))) return;
       if (event.code === 'Space') { event.preventDefault(); if (driver.hasRun) driver.stop(); else playback.setPlaying(p => !p); }
       if (event.key.toLowerCase() === 'c') setFeedsVisible(v => !v);
       if (event.key === '1') chooseView('city');
@@ -239,7 +249,7 @@ export default function App() {
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [chooseView, playback.setPlaying, driver.hasRun, driver.stop]);
+  }, [chooseView, playback.setPlaying, driver.hasRun, driver.stop, evidenceOpen, closeEvidence]);
 
   const cardLeft = Math.max(sidebarOpen && viewport.width > 760 ? 310 : 24, Math.min((viewport.cameraPoint?.x ?? viewport.width * 0.65) + 25, viewport.width - 370));
   const cardTop = Math.max(150, Math.min((viewport.cameraPoint?.y ?? viewport.height * 0.4) - 100, viewport.height - 495));
@@ -253,7 +263,7 @@ export default function App() {
         <span className="brand-symbol" aria-hidden="true"><i /><i /><i /><i /></span><span>gridlocked<span className="brand-period">.</span></span>
       </a>
       <nav className="view-switch" aria-label="Map perspective">{MODES.map(({ id, label, icon: Icon }) => <button key={id} className={viewMode === id ? 'active' : ''} onClick={() => chooseView(id)} aria-pressed={viewMode === id}><Icon size={15} /><span>{label}</span></button>)}</nav>
-      <div className="topbar-actions"><button className={`driver-launch ${driver.active ? 'is-active' : ''}`} onClick={() => { setRailTab('driver'); setSidebarOpen(true); }} aria-label="Gemini driver"><Bot size={17} /><span>Gemini driver</span>{driver.active && <i />}</button><button className={`traffic-demo-button ${trafficDemoActive ? 'is-active' : ''}`} onClick={startTrafficDemo} aria-label="Traffic demo" aria-pressed={trafficDemoActive} title="Start the Vestry traffic demo: 25 vehicles, signals, and a 60-second loop"><CarFront size={17} /><span className="demo-full-label">Traffic demo</span><span className="demo-short-label">Demo</span></button><button className={`camera-toggle ${feedsVisible ? 'is-active' : ''}`} onClick={() => setFeedsVisible(v => !v)} aria-pressed={feedsVisible} aria-label="Cameras"><Video size={16} /><span>Cameras</span><span className="toggle-track"><i /></span></button><button className="icon-button help-button" aria-label="About this workspace" onClick={() => setHelpOpen(v => !v)}><CircleHelp size={18} /></button></div>
+      <div className="topbar-actions"><button ref={evidenceToggleRef} className="evidence-toggle" onClick={() => setEvidenceOpen(value => !value)} aria-expanded={evidenceOpen} aria-controls="camera-evidence-panel" aria-label="Camera evidence" title="Capture and inspect camera evidence"><ScanEye size={17} /><span>Evidence</span></button><button className={`driver-launch ${driver.active ? 'is-active' : ''}`} onClick={() => { setRailTab('driver'); setSidebarOpen(true); }} aria-label="Gemini driver"><Bot size={17} /><span>Gemini driver</span>{driver.active && <i />}</button><button className={`traffic-demo-button ${trafficDemoActive ? 'is-active' : ''}`} onClick={startTrafficDemo} aria-label="Traffic demo" aria-pressed={trafficDemoActive} title="Start the Vestry traffic demo: 25 vehicles, signals, and a 60-second loop"><CarFront size={17} /><span className="demo-full-label">Traffic demo</span><span className="demo-short-label">Demo</span></button><button className={`camera-toggle ${feedsVisible ? 'is-active' : ''}`} onClick={() => setFeedsVisible(v => !v)} aria-pressed={feedsVisible} aria-label="Cameras"><Video size={16} /><span>Cameras</span><span className="toggle-track"><i /></span></button><button className="icon-button help-button" aria-label="About this workspace" onClick={() => setHelpOpen(v => !v)}><CircleHelp size={18} /></button></div>
     </header>
 
     {sidebarOpen && <><button className="sidebar-backdrop" aria-label="Close workspace tools" onClick={() => setSidebarOpen(false)} /><aside ref={railRef} className="source-rail" role={railIsModal ? 'dialog' : undefined} aria-modal={railIsModal || undefined} aria-labelledby="workspace-tools-title" tabIndex={-1}>
@@ -291,7 +301,8 @@ export default function App() {
       {driver.hasRun ? <button className="timeline-view-button" onClick={() => { setRailTab('driver'); setSidebarOpen(true); }} aria-label="View Gemini decisions"><Bot size={18} /></button> : <button className="timeline-view-button" onClick={() => chooseView(viewMode === 'city' ? 'intersection' : 'city')} title={viewMode === 'city' ? 'Go to current simulation' : 'City overview'} aria-label={viewMode === 'city' ? 'Go to current simulation' : 'City overview'}>{viewMode === 'city' ? <Focus size={18} /> : <Globe2 size={18} />}</button>}
     </section>
 
-    <div className="bottom-caption"><span>Simulated motion · image analysis pending</span><span>Map context © OpenStreetMap</span></div>
+    <div className="bottom-caption"><span>Simulated motion · camera evidence reviewed separately</span><span>Map context © OpenStreetMap</span></div>
+    <EvidencePanel camera={selectedCamera} open={evidenceOpen} modal={evidenceIsModal} onClose={closeEvidence} />
     {!mapReady && !mapError && <div className="map-loading"><span className="loading-orbit" /><span>Opening New York</span></div>}
     {mapError && <div className="map-notice"><span>{mapError}</span><button onClick={() => setMapError('')} aria-label="Dismiss map notice"><X size={14} /></button></div>}
     {helpOpen && <div className="help-backdrop" onClick={() => setHelpOpen(false)}><section ref={helpRef} className="help-dialog" role="dialog" aria-modal="true" aria-labelledby="help-title" onClick={event => event.stopPropagation()}><button className="icon-button help-close" onClick={() => setHelpOpen(false)} aria-label="Close information"><X size={18} /></button><h2 id="help-title">Welcome to Gridlocked.</h2><p>Explore all five boroughs through public roadway cameras. Choose Traffic demo for the original 25-vehicle Vestry scene, select a street for a local preview, or plan a driving route between two locations.</p><div className="help-item"><Video size={20} /><div><strong>Camera footage is real</strong><p>Video comes from 511NY / NYSDOT. Source delay is unknown. NYC DOT snapshots are periodic images.</p></div></div><div className="help-item"><Route size={20} /><div><strong>The simulation is illustrative</strong><p>Routes use OpenStreetMap driving geometry. Speeds and vehicle motion are simulated, without live traffic or signal timing. The Vestry example is authored. Image analysis is not yet connected to this view.</p></div></div><div className="help-item"><Bot size={20} /><div><strong>Gemini can drive the ego vehicle</strong><p>The model chooses acceleration and braking from simulated state. Route steering and safety bounds are deterministic. Each run is limited to 12 decisions; this is separate from the camera-image navigation pipeline.</p></div></div><div className="shortcut-list"><span><kbd>Space</kbd> Play / pause</span><span><kbd>C</kbd> Cameras</span><span><kbd>1</kbd><kbd>2</kbd><kbd>3</kbd> Perspective</span></div><button className="explore-button" onClick={() => setHelpOpen(false)}>Back to the city</button></section></div>}
