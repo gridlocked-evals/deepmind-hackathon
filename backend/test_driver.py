@@ -1,6 +1,7 @@
 """Driver admission and transport tests; never use a provider or credentials."""
 import asyncio
 from copy import deepcopy
+from datetime import date
 import json
 from types import SimpleNamespace
 from uuid import uuid4
@@ -8,12 +9,16 @@ from uuid import uuid4
 from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 import pytest
+import httpx
+
+from backend.gateway import GatewayConfig, ModelGateway
+from backend.gateway.config import StageBudget
 
 from backend.driver import (
-    DriverController, DriverDecision, DriverRequest, MAX_REQUEST_BYTES, MAX_STEPS,
+    DriverController, DriverRequest, MAX_REQUEST_BYTES, MAX_STEPS,
     RUN_TTL_SECONDS, router,
 )
-from backend.gateway.contracts import ErrorCode, GatewayError, MODELS, Service
+from backend.gateway.contracts import ErrorCode, GatewayError, MODELS, Service, STAGES
 
 
 def request_body(step=0, run_id="test-run-0001"):
@@ -28,21 +33,27 @@ def request_body(step=0, run_id="test-run-0001"):
     }
 
 
+def choice_output(choice="accelerate"):
+    return {"maneuver": {"type": "choice", "choice": choice, "confidence": 0.9,
+                        "probabilities": {action: (0.91 if action == choice else 0.03)
+                                          for action in ("stop", "brake", "cruise", "accelerate")}}}
+
+
 class FakeGateway:
     def __init__(self):
         self.calls = []
         self.error = None
-        self.output = {"action": "accelerate", "target_speed_mps": 6.0,
-                       "reason": "The route is clear and the signal is green.", "confidence": 0.9}
+        self.output = choice_output()
+        self.model_id = MODELS[Service.DECISIONS]
         self.release = None
 
-    async def generate(self, service, **kwargs):
-        self.calls.append((service, kwargs))
+    async def judge(self, **kwargs):
+        self.calls.append((Service.DECISIONS, kwargs))
         if self.release:
             await self.release.wait()
         if self.error:
             raise self.error
-        return SimpleNamespace(output=deepcopy(self.output), model_id=MODELS[service], request_id=str(uuid4()))
+        return SimpleNamespace(output=deepcopy(self.output), model_id=self.model_id, request_id=str(uuid4()))
 
 
 def client_for(gateway=None):
@@ -60,22 +71,25 @@ def test_decision_uses_existing_gateway_and_returns_real_trace():
     assert response.status_code == 200
     result = response.json()
     assert result["run_id"] == body["run_id"] and result["step"] == 0
-    assert result["max_steps"] == 12 and result["model_id"] == "gemini-4-hydrogen"
-    assert result["request_id"] and result["decision"] == gateway.output
+    assert result["max_steps"] == 60 and result["model_id"] == "gemini-decision-1"
+    assert result["request_id"]
+    assert result["decision"] == {"action": "accelerate", "target_speed_mps": 6.5,
+                                  "reason": "Decisions selected accelerate; target 6.50 m/s.", "confidence": 0.9}
     assert len(gateway.calls) == 1
     service, call = gateway.calls[0]
-    assert service == Service.HYDROGEN and call["stage"] == "navigation"
-    assert call["response_model"] is DriverDecision
+    assert service == Service.DECISIONS and call["stage"] == "simulator_driver"
+    assert call["questions"]["maneuver"]["type"] == "choice"
+    assert set(call["questions"]["maneuver"]["criteria"]) == {"accelerate", "brake", "cruise", "stop"}
     context = call["context"]
     assert context.purpose == "development" and context.source_id is None and context.capture_id is None
     assert context.episode_id == "sim-driver:test-run-0001"
-    assert context.prompt_id == "sim-driver-v1:step-0"
+    assert context.prompt_id == "sim-driver-decisions-v2:step-0"
     assert "synthetic traffic simulator" in call["input_value"]
     assert json.loads(call["input_value"].split("Observation JSON:\n")[1]) == body["observation"]
 
 
 @pytest.mark.parametrize("path,value", [
-    (("step",), -1), (("step",), 12), (("step",), True), (("step",), "0"),
+    (("step",), -1), (("step",), MAX_STEPS), (("step",), True), (("step",), "0"),
     (("run_id",), "short"), (("run_id",), "x" * 65), (("run_id",), "../a/b/c"),
     (("extra",), "x"), (("observation", "extra"), "x"),
     (("observation", "scenario_id"), "x" * 81),
@@ -128,7 +142,7 @@ def test_body_limit_enforced_with_content_length_and_streamed_body():
     assert not gateway.calls
 
 
-def test_duplicate_idempotency_and_twelve_step_limit():
+def test_duplicate_idempotency_and_sixty_step_limit():
     client, gateway, _ = client_for()
     first = client.post("/api/driver/decision", json=request_body())
     duplicate = client.post("/api/driver/decision", json=request_body())
@@ -157,17 +171,17 @@ def test_runs_must_start_at_zero_and_keep_their_scenario():
 
 
 @pytest.mark.parametrize("change", [
-    {"target_speed_mps": -1.0}, {"target_speed_mps": 12.0},
-    {"target_speed_mps": float("nan")}, {"target_speed_mps": float("inf")},
-    {"target_speed_mps": "5"}, {"target_speed_mps": True},
-    {"confidence": 1.01}, {"confidence": float("nan")},
-    {"reason": "x" * 241}, {"action": "teleport"}, {"extra": "discard me"},
-    {"action": "stop", "target_speed_mps": 1.0},
-    {"action": "brake", "target_speed_mps": 5.0},
+    {"type": "score"}, {"choice": "teleport"}, {"choice": []},
+    {"confidence": 1.01}, {"confidence": float("nan")}, {"confidence": True},
+    {"confidence": "0.9"}, {"probabilities": None}, {"probabilities": {}},
+    {"probabilities": {"stop": 0.0, "brake": 0.0, "cruise": 0.0, "accelerate": 1.1}},
+    {"probabilities": {"stop": 0.0, "brake": 0.0, "cruise": 0.0, "accelerate": float("nan")}},
+    {"probabilities": {"stop": 0.0, "brake": 0.0, "cruise": 0.0, "accelerate": True}},
+    {"probabilities": {"stop": 0.9, "brake": 0.03, "cruise": 0.04, "accelerate": 0.03}},
 ])
 def test_invalid_provider_decisions_fail_without_a_fake_fallback(change):
     gateway = FakeGateway()
-    gateway.output.update(change)
+    gateway.output["maneuver"].update(change)
     client, _, _ = client_for(gateway)
     response = client.post("/api/driver/decision", json=request_body())
     assert response.status_code == 502 and response.json()["detail"]["code"] == "invalid_output"
@@ -176,11 +190,42 @@ def test_invalid_provider_decisions_fail_without_a_fake_fallback(change):
     assert len(gateway.calls) == 1
 
 
-def test_provider_cannot_exceed_observed_speed_limit():
-    client, gateway, _ = client_for()
+@pytest.mark.parametrize("output", [None, [], {}, {"other": {}}, {"maneuver": None}])
+def test_missing_or_unexpected_answers_fail_closed(output):
+    gateway = FakeGateway()
+    gateway.output = output
+    client, _, _ = client_for(gateway)
+    response = client.post("/api/driver/decision", json=request_body())
+    assert response.status_code == 502 and response.json()["detail"]["code"] == "invalid_output"
+
+
+@pytest.mark.parametrize("action,speed,limit,expected", [
+    ("stop", 4.0, 11.176, 0.0), ("brake", 4.0, 11.176, 1.5),
+    ("brake", 1.0, 11.176, 0.0), ("brake", 50.0, 5.0, 5.0),
+    ("cruise", 4.0, 11.176, 4.0), ("cruise", 20.0, 5.0, 5.0),
+    ("accelerate", 4.0, 5.0, 5.0), ("accelerate", 10.0, 50.0, 11.176),
+    ("accelerate", 0.0, 11.176, 2.5),
+])
+def test_choice_maps_to_bounded_target(action, speed, limit, expected):
+    gateway = FakeGateway()
+    gateway.output = choice_output(action)
+    client, _, _ = client_for(gateway)
     body = request_body()
-    body["observation"]["speed_limit_mps"] = 5.0
+    body["observation"].update(speed_mps=speed, speed_limit_mps=limit)
     response = client.post("/api/driver/decision", json=body)
+    assert response.status_code == 200
+    decision = response.json()["decision"]
+    assert decision["action"] == action and decision["target_speed_mps"] == expected
+    assert decision["target_speed_mps"] <= min(limit, 11.176)
+    if action == "brake":
+        assert decision["target_speed_mps"] <= speed
+
+
+def test_wrong_provider_model_is_rejected():
+    gateway = FakeGateway()
+    gateway.model_id = MODELS[Service.HYDROGEN]
+    client, _, _ = client_for(gateway)
+    response = client.post("/api/driver/decision", json=request_body())
     assert response.status_code == 502 and response.json()["detail"]["code"] == "invalid_output"
 
 
@@ -280,3 +325,78 @@ def test_run_capacity_and_expiry_do_not_evict_inflight(monkeypatch):
         await second
         assert controller.in_flight == 0
     asyncio.run(scenario())
+
+
+def test_driver_calls_real_decisions_adapter_and_retains_ledger_provenance(tmp_path):
+    requests = []
+
+    def handler(request):
+        requests.append(request)
+        payload = json.loads(request.content)
+        assert request.url.path == "/v1beta/decisions"
+        assert payload["model"] == "gemini-decision-1"
+        assert set(payload) == {"model", "input", "questions"}
+        assert payload["questions"]["maneuver"]["type"] == "choice"
+        assert "target 6.500 m/s" in payload["questions"]["maneuver"]["criteria"]["accelerate"]
+        return httpx.Response(200, json={"answers": choice_output(), "usage": {
+            "total_input_tokens": 200, "total_output_tokens": 0, "total_tokens": 200}})
+
+    async def scenario():
+        config = GatewayConfig(data_dir=tmp_path / "ledger", rates_valid_through=date(2030, 1, 1))
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+            gateway = ModelGateway(config, http, api_key="test-driver-key")
+            controller = DriverController(gateway)
+            body = DriverRequest.model_validate(request_body())
+            result = await controller.decide(body)
+            assert result.decision.target_speed_mps == 6.5
+            assert await controller.decide(body) == result
+            assert len(requests) == 1
+            service = next(s for s in gateway.status()["services"] if s["service"] == "decisions")
+            assert service["state"] == "connected" and service["last_request_id"] == result.request_id
+            assert "simulator_driver" in gateway.status()["budgets"]["stages"]
+    asyncio.run(scenario())
+
+
+def test_driver_timeout_cancels_gateway_releases_slots_and_caches_failure(tmp_path, monkeypatch):
+    monkeypatch.setattr("backend.driver.DRIVER_TIMEOUT_SECONDS", 0.02)
+
+    async def scenario():
+        calls = []
+        release = asyncio.Event()
+
+        async def handler(request):
+            calls.append(request)
+            await release.wait()
+            return httpx.Response(200, json={"answers": choice_output()})
+
+        config = GatewayConfig(data_dir=tmp_path / "ledger", rates_valid_through=date(2030, 1, 1))
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+            gateway = ModelGateway(config, http, api_key="test-driver-key")
+            controller = DriverController(gateway)
+            body = DriverRequest.model_validate(request_body())
+            with pytest.raises(HTTPException) as failure:
+                await controller.decide(body)
+            assert failure.value.status_code == 504 and failure.value.detail["code"] == "timeout"
+            assert controller.in_flight == 0 and not controller.runs[body.run_id].in_flight
+            assert gateway.slots._value == config.max_concurrency
+            service = next(s for s in gateway.status()["services"] if s["service"] == "decisions")
+            assert service["reason"] == "cancelled"
+            assert failure.value.detail["request_id"] == service["last_request_id"]
+            with pytest.raises(HTTPException) as duplicate:
+                await controller.decide(body)
+            assert duplicate.value.detail == failure.value.detail and len(calls) == 1
+            release.set()
+            assert (await controller.decide(DriverRequest.model_validate(request_body(1)))).step == 1
+            assert len(calls) == 2
+    asyncio.run(scenario())
+
+
+def test_existing_explicit_stage_config_inherits_navigation_cap_without_mutation():
+    budget = StageBudget(tokens=500, usd="0.01")
+    legacy = {stage: budget for stage in STAGES if stage != "simulator_driver"}
+    config = GatewayConfig(stages=legacy)
+    assert config.stages["simulator_driver"] == budget
+    assert "simulator_driver" not in legacy
+    explicit = {**legacy, "simulator_driver": StageBudget(tokens=100, usd="0.005")}
+    assert GatewayConfig(stages=explicit).stages["simulator_driver"] == explicit["simulator_driver"]
+    assert STAGES["navigation"] == Service.HYDROGEN

@@ -1,8 +1,41 @@
 # Gridlocked simulator-driver verification
 
-Verified locally on November 21, 2026. This evidence concerns structured-state simulation, not camera perception or the visual Genie navigation loop.
+Verification recorded on November 21, 2026. The Hydrogen run below predates the continuous Decisions driver and does not measure its latency. This evidence concerns structured-state simulation, not camera perception or the visual Genie navigation loop.
 
-## Live Gemini run
+## Decisions driver migration
+
+Three live calls through the updated `DriverController`, existing backend credential,
+and durable gateway ledger returned `gemini-decision-1`:
+
+| Structured scenario | Action and target | End-to-end controller latency | Gateway request ID |
+| --- | --- | --- | --- |
+| Clear route, starting from rest | Accelerate, 2.5 m/s | 1,273 ms | `ff823dee-1cbb-45e4-8473-fb9855580e3a` |
+| Clear route, currently 6 m/s | Accelerate, 8.5 m/s | 217 ms | `1020cbe2-497e-48da-a068-4d1bafcd5d21` |
+| Red signal 3 m ahead, currently 2 m/s | Brake, 0 m/s | 278 ms | `c42daf32-413c-4bfc-be64-99965629597f` |
+
+These are three synthetic-state checks, not a general latency benchmark or a live
+browser driving run. The first call includes connection setup. The updated browser
+uses one continuous physics loop, a one-second request interval, and a three-second
+observation freshness bound. Stop, failures and expired commands terminate the loop.
+
+Migration checks: 100 frontend tests passed, production build passed, and contract
+drift checks passed. The backend suite passed 521 tests inside the sandbox; its
+remaining local-port binding test passed outside the sandbox (522 total). The
+existing MapLibre/Three bundle-size advisory remains. Driver regressions cover
+motion during pending inference, stale command expiry, late-result rejection,
+route/time/decision limits, asynchronous trace attribution, typed Decisions output,
+and deadline cleanup through the real gateway adapter with a fake HTTP provider.
+
+Isolated Chromium checks at 1440 × 900 and 390 × 844 used intercepted provider
+responses. While the second decision was held, the timeline advanced from 1.0 to
+1.8 seconds with only one request pending. Stop at 2.3 seconds froze motion and
+exported two contiguous applied intervals; the delayed observation preceded its
+application time. A separate stop at 1.1 seconds ignored a late successful response
+even when transport cancellation was disabled. A stalled request stopped at about
+three seconds with a visible error and an error trace. Both viewports had no
+uncaught browser errors. These browser checks used fixtures, not live model calls.
+
+## Historical Hydrogen run
 
 The browser called the existing Hydrogen gateway through `POST /api/driver/decision`. The server used its existing backend-only credential and durable usage ledger. No mock decision or substitute replay was used for the controlled ego.
 

@@ -1,5 +1,5 @@
 import { ArrowUpRight, BrainCircuit, Download, Play, Square } from 'lucide-react';
-import { MAX_DRIVER_STEPS } from './types';
+import { MAX_DRIVER_STEPS, MAX_DRIVE_SECONDS } from './types';
 import type { GeminiDriver } from './types';
 
 export interface DriverPanelProps {
@@ -28,7 +28,7 @@ export function DriverPanel({ driver, onStart }: DriverPanelProps) {
       <div className="driver-title"><BrainCircuit size={17} aria-hidden="true" /><h2 id="driver-heading">Gemini driver</h2></div>
       <span className={`driver-status driver-status-${driver.status}`}>{driver.status === 'thinking' ? 'Thinking' : driver.status === 'driving' ? 'Live agent' : 'Simulation'}</span>
     </div>
-    <p className="driver-subtitle">Gemini sets speed; steering follows route.</p>
+    <p className="driver-subtitle">Gemini Decisions sets speed as the car keeps moving.</p>
     <div className="driver-metrics">
       <div><strong>{Math.round(driver.speedMps * 2.23694)}<small>mph</small></strong><span>{driver.hasRun ? 'Vehicle speed' : 'Starting speed'}</span></div>
       <div><strong>{Math.round(driver.remainingM)}<small>m</small></strong><span>Route remaining</span></div>
@@ -37,9 +37,10 @@ export function DriverPanel({ driver, onStart }: DriverPanelProps) {
     <div className="driver-decision">
       <div className="driver-decision-heading" role="status"><ArrowUpRight size={15} aria-hidden="true" /><strong>{statusLabel}</strong></div>
       {latest ? <p><span className="driver-action">{latest.decision.action}</span> · {latest.decision.reason}</p>
-        : <p>Give Gemini the wheel for up to 36 seconds of simulation.</p>}
-      {driver.status === 'thinking' && <small>Simulation paused while the model responds.</small>}
-      {driver.completionReason === 'decision-limit' && <small>The 12-decision limit is reached. Start again for a new run.</small>}
+        : <p>Give Gemini the wheel for up to {MAX_DRIVE_SECONDS} seconds of continuous simulation.</p>}
+      {driver.status === 'thinking' && <small>Waiting for the first driving decision.</small>}
+      {driver.completionReason === 'time-limit' && <small>The {MAX_DRIVE_SECONDS}-second drive is complete. Start again for a new run.</small>}
+      {driver.completionReason === 'decision-limit' && <small>The {MAX_DRIVER_STEPS}-decision limit is reached. Start again for a new run.</small>}
     </div>
     {driver.error && <p className="driver-error" role="alert">{driver.error}</p>}
     {driver.unavailableReason && <p className="driver-notice">{driver.unavailableReason}</p>}

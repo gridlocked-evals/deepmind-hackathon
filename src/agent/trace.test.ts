@@ -5,8 +5,10 @@ import { advanceDriver, clampAtBoundaries, createDriverSimulation, driverObserva
 import type { DriverSimulation } from './physics';
 import { createTrace, DRIVER_TRACE_SCHEMA, DriverRequestError, finalizeHold, finishTrace, readDriverTrace, recordTick, startHold, traceError } from './trace';
 import type { DriverTrace } from './trace';
-import { MAX_DRIVER_STEPS, SECONDS_PER_DECISION, SPEED_LIMIT_MPS } from './types';
+import { DECISION_INTERVAL_SECONDS, MAX_COMMAND_AGE_SECONDS, MAX_DRIVER_STEPS, MAX_DRIVE_SECONDS, SPEED_LIMIT_MPS } from './types';
 import type { DecisionEntry, DriverDecision, DriverResponse } from './types';
+
+const FIXTURE_HOLD_SECONDS = 3;
 
 const accelerate: DriverDecision = { action: 'accelerate', target_speed_mps: SPEED_LIMIT_MPS, reason: 'Proceed along the route.', confidence: 0.9 };
 const cruise: DriverDecision = { action: 'cruise', target_speed_mps: 4, reason: 'Hold speed.', confidence: 0.8 };
@@ -26,7 +28,7 @@ interface FixtureOptions {
   failAt?: { step: number; message: string };
 }
 
-/** Mirrors useGeminiDriver's loop with fixed 0.1 s ticks and canned responses; no network. */
+/** Exercises the trace recorder with fixed 0.1 s ticks and canned variable-duration holds; no network. */
 function runFixture(initial: DriverSimulation, decisions: DriverDecision[], options: FixtureOptions = {}) {
   const runId = 'fixture-run-0001';
   const trace = createTrace(runId, initial);
@@ -39,7 +41,7 @@ function runFixture(initial: DriverSimulation, decisions: DriverDecision[], opti
       decision: decisions[Math.min(step, decisions.length - 1)], max_steps: MAX_DRIVER_STEPS };
     log.push({ ...response, simulationTime: observation.simulation_time });
     const hold = startHold(simulation);
-    const until = simulation.time + SECONDS_PER_DECISION;
+    const until = simulation.time + FIXTURE_HOLD_SECONDS;
     for (let tick = 0; simulation.time < until - 0.00001 && !routeComplete(simulation); tick++) {
       if (options.interruptAt?.step === step && tick === options.interruptAt.ticks) {
         finishTrace(trace, { state: 'interrupted' });
@@ -76,7 +78,7 @@ describe('driver trace export', () => {
       expect(step.applied.start_time).toBe(step.observation.simulation_time);
       expect(step.applied.start_speed_mps).toBe(step.observation.speed_mps);
       expect(step.applied.end_time).toBeGreaterThan(step.applied.start_time);
-      expect(step.applied.end_time - step.applied.start_time).toBeLessThanOrEqual(SECONDS_PER_DECISION + 1e-9);
+      expect(step.applied.end_time - step.applied.start_time).toBeLessThanOrEqual(FIXTURE_HOLD_SECONDS + 1e-9);
       if (i > 0) expect(step.applied.start_time).toBe(trace.steps[i - 1].applied.end_time);
     });
     const travelled = trace.steps.reduce((sum, step) => sum + step.applied.distance_m, 0);
@@ -84,10 +86,10 @@ describe('driver trace export', () => {
   });
 
   it('distinguishes a decision-limited run from route completion', () => {
-    const { trace } = runFixture(createDriverSimulation(streetScene()), [accelerate]);
+    const { trace } = runFixture(createDriverSimulation(streetScene([[0, 0], [10000, 0]])), [accelerate]);
     expect(trace.terminal).toEqual({ state: 'decision_limit' });
     expect(trace.steps).toHaveLength(MAX_DRIVER_STEPS);
-    expect(trace.steps.at(-1)!.applied.end_time).toBeCloseTo(MAX_DRIVER_STEPS * SECONDS_PER_DECISION, 6);
+    expect(trace.steps.at(-1)!.applied.end_time).toBeCloseTo(MAX_DRIVER_STEPS * FIXTURE_HOLD_SECONDS, 6);
   });
 
   it('ends an interrupted run at the interruption without inventing later observations or actions', () => {
@@ -160,10 +162,10 @@ describe('driver trace export', () => {
     const { trace } = runFixture(createDriverSimulation(streetScene()), [accelerate], { interruptAt: { step: 0, ticks: 5 } });
     expect(trace.schema).toBe(DRIVER_TRACE_SCHEMA);
     expect(trace.provenance).toMatchObject({ source: 'synthetic_simulator_state', scenario_id: 'test-route', motion_source: 'driving-route' });
-    expect(trace.bounds).toEqual({ max_decisions: 12, seconds_per_decision: 3 });
+    expect(trace.bounds).toEqual({ max_decisions: MAX_DRIVER_STEPS, decision_interval_seconds: DECISION_INTERVAL_SECONDS, max_command_age_seconds: MAX_COMMAND_AGE_SECONDS, max_simulation_seconds: MAX_DRIVE_SECONDS });
     const json = JSON.stringify(trace);
     expect(readDriverTrace(json)).toEqual(trace);
-    expect(() => readDriverTrace(JSON.stringify({ ...trace, schema: 'gridlocked-driver-trace/2' }))).toThrow(/Unsupported driver trace schema/);
+    expect(() => readDriverTrace(JSON.stringify({ ...trace, schema: 'gridlocked-driver-trace/999' }))).toThrow(/Unsupported driver trace schema/);
     expect(() => readDriverTrace(JSON.stringify({ ...trace, schema: undefined }))).toThrow(/Unsupported driver trace schema/);
     expect(() => readDriverTrace(JSON.stringify({ ...trace, provenance: { ...trace.provenance, source: 'camera' } }))).toThrow(/synthetic/);
   });
@@ -202,6 +204,33 @@ describe('driver trace export', () => {
     // The hold's own cleanup runs later and must not add it again.
     finalizeHold(trace, response, observation, hold, simulation);
     expect(trace.steps).toHaveLength(1);
+  });
+
+  it('keeps the request snapshot separate from the later application while crediting pending motion to the old command', () => {
+    const initial = createDriverSimulation(streetScene());
+    const trace = createTrace('continuous-run', initial);
+    const first: DriverResponse = { run_id: trace.run_id, step: 0, model_id: 'gemini-decision-1', request_id: 'req-0',
+      decision: accelerate, max_steps: MAX_DRIVER_STEPS };
+    const firstHold = startHold(initial);
+    const requestedAt = advanceDriver(initial, accelerate, 0.1);
+    recordTick(firstHold, initial, requestedAt);
+    const observation = driverObservation(requestedAt);
+    const appliedAt = advanceDriver(requestedAt, accelerate, 0.1);
+    recordTick(firstHold, requestedAt, appliedAt);
+    finalizeHold(trace, first, driverObservation(initial), firstHold, appliedAt);
+
+    const second = { ...first, step: 1, request_id: 'req-1', decision: cruise };
+    const secondHold = startHold(appliedAt);
+    const end = advanceDriver(appliedAt, cruise, 0.1);
+    recordTick(secondHold, appliedAt, end);
+    finalizeHold(trace, second, observation, secondHold, end);
+    finishTrace(trace, { state: 'time_limit' });
+
+    expect(trace.steps[1].observation.simulation_time).toBe(0.1);
+    expect(trace.steps[1].applied.start_time).toBe(0.2);
+    expect(trace.steps[0].applied.end_time).toBe(trace.steps[1].applied.start_time);
+    expect(trace.steps.reduce((sum, step) => sum + step.applied.distance_m, 0)).toBeCloseTo(end.progress - initial.progress);
+    expect(readDriverTrace(JSON.stringify(trace))).toEqual(trace);
   });
 
   it('rejects a trace that has only a schema and provenance', () => {
