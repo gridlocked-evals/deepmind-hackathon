@@ -1,7 +1,7 @@
 import { DEMO_SCENE_ID, demoSignal, sampleScenario, streetPoint } from '../scene/DemoScenarioProvider';
 import type { ActorDefinition, ActorState, ScenarioBundle, SimulationFrame, Vec2 } from '../types';
 import { SPEED_LIMIT_MPS } from './types';
-import type { DriverDecision, DriverObservation } from './types';
+import type { DriverDecision, DriverObservation, GuardReason } from './types';
 
 export const MAX_PHYSICS_STEP = 0.1;
 export const MAX_ACCELERATION = 1.5;
@@ -24,6 +24,8 @@ export interface DriverSimulation {
   braking: boolean;
   stopProgress: number | null;
   signalStop: boolean;
+  /** Which local guard changed the applied motion on the last tick; trace instrumentation only. */
+  guard: GuardReason;
 }
 
 export function createPath(points: Vec2[]): RoutePath {
@@ -74,7 +76,7 @@ export function createDriverSimulation(scenario: ScenarioBundle): DriverSimulati
   const stopProgress = scenario.id === DEMO_SCENE_ID
     ? projectOntoRoute(path, streetPoint(8, -15.5)).progress - ego.length / 2 - 0.7 : null;
   return { scenario, path, ego, time: 0, progress, speed: Math.min(SPEED_LIMIT_MPS, initial.speed),
-    braking: false, stopProgress, signalStop: false };
+    braking: false, stopProgress, signalStop: false, guard: 'none' };
 }
 
 function nearestLeader(state: DriverSimulation, time = state.time) {
@@ -122,29 +124,48 @@ export function advanceDriver(state: DriverSimulation, decision: DriverDecision,
   // Slow near sharp polyline turns; these are route steering, not model-generated steering commands.
   const turn = Math.abs(observation.upcoming_turn_degrees);
   if (turn > 25) desired = Math.min(desired, Math.max(2.5, 8 * (1 - Math.min(150, turn) / 180)));
+  const accelerationFor = (target: number) => Math.max(-COMFORTABLE_BRAKING, Math.min(MAX_ACCELERATION, (target - state.speed) * 1.8));
+  let guard: GuardReason = 'none';
+  const applyGuard = (cap: number, reason: GuardReason) => {
+    if (cap >= desired) return;
+    // A later target cap may be redundant after braking has saturated. Preserve
+    // the earlier guard unless this cap changes the applied acceleration.
+    if (accelerationFor(cap) < accelerationFor(desired) - 1e-9) guard = reason;
+    desired = cap;
+  };
   if (observation.lead_gap_m !== null) {
     const room = Math.max(0, observation.lead_gap_m - MIN_GAP);
-    desired = Math.min(desired, room / 1.8,
-      Math.sqrt((observation.lead_speed_mps ?? 0) ** 2 + 2 * COMFORTABLE_BRAKING * room));
+    const cap = Math.min(room / 1.8, Math.sqrt((observation.lead_speed_mps ?? 0) ** 2 + 2 * COMFORTABLE_BRAKING * room));
+    applyGuard(cap, 'leader_guard');
   }
   let signalStop = state.signalStop;
   if (observation.signal === 'green') signalStop = false;
   else if (observation.stop_distance_m !== null && (observation.signal === 'red'
     || (observation.signal === 'amber' && observation.stop_distance_m > state.speed ** 2 / (2 * COMFORTABLE_BRAKING) + 1))) signalStop = true;
-  if (signalStop && observation.stop_distance_m !== null) desired = Math.min(desired,
-    Math.sqrt(2 * 2 * observation.stop_distance_m), observation.stop_distance_m * 1.5);
+  if (signalStop && observation.stop_distance_m !== null) {
+    const cap = Math.min(Math.sqrt(2 * 2 * observation.stop_distance_m), observation.stop_distance_m * 1.5);
+    applyGuard(cap, 'red_line_guard');
+  }
 
-  const acceleration = Math.max(-COMFORTABLE_BRAKING, Math.min(MAX_ACCELERATION, (desired - state.speed) * 1.8));
+  const acceleration = accelerationFor(desired);
   let speed = Math.max(0, Math.min(SPEED_LIMIT_MPS, state.speed + acceleration * delta));
   let progress = state.progress + (state.speed + speed) * 0.5 * delta;
   let boundary = state.path.length;
-  if (signalStop && observation.stop_distance_m !== null && state.stopProgress !== null) boundary = Math.min(boundary, state.stopProgress);
+  let boundaryGuard: GuardReason = 'none';
+  if (signalStop && observation.stop_distance_m !== null && state.stopProgress !== null && state.stopProgress < boundary) {
+    boundary = state.stopProgress; boundaryGuard = 'red_line_guard';
+  }
   const nextLeader = nearestLeader(state, state.time + delta);
-  if (nextLeader) boundary = Math.min(boundary, nextLeader.progress - (state.ego.length + nextLeader.length) / 2 - MIN_GAP);
+  const leaderBoundary = nextLeader ? nextLeader.progress - (state.ego.length + nextLeader.length) / 2 - MIN_GAP : Infinity;
+  if (leaderBoundary < boundary) { boundary = leaderBoundary; boundaryGuard = 'leader_guard'; }
   // Collision and end boundaries may override comfortable braking in an emergency.
-  if (progress >= boundary) { progress = Math.max(state.progress, boundary); speed = 0; }
+  if (progress >= boundary) {
+    const clamped = Math.max(state.progress, boundary);
+    if (boundaryGuard !== 'none' && (clamped < progress - 1e-9 || speed > 1e-9)) guard = boundaryGuard;
+    progress = clamped; speed = 0;
+  }
   return { ...state, time: state.time + delta, progress, speed,
-    signalStop, braking: acceleration < -0.25 || speed < state.speed - 0.01 };
+    signalStop, braking: acceleration < -0.25 || speed < state.speed - 0.01, guard };
 }
 
 export function driverFrame(state: DriverSimulation): SimulationFrame {
