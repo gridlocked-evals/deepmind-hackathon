@@ -150,6 +150,8 @@ second injector. Choose **Carbon**, **Random baseline** (with a seed) or **Off**
   10 s apart, triggered by 48 s, so 12 s of the 60 s run remain. Decisions are
   validated strictly (unknown type, out-of-bounds parameters and extra fields
   are rejected) and converted into a #72 event checked by `parseScenario`.
+  Both requested triggers and their actual next-3-second application barriers
+  must be at least 10 s apart; rounding must not shorten the gap.
 - **Application.** Because #72 time triggers end at 24 s, each attack fills a
   preallocated slot (`attack-1`, `attack-2`) as a `manual` event. It is requested
   and applied at the first barrier at or after `trigger_seconds`. The record keeps
@@ -158,10 +160,13 @@ second injector. Choose **Carbon**, **Random baseline** (with a seed) or **Off**
   speed v at that barrier, an attack with `distanceAheadM < 3v + v²/7 + 5` is not
   injected. It is recorded as `void: unavoidable` and counted separately. Here 3 s
   is the maximum command age and 3.5 m/s² comfortable braking.
-- **Random baseline.** It runs at the same barriers, with the same budget and
-  cutoff and the same decision shape. Action, type, trigger, distance, approach
-  and duration are uniform within the same bounds. It uses its own seeded
-  mulberry32 stream, never simulation randomness.
+- **Random baseline.** It runs at the same barriers, with the same budget,
+  cutoff, decision shape and choice-time avoidability gate as Carbon. It samples
+  uniformly among admissible trigger tenths that satisfy both spacing checks,
+  and draws distance only from the avoidable interval at the current speed.
+  If no distance is admissible, it waits. Both policies still recheck actual
+  speed at injection. The policy uses its own seeded mulberry32 stream, never
+  simulation randomness; numeric parameters are rounded to tenths.
 - **Eval option: guards ignore injected hazards.** The leader guard skips
   `event-*` actors, both in its target cap and in its hard-stop boundary. The
   model still sees them through `lead_gap_m`/`lead_speed_mps`, and the
@@ -173,8 +178,8 @@ telemetry, contacts and event log:
 - type, decision time, `trigger_seconds`, actual application time, who chose it
   and why;
 - `outcome`, with precedence contact > near_miss (exact oriented-rectangle
-  separation < 1.0 m) > cleared (the whole ego is past every corner of the
-  obstruction) > unresolved;
+  separation < 1.0 m) > cleared (the ego's rear has passed the attack anchor
+  along the route and every obstruction corner lies behind its rear) > unresolved;
 - for `unresolved`, a `resolution`: `safe_hold` (the ego stopped behind it),
   `removed` (scripted clearance came first) or `horizon_censored`;
 - `guard_assisted`, true when any guard changed applied motion between
@@ -191,10 +196,14 @@ stalling driver cannot look good:
   injected hazard present and route not finished. A stopped replayed leader
   still counts.
 
-The lane's score shows unassisted and assisted avoided/total separately, each
-with its own denominator. Void and censored attacks are listed but excluded from
-both. All of this is an optional `adversary` section in the existing v2 trace;
-the version is unchanged.
+The lane reports unassisted physical clearances over all eligible issued attacks.
+Assisted attacks and horizon-censored unresolved attacks remain in that shared
+denominator. Near misses, safe holds and scripted removal earn no clearance credit.
+The assisted/unassisted clearance rates are separate diagnostic slices, and all
+physical outcomes are counted. Void exclusions and censoring are disclosed.
+These are descriptive counts from attacks chosen during this run, not the
+predeclared paired evaluation roster required by #32/#70. All of this is an
+optional `adversary` section in the existing v2 trace; the version is unchanged.
 
 Limits: contact and separation are sampled at 0.1 s ticks. There is no swept
 contact between ticks. Crossing hazards (pedestrian, red-light runner) need the

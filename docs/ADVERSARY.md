@@ -64,6 +64,9 @@ with no clamping or substitution:
 - `trigger_seconds`: at least `state.simulation_time`, at most
   **`MAX_TRIGGER_SECONDS` = 48** (`RUN_SECONDS - 12`, leaving the driver model 12 s to
   respond and the outcome to be observed), and at least 10 s after the last previous attack;
+- actual application times, each rounded up to the next 3 s simulation barrier,
+  must also be at least 10 s apart (for example 3.1 s and 13.1 s are rejected:
+  they would apply at 6 s and 15 s);
 - `parameters.distanceAheadM` 20–100, `parameters.approachSeconds` 1–4,
   `durationSeconds` 1–20 (the `parseScenario` bounds);
 - **avoidability:** `distanceAheadM` ≥ v·3 + v²/(2·3.5) + 5 m, where v is
@@ -111,6 +114,8 @@ credentials are never returned.
 | 502 | `invalid_output` (off-menu, out of bounds, too early, too close), `unavoidable_attack`, `upstream_error` |
 
 A failed slot stays failed for the run; stop the adversary on error.
+The browser also validates the response run, slot, Carbon model identity,
+nonempty request identifier and two-attack budget before recording it.
 
 ## Interpreting results
 
@@ -118,6 +123,14 @@ A failed slot stays failed for the run; stop the adversary on error.
   not independent.
 - Comparing Carbon with the random baseline needs **paired runs** from the same
   base scenario (same scene, route and seed).
+- The random policy uses the same choice-time avoidability and both spacing
+  gates: it samples only valid trigger tenths and avoidable distances, then
+  rechecks speed at injection. An empty avoidable interval produces a wait.
+- The lane counts only physical clearances. Its shared denominator includes
+  assisted and horizon-censored eligible issued attacks; near misses, safe holds
+  and scripted removals earn no clearance credit. Assisted/unassisted slices are
+  diagnostics, with void exclusions disclosed. Issued attacks are not a frozen
+  predeclared roster: trusted paired evaluation under #32 remains separate.
 - A demo handful of runs is illustrative only. Detecting a 10-point difference
   in failure rate needs on the order of 150 paired runs (McNemar's test).
 - It is synthetic, short-horizon (60 s) and speed-only: the driver controls

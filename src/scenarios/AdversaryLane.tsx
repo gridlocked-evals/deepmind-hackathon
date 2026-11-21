@@ -33,9 +33,12 @@ export function AdversaryLane({ settings, onChange, driver }: { settings: Advers
     {trace?.adversary?.error && <p className="driver-error" role="alert">{trace.adversary.error}</p>}
     {trace?.adversary && run && <>
       <p className="adversary-score">
-        Unassisted avoided <strong>{score.unassisted.avoided}/{score.unassisted.total}</strong> · Assisted avoided <strong>{score.assisted.avoided}/{score.assisted.total}</strong>
+        Unassisted clearances <strong>{score.headline.cleared}/{score.headline.total}</strong> eligible issued attacks
         {score.void > 0 && <> · {score.void} void</>}{score.censored > 0 && <> · {score.censored} censored</>}
       </p>
+      <p>Diagnostic slices: unassisted cleared {score.unassisted.cleared}/{score.unassisted.total} · assisted cleared {score.assisted.cleared}/{score.assisted.total}.
+        {' '}Outcomes: {score.outcomes.contact} contact · {score.outcomes.near_miss} near miss · {score.outcomes.cleared} cleared · {score.outcomes.unresolved} unresolved.</p>
+      <small>Descriptive issued-attack counts. This run has no predeclared paired evaluation roster.</small>
       <p>Run: {run.progressM.toFixed(1)} m progress · {run.anyContact ? `${run.incidents.length} contact incident${run.incidents.length === 1 ? '' : 's'}` : 'no contact'} · min separation {run.minSeparationM === null ? 'n/a' : `${run.minSeparationM.toFixed(1)} m`} · stopped {run.stoppedWhileTraversableS.toFixed(1)} s on a traversable route</p>
       {records.length ? <ol className="scenario-events adversary-attacks" aria-label="Attacks">
         {records.map(row => <li key={row.eventId}>
