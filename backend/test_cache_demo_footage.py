@@ -54,6 +54,15 @@ def test_successful_run_releases_old_pins_after_writing_index(tmp_path, monkeypa
     assert "new-cam" in json.loads(out.read_text())["cameras"]
 
 
+@pytest.mark.parametrize("invalid", ["{", '{"cameras":{"broken":{}}}'])
+def test_malformed_previous_index_can_be_rebuilt_without_guessing_old_pins(tmp_path, monkeypatch, invalid):
+    module, out, calls = load(tmp_path, monkeypatch)
+    out.write_text(invalid)
+    assert module.main() == 0
+    assert set(json.loads(out.read_text())["cameras"]) == {"new-cam"}
+    assert not [path for method, path in calls if method == "DELETE"]
+
+
 def test_failed_first_worker_releases_unconsumed_later_workers_pin(tmp_path, monkeypatch):
     module, out, _ = load(tmp_path, monkeypatch)
     before = out.read_text()
