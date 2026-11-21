@@ -285,12 +285,68 @@ def test_cancellation_retains_trace_failure_and_pinned_originals(tmp_path):
                 rates_valid_through=date(2030,1,1)),http,api_key='test-observation-key')
             task=asyncio.create_task(extract(gateway,store,captures,ExtractRequest(captureId=manifest['id'],cameraId=manifest['cameraId'])))
             await asyncio.wait_for(started.wait(),2)
-            task.cancel()
-            with pytest.raises(asyncio.CancelledError):
+            task.cancel('private cancellation detail')
+            with pytest.raises(asyncio.CancelledError) as cancelled:
                 await task
+            assert cancelled.value.args == ('private cancellation detail',)
             report=store.list('extractions')[0]
             assert report['status']=='cancelled' and report['metrics']['failures']==1
-            assert report['windows'][0]['gatewayRequestId']
-            assert report['windows'][0]['modelCall']['requestId'].startswith('gateway:')
+            request_id = cancelled.value.request_id
+            attempt = report['windows'][0]
+            assert attempt['gatewayRequestId'] == request_id
+            assert attempt['modelCall']['requestId'] == f'gateway:{request_id}'
+            ledger = gateway.ledger.get(request_id)
+            assert ledger['outcome'] == 'cancelled' and ledger['usage'] is None
+            assert 'sha256:' + ledger['input_hash'] in attempt['modelCall']['inputHashes']
+            assert all(attempt['modelCall'][field] is None for field in ('inputTokens', 'outputTokens', 'costUsd'))
+            assert 'private cancellation detail' not in json.dumps(report)
             assert report['id'] in captures.pins(manifest['id'])
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize('completed_windows', [0, 1])
+def test_cancel_before_admission_never_borrows_a_previous_window_trace(tmp_path, video, completed_windows):
+    captures, store, _ = setup(tmp_path)
+    manifest = video_capture(captures, video)
+    provider = Provider()
+
+    async def run():
+        waiting = asyncio.Event()
+        async with httpx.AsyncClient(transport=httpx.MockTransport(provider.handler)) as http:
+            gateway = ModelGateway(GatewayConfig(data_dir=tmp_path/'ledger', max_attempts=1,
+                rates_valid_through=date(2030, 1, 1)), http, api_key='test-observation-key')
+            acquire = gateway.slots.acquire
+            admissions = 0
+
+            async def blocked_admission():
+                nonlocal admissions
+                if admissions == completed_windows:
+                    waiting.set()
+                    await asyncio.Semaphore(0).acquire()
+                admissions += 1
+                return await acquire()
+
+            gateway.slots.acquire = blocked_admission
+            task = asyncio.create_task(extract(gateway, store, captures,
+                ExtractRequest(captureId=manifest['id'], cameraId=manifest['cameraId'])))
+            await asyncio.wait_for(waiting.wait(), 5)
+            completed = [record for record in store.list('extraction_attempts') if record['status'] == 'ok']
+            task.cancel('private cancellation detail')
+            with pytest.raises(asyncio.CancelledError) as cancelled:
+                await task
+            assert cancelled.value.args == ('private cancellation detail',)
+            assert getattr(cancelled.value, 'request_id', None) is None
+            report = store.list('extractions')[0]
+            assert report['status'] == 'cancelled'
+            assert report['windows'][:-1] == completed
+            assert len(report['batchIds']) == completed_windows
+            assert len(provider.requests) == len(gateway.ledger.attempts()) == completed_windows
+            attempt = report['windows'][-1]
+            assert attempt['gatewayRequestId'] is None
+            assert all(attempt['modelCall'][field] is None
+                       for field in ('requestId', 'inputTokens', 'outputTokens', 'costUsd'))
+            for previous in completed:
+                assert 'sha256:' + previous['inputHash'] not in attempt['modelCall']['inputHashes']
+            assert 'private cancellation detail' not in json.dumps(report)
+
     asyncio.run(run())

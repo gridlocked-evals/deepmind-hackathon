@@ -19,6 +19,7 @@ from .artifacts import ArtifactError, ArtifactStore, new_id, sha256, utcnow
 from .contracts import ReferenceImage
 from .edits import EditBundle
 from .gateway import CallContext, GatewayError, ModelGateway, Service
+from .gateway.contracts import ErrorCode
 from .modelcalls import from_error, from_result
 
 PROMPT_ID = "nano-banana.mayor-reference.v1"
@@ -183,12 +184,16 @@ async def _generate(gateway, store, bundle, *, style, feedback, allow_experiment
         result = await gateway.generate(Service.NANO_BANANA, stage="reference", context=context, input_value=[
             {"type": "text", "text": prompt},
             {"type": "image", "mime_type": frame["mimeType"], "data": base64.b64encode(frame_bytes).decode()}])
-    except GatewayError as error:
+    except (GatewayError, asyncio.CancelledError) as exc:
+        error = (GatewayError(ErrorCode.CANCELLED, request_id=getattr(exc, "request_id", None))
+                 if isinstance(exc, asyncio.CancelledError) else exc)
         call = from_error(gateway, Service.NANO_BANANA, error, prompt_id=PROMPT_ID, domain_hashes=domain,
                           requested_at=requested, completed_at=utcnow())
         record = AttemptRecord(**base, status="failed", referenceImage=None, modelCall=call.model_dump(mode="json"),
                                error=error.public())
         store.put("references", record_id, record)
+        if isinstance(exc, asyncio.CancelledError):
+            raise  # counted and retained, but cancellation must still reach the caller
         return record
     call = from_result(gateway, Service.NANO_BANANA, result, prompt_id=PROMPT_ID, domain_hashes=domain,
                        requested_at=requested, completed_at=utcnow())

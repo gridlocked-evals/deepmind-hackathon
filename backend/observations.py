@@ -243,11 +243,11 @@ async def extract(gateway: ModelGateway, store: ArtifactStore, captures: Capture
                     if result:
                         record['modelCall']['outcome'] = 'invalid_output'
                 report['failures'].append({'attemptId': attempt_id, 'error': record['error']})
-            except asyncio.CancelledError:
+            except asyncio.CancelledError as exc:
                 record['error'] = {'code': 'cancelled', 'message': 'Caller cancelled extraction; no new capture was taken.'}
-                recent = next((r for r in gateway.ledger.attempts(limit=100)
-                    if json.loads(r['context'])['episode_id'] == job_id and r['stage']=='observation'), None)
-                error = GatewayError(ErrorCode.CANCELLED, request_id=recent['request_id'] if recent else None)
+                # A prior window belongs to the same extraction but is not this
+                # cancelled attempt. Before admission there is no request ID.
+                error = GatewayError(ErrorCode.CANCELLED, request_id=getattr(exc, 'request_id', None))
                 record.update(modelCall=from_error(gateway, Service.HYDROGEN, error, prompt_id=PROMPT_ID,
                     domain_hashes=hashes, requested_at=requested_at, completed_at=utcnow()).model_dump(mode='json'),
                     gatewayRequestId=error.request_id)

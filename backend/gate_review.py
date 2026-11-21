@@ -110,6 +110,8 @@ def _recompute(gate: dict, t: dict) -> str:
 def calibrate(store: ArtifactStore, out: Path, target_far: float = 0.1) -> dict:
     gates = {g["gateDecision"]["id"]: g for g in store.list("gates")}
     labelled = [(gates[k["gateDecisionId"]], label) for _, k, label in _labelled(out) if label != "unsure"]
+    if not labelled:
+        raise SystemExit("no labelled examples: mark at least one example acceptable or unacceptable")
     best = None
     for pass_at in (0.6, 0.7, 0.8, 0.85, 0.9, 0.95):
         for fail_at in (0.1, 0.2, 0.3, 0.4):
@@ -120,8 +122,6 @@ def calibrate(store: ArtifactStore, out: Path, target_far: float = 0.1) -> dict:
                 rank = (far <= target_far, m["acceptableAccepted"]["k"], -far, pass_at)
                 if best is None or rank > best[0]:
                     best = (rank, t, m)
-    if best is None:
-        raise SystemExit("no labelled examples")
     sheet = (out / "sheet.csv").read_bytes()
     return {"thresholds": best[1], "metrics": best[2], "targetFalseAcceptance": target_far,
             "developmentSet": {"sheetSha256": "sha256:" + hashlib.sha256(sheet).hexdigest(),
