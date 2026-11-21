@@ -129,6 +129,35 @@ The registry is intentionally process-local: use a single local API worker for
 testing. It is reset by a backend restart and is not a distributed idempotency
 store. The durable gateway ledger continues to enforce spending across calls.
 
+## Trace export
+
+After a run ends, the driver panel shows **Download trace (JSON)**. This applies
+to a completed, decision-limited, stopped, failed or interrupted run. The file
+uses schema `gridlocked-driver-trace/1` (`src/agent/trace.ts`) and is labelled
+`provenance.source: "synthetic_simulator_state"`. It is structured simulator
+state. It is not camera or pixel input, a Hydrogen/Genie visual trace, or a
+Decisions safety score. Each step holds the following:
+
+- the exact observation sent to this endpoint, whose `simulation_time` starts
+  the hold;
+- the request ID and the model's **proposed** decision;
+- the **applied** motion: start and end simulation time, start and end speed,
+  and distance travelled;
+- `guard`: whether the local leader or red-line guard changed the applied
+  motion. The reason is `leader_guard`, `red_line_guard` or `none`, and each
+  event records the simulation time it started.
+
+`terminal.state` is `route_complete`, `decision_limit`, `stopped_by_user`,
+`error` (with its message) or `interrupted` (the tab was hidden). A request
+still pending when the run ends adds no step, and a hold cut short ends at the
+stop time. The bounds come from the 12-decision and 3-second constants. The
+export carries no credentials or provider data beyond the model ID, request ID
+and decision.
+
+The trace lives only in browser memory. **Return to replay**, starting a new
+drive, changing scenario or route, and reloading the page all discard it. To
+keep it, download it before doing any of these.
+
 ## Local setup and provenance
 
 Configure `GEMINI_API_KEY` or `GOOGLE_API_KEY` on the backend only, as documented

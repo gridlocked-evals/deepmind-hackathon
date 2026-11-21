@@ -365,7 +365,12 @@ def test_runtime_sessions_cannot_be_reused(tmp_path):
 def test_symlink_alias_shares_the_freeze(tmp_path):
     path, pinned = locked(tmp_path, plan=None)
     alias = tmp_path / "alias.json"
-    alias.symlink_to(path)
+    try:
+        alias.symlink_to(path)
+    except OSError as error:
+        if getattr(error, "winerror", None) == 1314:
+            pytest.skip("Creating symlinks requires Windows developer mode or administrator privileges")
+        raise
     FinalRun(path, pinned)
     with pytest.raises(HoldoutError, match="already opened"):
         register_plan(alias, pinned, tmp_path / "suite.json", slots())
