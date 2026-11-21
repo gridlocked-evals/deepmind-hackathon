@@ -14,7 +14,7 @@ The repository also implements capture storage, Carbon edits, Nano Banana refere
 
 ## Hackathon provenance (Nov 21, 2026)
 
-Asked on Nov 21, 2026 when the starting React/Vite shell, Vestry traffic scene, 3D vehicle rendering, and camera/HLS proxy were built, the maintainer answered **"A mix / uncertain."** The exact boundary between work created before and during the event has not been verified; these foundations are not claimed as wholly event-built. The geographic map and camera playback architecture also adapt Pharos, as recorded in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+Paradox560 clarified on Nov 21, 2026 that the starting React/Vite app shell, Vestry traffic scene, 3D vehicle rendering, and camera/HLS proxy were **written during the hackathon**. This records the maintainer's statement of build timing. The geographic map and camera playback architecture also adapt Pharos, as recorded in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
 **Changes merged on the event day**
 
