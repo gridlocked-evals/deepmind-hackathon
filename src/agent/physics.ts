@@ -113,6 +113,24 @@ export function driverObservation(state: DriverSimulation): DriverObservation {
 }
 
 /** Gemini chooses desired speed; this deterministic layer follows the route and enforces constraints. */
+type Guard = Exclude<GuardReason, 'none'>;
+
+/** Clamps motion at each boundary with Math.min, exactly as before (the route end is not a guard); a
+ * guard is credited only if its boundary changed the applied progress or speed compared with just before it. */
+export function clampAtBoundaries(startProgress: number, progress: number, speed: number, end: number, bounds: [number, Guard][]) {
+  const at = (boundary: number): [number, number] => progress >= boundary ? [Math.max(startProgress, boundary), 0] : [progress, speed];
+  let boundary = end;
+  let guard: GuardReason = 'none';
+  for (const [limit, reason] of bounds) {
+    const before = at(boundary);
+    boundary = Math.min(boundary, limit);
+    const after = at(boundary);
+    if (Math.abs(after[0] - before[0]) > 1e-9 || Math.abs(after[1] - before[1]) > 1e-9) guard = reason;
+  }
+  const [clampedProgress, clampedSpeed] = at(boundary);
+  return { progress: clampedProgress, speed: clampedSpeed, guard };
+}
+
 export function advanceDriver(state: DriverSimulation, decision: DriverDecision, requestedDelta: number): DriverSimulation {
   const delta = Math.min(MAX_PHYSICS_STEP, Math.max(0, requestedDelta));
   if (!delta) return state;
@@ -148,24 +166,16 @@ export function advanceDriver(state: DriverSimulation, decision: DriverDecision,
   }
 
   const acceleration = accelerationFor(desired);
-  let speed = Math.max(0, Math.min(SPEED_LIMIT_MPS, state.speed + acceleration * delta));
-  let progress = state.progress + (state.speed + speed) * 0.5 * delta;
-  let boundary = state.path.length;
-  let boundaryGuard: GuardReason = 'none';
-  if (signalStop && observation.stop_distance_m !== null && state.stopProgress !== null && state.stopProgress < boundary) {
-    boundary = state.stopProgress; boundaryGuard = 'red_line_guard';
-  }
+  const unclampedSpeed = Math.max(0, Math.min(SPEED_LIMIT_MPS, state.speed + acceleration * delta));
+  const bounds: [number, Guard][] = [];
+  if (signalStop && observation.stop_distance_m !== null && state.stopProgress !== null) bounds.push([state.stopProgress, 'red_line_guard']);
   const nextLeader = nearestLeader(state, state.time + delta);
-  const leaderBoundary = nextLeader ? nextLeader.progress - (state.ego.length + nextLeader.length) / 2 - MIN_GAP : Infinity;
-  if (leaderBoundary < boundary) { boundary = leaderBoundary; boundaryGuard = 'leader_guard'; }
+  if (nextLeader) bounds.push([nextLeader.progress - (state.ego.length + nextLeader.length) / 2 - MIN_GAP, 'leader_guard']);
   // Collision and end boundaries may override comfortable braking in an emergency.
-  if (progress >= boundary) {
-    const clamped = Math.max(state.progress, boundary);
-    if (boundaryGuard !== 'none' && (clamped < progress - 1e-9 || speed > 1e-9)) guard = boundaryGuard;
-    progress = clamped; speed = 0;
-  }
-  return { ...state, time: state.time + delta, progress, speed,
-    signalStop, braking: acceleration < -0.25 || speed < state.speed - 0.01, guard };
+  const { progress, speed, guard: boundaryGuard } = clampAtBoundaries(state.progress,
+    state.progress + (state.speed + unclampedSpeed) * 0.5 * delta, unclampedSpeed, state.path.length, bounds);
+  return { ...state, time: state.time + delta, progress, speed, signalStop,
+    braking: acceleration < -0.25 || speed < state.speed - 0.01, guard: boundaryGuard !== 'none' ? boundaryGuard : guard };
 }
 
 export function driverFrame(state: DriverSimulation): SimulationFrame {

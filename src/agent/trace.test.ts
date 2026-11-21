@@ -1,9 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import { demoScenario } from '../scene/DemoScenarioProvider';
 import type { ScenarioBundle } from '../types';
-import { advanceDriver, createDriverSimulation, driverObservation, routeComplete } from './physics';
+import { advanceDriver, clampAtBoundaries, createDriverSimulation, driverObservation, routeComplete } from './physics';
 import type { DriverSimulation } from './physics';
-import { addStep, createTrace, DRIVER_TRACE_SCHEMA, finishTrace, readDriverTrace, recordTick, startHold } from './trace';
+import { createTrace, DRIVER_TRACE_SCHEMA, DriverRequestError, finalizeHold, finishTrace, readDriverTrace, recordTick, startHold, traceError } from './trace';
 import type { DriverTrace } from './trace';
 import { MAX_DRIVER_STEPS, SECONDS_PER_DECISION, SPEED_LIMIT_MPS } from './types';
 import type { DecisionEntry, DriverDecision, DriverResponse } from './types';
@@ -43,14 +43,14 @@ function runFixture(initial: DriverSimulation, decisions: DriverDecision[], opti
     for (let tick = 0; simulation.time < until - 0.00001 && !routeComplete(simulation); tick++) {
       if (options.interruptAt?.step === step && tick === options.interruptAt.ticks) {
         finishTrace(trace, { state: 'interrupted' });
-        addStep(trace, response, observation, hold, simulation);
+        finalizeHold(trace, response, observation, hold, simulation);
         return { trace, log };
       }
       const before = simulation;
       simulation = advanceDriver(before, response.decision, Math.min(0.1, until - before.time));
       recordTick(hold, before, simulation);
     }
-    addStep(trace, response, observation, hold, simulation);
+    finalizeHold(trace, response, observation, hold, simulation);
     if (routeComplete(simulation)) { finishTrace(trace, { state: 'route_complete' }); return { trace, log }; }
   }
   finishTrace(trace, { state: 'decision_limit' });
@@ -176,5 +176,45 @@ describe('driver trace export', () => {
     for (const trace of traces) {
       expect(keys(trace).filter(key => /key|token|secret|credential|password|auth|cookie|header/i.test(key))).toEqual([]);
     }
+  });
+
+  it('credits only the boundary that changed applied motion (red line already clamped, leader at 9.99)', () => {
+    const clamped = clampAtBoundaries(10, 10.1, 1, 100, [[10, 'red_line_guard'], [9.99, 'leader_guard']]);
+    expect(clamped).toEqual({ progress: 10, speed: 0, guard: 'red_line_guard' });
+    expect(clampAtBoundaries(10, 10.1, 1, 100, [[50, 'leader_guard']])).toEqual({ progress: 10.1, speed: 1, guard: 'none' });
+  });
+
+  it('includes a stopped hold exactly once in an export made right after Stop', () => {
+    const initial = createDriverSimulation(streetScene())!;
+    const trace = createTrace('stop-run', initial);
+    const observation = driverObservation(initial);
+    const response: DriverResponse = { run_id: 'stop-run', step: 0, model_id: 'gemini-test', request_id: 'req-0',
+      decision: accelerate, max_steps: MAX_DRIVER_STEPS };
+    const hold = startHold(initial);
+    let simulation = initial;
+    for (let tick = 0; tick < 5; tick++) { const before = simulation; simulation = advanceDriver(before, accelerate, 0.1); recordTick(hold, before, simulation); }
+    // halt(): record the partial hold, then the terminal state; export in the same tick.
+    finalizeHold(trace, response, observation, hold, simulation);
+    finishTrace(trace, { state: 'stopped_by_user' });
+    const exported = JSON.parse(JSON.stringify(trace)) as DriverTrace;
+    expect(exported.steps).toHaveLength(1);
+    expect(exported.steps[0].applied.end_time).toBeCloseTo(0.5);
+    // The hold's own cleanup runs later and must not add it again.
+    finalizeHold(trace, response, observation, hold, simulation);
+    expect(trace.steps).toHaveLength(1);
+  });
+
+  it('rejects a trace that has only a schema and provenance', () => {
+    const bare = JSON.stringify({ schema: DRIVER_TRACE_SCHEMA, provenance: { source: 'synthetic_simulator_state' } });
+    expect(() => readDriverTrace(bare)).toThrow('malformed');
+  });
+
+  it('keeps only redacted or fixed error text in a trace', () => {
+    let parseFailure: unknown;
+    try { JSON.parse('<html>proxy error Authorization: Bearer secret123</html>'); } catch (failure) { parseFailure = failure; }
+    expect(traceError(parseFailure)).toBe('The driving request failed.');
+    expect(traceError(new Error('raw upstream text'))).toBe('The driving request failed.');
+    expect(traceError(new DriverRequestError('Gemini returned an invalid driving decision. The simulation has stopped.')))
+      .toBe('Gemini returned an invalid driving decision. The simulation has stopped.');
   });
 });

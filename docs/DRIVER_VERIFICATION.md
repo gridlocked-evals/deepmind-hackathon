@@ -53,3 +53,9 @@ this was not live Gemini acceptance. A stopped six-decision run exported
 IDs matching the fixture log, and the final partial hold from 15 to 16.4326 simulation
 seconds. A scripted first-request failure exported `error` with zero steps. Returning
 to replay removed the export control. Both JSON downloads were parsed and checked.
+
+The trace-correction follow-up passed 80 frontend tests, the production build, and
+contract drift checks. A malformed-response browser fixture returned an HTML body
+with a test canary. Both the panel and downloaded trace showed only the fixed
+"The driving request failed." message; the trace contained zero steps and no canary.
+No provider was called.
