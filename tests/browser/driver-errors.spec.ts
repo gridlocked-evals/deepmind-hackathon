@@ -1,6 +1,8 @@
 import { test, expect, type DriverHarness, type DecisionReply } from './fixtures';
+import { MAX_COMMAND_AGE_SECONDS } from '../../src/agent/types';
 
 const INVALID_DECISION = 'Gemini returned an invalid driving decision. The simulation has stopped.';
+const EXPIRED_COMMAND = 'The next driving decision did not arrive before the current command expired. Driving stopped.';
 
 async function startPendingDrive(driver: DriverHarness) {
   await driver.open();
@@ -51,12 +53,12 @@ test('HTTP 503 preserves the gateway error and never substitutes or retries a de
   await expectStoppedWithoutFallback(driver, message);
 });
 
-test('the initial decision expires after three wall seconds without moving the car', async ({ driver }) => {
+test('the first pending decision freezes simulation until its command-age deadline stops the drive', async ({ driver }) => {
   await startPendingDrive(driver);
 
   // The request must remain pending right up to the deadline, with no
   // simulated progress or replacement request.
-  await driver.page.clock.fastForward(2_999);
+  await driver.page.clock.fastForward(MAX_COMMAND_AGE_SECONDS * 1_000 - 1);
   expect(await driver.time()).toBe(0);
   expect(await driver.decisionCount()).toBe(0);
   expect(driver.gateway.calls).toHaveLength(1);
@@ -64,7 +66,7 @@ test('the initial decision expires after three wall seconds without moving the c
   await expect(driver.page.getByRole('button', { name: 'Stop drive', exact: true })).toBeVisible();
 
   await driver.page.clock.fastForward(1);
-  await expectStoppedWithoutFallback(driver, 'The next driving decision did not arrive before the current command expired. Driving stopped.');
+  await expectStoppedWithoutFallback(driver, EXPIRED_COMMAND);
 });
 
 test('invalid JSON is redacted and stops the run without fabricating a decision', async ({ driver }) => {

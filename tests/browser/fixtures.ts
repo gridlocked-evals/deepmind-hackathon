@@ -5,6 +5,7 @@ import type { CameraSource } from '../../src/types';
 
 export { expect };
 
+// Match the gateway's Decisions contract; this model is never contacted.
 export const FIXTURE_MODEL = 'gemini-decision-1';
 export const FIXTURE_CAMERAS = {
   start: camera('start', 'Browser fixture start', [-74.011485, 40.722891]),
@@ -266,15 +267,11 @@ export class DriverHarness {
     await expect(this.page.locator('.driver-panel')).toBeVisible();
   }
 
-  /** Production closes the tools on mobile; call openDriver to inspect the panel again. */
+  /** Use the real baseline control to exclude hazards; production closes mobile tools after starting. */
   async startDriver(mode: 'baseline' | 'event' = 'baseline') {
     await this.openDriver();
-    // Timing/arrival checks isolate driver lifecycle from injected hazards. The
-    // event-mode case still exercises the primary scenario action explicitly.
-    const start = mode === 'baseline'
-      ? this.page.getByRole('button', { name: 'Run baseline without hazards', exact: true })
-      : this.page.getByRole('button', { name: /^(Start scenario with Gemini|Restart scenario)$/ });
-    await start.click();
+    await this.page.getByRole('button', { name: mode === 'baseline'
+      ? 'Run baseline without hazards' : /^(Start scenario with Gemini|Restart scenario)$/, exact: true }).click();
   }
 
   async planRoute(kind: 'short' | 'long') {

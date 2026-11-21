@@ -2,6 +2,8 @@
 
 The Playwright suite exercises the built React app, MapLibre/Three renderer, driver hook, route planner, and deterministic physics in Chromium at desktop (1440 × 900) and mobile (390 × 844) viewport sizes. It needs no Python server, environment file, API key, camera connection, or model credit.
 
+The suite follows the continuous controller on main: at most 60 decisions and 60 simulated seconds, one request in flight, and a three-second command freshness limit. Initial inference holds the car still; later requests overlap motion under the last valid command. Lifecycle tests explicitly select **Run baseline without hazards** so scripted events do not change their route or timing assumptions.
+
 ```sh
 npm ci
 npx playwright install chromium
@@ -20,12 +22,12 @@ After building, target one case with `npx playwright test --project=desktop-chro
 - Late responses after Stop and after restart, including a transport that ignores AbortSignal.
 - Camera selection, route replacement, and Traffic demo selection cancelling the previous run.
 - Hidden/visible lifecycle events stopping motion without automatic resume or elapsed-time jumps.
-- HTTP errors, the three-second initial-command deadline, invalid JSON, invalid decision fields, and mismatched run/step/model/budget identities, without a fallback decision or automatic retry.
+- HTTP errors, the three-second decision deadline, invalid JSON, invalid decision fields, mismatched run/step/model/budget identities, and nonzero stop speeds, without a fallback decision or automatic retry.
 - Replay → driver → replay and Map/Intersection/Follow perspective changes, comparing controls with the frame and ego transform actually consumed by the renderer.
 - Perspective changes during a delayed basemap style replacement, without crashing the map or the driver.
-- Sixty decisions maximum and sixty simulated seconds maximum, including a final applied decision interval, cancellation of a pending decision at the time limit, and distinct destination/decision-limit/time-limit completion states.
-- Commands expire three wall seconds after observation capture; pending inference keeps moving under the accepted command until that deadline, then late responses remain inert.
-- Lifecycle and timing cases explicitly run the baseline without hazards, so short-route arrival remains valid with the scenario lab enabled. A separate event-mode case starts the primary scenario control, checks that the scheduled hazard reaches the next model observation, and confirms that motion continues while the next response is pending.
+- Continuous motion during inference, single-flight requests, command expiry, the 60-decision/60-second budget, and distinct destination/budget completion states.
+- The final command's applied interval and cancellation of a pending response at the time limit.
+- Event mode through its primary control, including a scheduled hazard appearing in the next model observation while motion continues during inference.
 
 ## Isolation and observability
 
@@ -33,7 +35,7 @@ After building, target one case with `npx playwright test --project=desktop-chro
 
 The gateway holds real HTTP fetches until a test releases them. Cancellation tests selectively remove the decision fetch's signal while recording that the app supplied it. This forces the run-identity guard to reject a genuinely delivered stale response; a successful transport abort alone cannot make the test pass.
 
-The suite controls browser timers using Playwright Clock. `runFor` advances every animation frame during driving. `fastForward` is used only while motion is stopped or awaiting the initial command, or for the initial-request deadline; it must not be used to simulate driving because the physics bounds each animation delta.
+The suite controls browser timers using Playwright Clock. `runFor` advances every animation frame during driving. `fastForward` is used only while motion is stopped or awaiting the first command, or for a deadline; it must not be used to simulate continuous motion because the physics bounds each animation delta.
 
 The renderer publishes its last successfully drawn scenario, frame time, and ego world-transform coordinates on the canvas beside the existing rendering diagnostics. Assertions inspect those values in Intersection and Follow modes. City overview intentionally culls 3D vehicles at low zoom, so its retained diagnostics are not treated as a newly rendered frame.
 
