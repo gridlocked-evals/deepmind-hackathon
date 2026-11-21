@@ -159,11 +159,13 @@ def test_cancellation_releases_slot_but_retains_unknown_usage(tmp_path):
             gateway = ModelGateway(settings(tmp_path), client, api_key=KEY)
             task = asyncio.create_task(observe(gateway))
             await entered.wait()
-            task.cancel()
-            with pytest.raises(asyncio.CancelledError):
+            task.cancel("caller cancellation")
+            with pytest.raises(asyncio.CancelledError) as cancelled:
                 await task
             record = gateway.ledger.attempts()[0]
             assert record["outcome"] == "cancelled" and record["charged_tokens"] > 0
+            assert cancelled.value.args == ("caller cancellation",)
+            assert cancelled.value.request_id == record["request_id"]
     asyncio.run(run())
 
 
