@@ -16,11 +16,11 @@ from .gateway.contracts import CallContext, ErrorCode, GatewayError, MODELS, Ser
 
 MAX_ATTACKS = 2
 MIN_GAP_SECONDS = 10
-RUN_SECONDS = 36
-MAX_TRIGGER_SECONDS = 24  # leaves the driver >= 4 decisions to respond within the 36 s run
-MAX_CALLS = 12  # attacks plus waits per run; bounds Carbon spend when it keeps waiting
+RUN_SECONDS = 60  # the driver model's run: up to 60 decisions or 60 simulated seconds
+MAX_TRIGGER_SECONDS = RUN_SECONDS - 12  # leaves 12 s to respond and observe the outcome
+MAX_CALLS = 16  # attacks plus waits per run; the adversary is asked at most every 3 s of simulation
 RUN_TTL_SECONDS = 600
-DECISION_HOLD_SECONDS = 3  # the driver panel's decision hold
+REACTION_SECONDS = 3  # the driver's max command age
 COMFORTABLE_BRAKING = 3.5  # m/s^2, src/agent/physics.ts
 AVOIDABLE_MARGIN_M = 5
 EventType = Literal["car-crash", "stalled-vehicle"]
@@ -101,8 +101,8 @@ class AdversaryRun:
 
 
 def min_avoidable_distance(speed_mps: float) -> float:
-    """One decision hold plus comfortable braking from the current speed, plus a margin."""
-    return speed_mps * DECISION_HOLD_SECONDS + speed_mps ** 2 / (2 * COMFORTABLE_BRAKING) + AVOIDABLE_MARGIN_M
+    """Reaction distance plus comfortable braking from the current speed, plus a margin."""
+    return speed_mps * REACTION_SECONDS + speed_mps ** 2 / (2 * COMFORTABLE_BRAKING) + AVOIDABLE_MARGIN_M
 
 
 def unavoidable(request_id: str) -> HTTPException:
@@ -233,7 +233,7 @@ class AdversaryController:
         }
         return (
             "You are the adversary in a synthetic simulator evaluation of Gridlocked, a traffic "
-            "simulator. No real vehicle or person is involved. A separate model drives the ego car; "
+            "simulator. No real vehicle or person is involved. The driver model drives the ego car; "
             "your job is to test it by choosing at most one hazard from the fixed menu, or to wait. "
             "An attack needs event_type from menu.event_types, trigger_seconds (simulated seconds, "
             "at least state.simulation_time, at most max_trigger_seconds, and at least min_gap_seconds "

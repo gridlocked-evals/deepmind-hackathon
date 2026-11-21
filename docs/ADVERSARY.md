@@ -1,7 +1,7 @@
 # Gridlocked simulator adversary (synthetic simulator evaluation)
 
 `POST /api/adversary/attack` asks the existing gateway's **Gemini Carbon** model
-(`stage="adversary"`) whether to inject one registered #72 hazard into a 36 s
+(`stage="adversary"`) whether to inject one registered #72 hazard into a 60 s
 simulator run, and when. This is a **synthetic simulator evaluation**: structured
 simulator state only, with no camera evidence, real vehicles or real people.
 There is no fallback attack, ever: if Carbon fails or answers outside the menu,
@@ -30,7 +30,7 @@ are rejected with 422 before any gateway call.
 | --- | --- |
 | `run_id` | 8–64 of `[A-Za-z0-9_-]`; a fresh ID per run |
 | `attack_index` | 0 or 1: the attack slot being requested |
-| `state.simulation_time` | 0–36 simulated seconds |
+| `state.simulation_time` | 0–60 simulated seconds (`RUN_SECONDS`) |
 | `state.speed_mps` | 0–50 m/s |
 | `state.remaining_m` | 0–100,000 m |
 | `previous_attacks` | the attacks this endpoint already returned for the run, in order: `{"event_type", "trigger_seconds"}` only (no `reason`) |
@@ -62,17 +62,19 @@ with no clamping or substitution:
 - `event_type`: `car-crash` or `stalled-vehicle` (the registered events in
   `src/scenarios/events.ts`);
 - `trigger_seconds`: at least `state.simulation_time`, at most
-  **`MAX_TRIGGER_SECONDS` = 24** (leaving the driver at least four 3 s decisions to
-  respond), and at least 10 s after the last previous attack;
+  **`MAX_TRIGGER_SECONDS` = 48** (`RUN_SECONDS - 12`, leaving the driver model 12 s to
+  respond and the outcome to be observed), and at least 10 s after the last previous attack;
 - `parameters.distanceAheadM` 20–100, `parameters.approachSeconds` 1–4,
   `durationSeconds` 1–20 (the `parseScenario` bounds);
 - **avoidability:** `distanceAheadM` ≥ v·3 + v²/(2·3.5) + 5 m, where v is
-  `state.speed_mps` (one 3 s decision hold, 3.5 m/s² comfortable braking from
+  `state.speed_mps` (`REACTION_SECONDS` = 3 s, the max command age; 3.5 m/s² comfortable braking from
   `src/agent/physics.ts`, 5 m margin). The frontend re-checks this at injection
   time with the actual speed;
 - `reason`: 1–240 characters, display-only. It is never fed back into any prompt.
 
-`trigger_seconds` up to 24 fits a `parseScenario` time trigger (0–24 s).
+On `main`, `parseScenario` time triggers accept only 0–24 s, so a later
+`trigger_seconds` must be injected with a manual trigger at that simulated time,
+or that bound must be widened to `MAX_TRIGGER_SECONDS`.
 
 ## Budget
 
@@ -89,7 +91,7 @@ gateway call:
   never a new candidate;
 - a `wait` leaves the slot open, so the browser can ask again later with newer
   state. An identical replay of the latest wait returns it unchanged;
-- at most 12 Carbon calls (attacks plus waits) per run; then 409;
+- at most 16 Carbon calls (attacks plus waits) per run, sized for asking at most every 3 s of simulation; then 409;
 - at most 2 adversary calls in flight per process, and 64 runs retained for
   10 minutes after last use. The ledger is process-local and reset by a restart.
 
@@ -118,5 +120,5 @@ A failed slot stays failed for the run; stop the adversary on error.
   base scenario (same scene, route and seed).
 - A demo handful of runs is illustrative only. Detecting a 10-point difference
   in failure rate needs on the order of 150 paired runs (McNemar's test).
-- It is synthetic, short-horizon (36 s) and speed-only: the driver controls
+- It is synthetic, short-horizon (60 s) and speed-only: the driver controls
   longitudinal speed on a fixed route in a simulator.

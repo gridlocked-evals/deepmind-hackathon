@@ -11,7 +11,7 @@ import pytest
 
 from backend.adversary import (
     AdversaryController, AdversaryDecision, AttackRequest, MAX_CALLS, MAX_TRIGGER_SECONDS,
-    min_avoidable_distance, router,
+    REACTION_SECONDS, RUN_SECONDS, min_avoidable_distance, router,
 )
 from backend.driver import MAX_REQUEST_BYTES
 from backend.gateway.contracts import ErrorCode, GatewayError, Service
@@ -73,7 +73,7 @@ def test_valid_attack_uses_carbon_adversary_stage_and_data_only_prompt():
     assert call["context"].prompt_id == "sim-adversary-v1:call-0" and call["context"].purpose == "development"
     data = json.loads(call["input_value"].split("Input JSON:\n")[1])
     assert data["state"] == request_body()["state"] and data["previous_attacks"] == []
-    assert data["budget"]["max_trigger_seconds"] == MAX_TRIGGER_SECONDS == 24
+    assert data["budget"]["max_trigger_seconds"] == MAX_TRIGGER_SECONDS == RUN_SECONDS - 12 == 48
     assert set(data["menu"]["event_types"]) == {"car-crash", "stalled-vehicle"}
 
 
@@ -205,6 +205,12 @@ def test_wait_with_any_attack_field_is_invalid(change):
     assert response.status_code == 502 and detail(response)["code"] == "invalid_output"
 
 
+def test_trigger_at_cutoff_late_in_long_run_is_accepted():
+    client, _, _ = client_for(FakeGateway(dict(ATTACK, trigger_seconds=float(MAX_TRIGGER_SECONDS))))
+    response = client.post(URL, json=request_body(time=45.0))
+    assert response.status_code == 200 and response.json()["decision"]["trigger_seconds"] == 48
+
+
 @pytest.mark.parametrize("trigger", [17.9, 12.0])
 def test_trigger_too_close_to_previous_attack_is_rejected(trigger):
     client, gateway, _ = client_for()
@@ -217,7 +223,7 @@ def test_trigger_too_close_to_previous_attack_is_rejected(trigger):
 def test_unavoidable_attack_is_a_typed_error_not_clamped():
     speed = 10.0
     limit = min_avoidable_distance(speed)
-    assert limit == pytest.approx(10 * 3 + 100 / 7 + 5)
+    assert REACTION_SECONDS == 3 and limit == pytest.approx(10 * REACTION_SECONDS + 100 / 7 + 5)
     client, _, _ = client_for(FakeGateway(dict(ATTACK, parameters={"distanceAheadM": limit - 0.1, "approachSeconds": 2.0})))
     response = client.post(URL, json=request_body(speed=speed))
     assert response.status_code == 502 and detail(response)["code"] == "unavoidable_attack"
@@ -230,7 +236,8 @@ def test_unavoidable_attack_is_a_typed_error_not_clamped():
     (("extra",), "x"), (("state", "extra"), "x"), (("run_id",), "short"), (("run_id",), "../a/b/c"),
     (("attack_index",), True), (("attack_index",), "0"), (("attack_index",), -1),
     (("state", "speed_mps"), True), (("state", "speed_mps"), "5"), (("state", "speed_mps"), 51),
-    (("state", "simulation_time"), 36.5), (("state", "remaining_m"), 100001),
+    (("state", "simulation_time"), RUN_SECONDS + 0.5),
+    (("previous_attacks",), [{"event_type": "car-crash", "trigger_seconds": MAX_TRIGGER_SECONDS + 0.5}]), (("state", "remaining_m"), 100001),
     (("previous_attacks",), [{"event_type": "car-crash", "trigger_seconds": 3.0, "reason": "x"}]),
     (("previous_attacks",), [{"event_type": "car-crash", "trigger_seconds": True}]),
     (("previous_attacks",), [{"event_type": "pedestrian", "trigger_seconds": 3.0}]),
