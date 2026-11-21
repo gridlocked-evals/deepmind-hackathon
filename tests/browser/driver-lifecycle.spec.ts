@@ -215,3 +215,34 @@ test('replay, driver, and perspective changes share the frame consumed by the re
   expect(await driver.time()).toBeGreaterThan(1);
   expect(Math.abs((await rendered(driver)).time - await driver.time())).toBeLessThan(0.12);
 });
+
+test('event mode exposes its scheduled hazard as the driver keeps moving during inference', async ({ driver }) => {
+  await driver.open();
+  await driver.planRoute('long');
+  await driver.startDriver('event');
+  const first = await driver.gateway.waitForRequest(0);
+  expect(first.observation.simulation_time).toBe(0);
+  expect(first.observation.lead_gap_m).toBeNull();
+  for (let step = 0; step < 3; step++) {
+    await driver.gateway.reply(step);
+    await expect.poll(() => driver.decisionCount()).toBe(step + 1);
+    await driver.page.clock.runFor(1008);
+  }
+  const next = await driver.gateway.waitForRequest(3);
+  expect(next.run_id).toBe(first.run_id);
+  expect(next.step).toBe(3);
+  expect(next.observation.simulation_time).toBeCloseTo(3, 6);
+  expect(next.observation.lead_gap_m).not.toBeNull();
+  expect(next.observation.lead_gap_m!).toBeGreaterThan(0);
+  // The request applies the scheduled event after this frame's throttled UI
+  // publication. Let the next publication expose the already-recorded event.
+  await driver.page.clock.runFor(112);
+  await driver.openDriver();
+  await expect(driver.page.locator('.scenario-events')).toContainText('applied · 3.0s');
+  const pendingTime = await driver.time();
+  await driver.page.clock.runFor(500);
+  expect(await driver.time()).toBeGreaterThan(pendingTime + 0.3);
+  await driver.page.getByRole('button', { name: 'Stop drive', exact: true }).click();
+  await driver.page.clock.runFor(32);
+  await expectFrozen(driver);
+});

@@ -82,6 +82,9 @@ const invalidResponses: { name: string; response: DecisionReply }[] = [
   { name: 'malformed decision', response: { decision: { target_speed_mps: -1 } } },
   { name: 'wrong run identity', response: { run_id: 'another-driver-run' } },
   { name: 'wrong step identity', response: { step: 1 } },
+  { name: 'wrong model identity', response: { model_id: 'another-model' } },
+  { name: 'wrong decision budget', response: { max_steps: 12 } },
+  { name: 'nonzero stop speed', response: { decision: { action: 'stop', target_speed_mps: 5 } } },
 ];
 
 for (const { name, response } of invalidResponses) {

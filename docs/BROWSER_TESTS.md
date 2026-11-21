@@ -22,10 +22,12 @@ After building, target one case with `npx playwright test --project=desktop-chro
 - Late responses after Stop and after restart, including a transport that ignores AbortSignal.
 - Camera selection, route replacement, and Traffic demo selection cancelling the previous run.
 - Hidden/visible lifecycle events stopping motion without automatic resume or elapsed-time jumps.
-- HTTP errors, the three-second decision deadline, invalid JSON, invalid decision fields, and mismatched run/step identities, without a fallback decision or automatic retry.
+- HTTP errors, the three-second decision deadline, invalid JSON, invalid decision fields, mismatched run/step/model/budget identities, and nonzero stop speeds, without a fallback decision or automatic retry.
 - Replay → driver → replay and Map/Intersection/Follow perspective changes, comparing controls with the frame and ego transform actually consumed by the renderer.
 - Perspective changes during a delayed basemap style replacement, without crashing the map or the driver.
 - Continuous motion during inference, single-flight requests, command expiry, the 60-decision/60-second budget, and distinct destination/budget completion states.
+- The final command's applied interval and cancellation of a pending response at the time limit.
+- Event mode through its primary control, including a scheduled hazard appearing in the next model observation while motion continues during inference.
 
 ## Isolation and observability
 

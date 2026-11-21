@@ -90,6 +90,7 @@ for (const budget of ['time', 'decisions'] as const) {
 
     let runId: string | undefined;
     let previousTime = 0;
+    let finalAppliedAt = 0;
     for (let step = 0; step < 60; step++) {
       const request = await driver.gateway.waitForRequest(step);
       runId ??= request.run_id;
@@ -100,6 +101,7 @@ for (const budget of ['time', 'decisions'] as const) {
       expect(request.observation.simulation_time).toBeLessThan(60);
       expect(driver.gateway.calls).toHaveLength(step + 1);
       previousTime = request.observation.simulation_time;
+      if (step === 59) finalAppliedAt = await driver.time();
       await driver.gateway.reply(step);
       await expect.poll(() => driver.decisionCount()).toBe(step + 1);
       // Delaying only the first response gives the decision budget a head
@@ -114,7 +116,10 @@ for (const budget of ['time', 'decisions'] as const) {
     expect(await driver.decisionCount()).toBe(60);
     expect(driver.gateway.calls).toHaveLength(60);
     if (budget === 'time') expect(await driver.time()).toBe(60);
-    else expect(await driver.time()).toBeLessThan(60);
+    else {
+      expect(await driver.time()).toBeGreaterThan(finalAppliedAt + 0.8);
+      expect(await driver.time()).toBeLessThan(60);
+    }
 
     await driver.closeTools();
     await perspective.getByRole('button', { name: 'Follow', exact: true }).click();
@@ -125,6 +130,48 @@ for (const budget of ['time', 'decisions'] as const) {
     await expectFinishedClock(driver);
   });
 }
+
+test('sixty simulated seconds cancel a pending final decision and keep its late response inert', async ({ driver }) => {
+  test.setTimeout(300_000);
+  await driver.open({ unabortableDecisions: true });
+  await driver.planRoute('long');
+  await driver.startDriver();
+  await driver.closeTools();
+  const perspective = driver.page.getByRole('navigation', { name: 'Map perspective' });
+  await perspective.getByRole('button', { name: 'Map', exact: true }).click();
+  const first = await driver.gateway.waitForRequest(0);
+  await driver.gateway.reply(0);
+  await expect.poll(() => driver.decisionCount()).toBe(1);
+  await driver.page.clock.runFor(1008);
+  for (let step = 1; step < 60; step++) {
+    const request = await driver.gateway.waitForRequest(step);
+    expect(request.run_id).toBe(first.run_id);
+    expect(request.step).toBe(step);
+    expect(driver.gateway.calls).toHaveLength(step + 1);
+    // Keep inference pending while motion advances, including at the deadline.
+    await driver.page.clock.runFor(700);
+    if (await driver.time() === 60) break;
+    await driver.gateway.reply(step);
+    await expect.poll(() => driver.decisionCount()).toBe(step + 1);
+    await driver.page.clock.runFor(308);
+  }
+  await driver.openDriver();
+  await expect(driver.page.locator('.driver-decision-heading')).toHaveText('Demo complete');
+  await expect(driver.page.locator('.driver-decision')).toContainText('The 60-second drive is complete.');
+  expect(await driver.time()).toBe(60);
+  expect(driver.gateway.calls).toHaveLength(60);
+  expect(await driver.decisionCount()).toBe(59);
+
+  await driver.closeTools();
+  await perspective.getByRole('button', { name: 'Follow', exact: true }).click();
+  await driver.page.clock.runFor(64);
+  expect((await rendered(driver)).time).toBeCloseTo(60, 6);
+  await driver.gateway.reply(59, { decision: { reason: 'TOO LATE AT TIME LIMIT' } });
+  await expectFinishedClock(driver);
+  expect(await driver.decisionCount()).toBe(59);
+  await driver.openDriver();
+  await expect(driver.page.locator('.driver-panel')).not.toContainText('TOO LATE AT TIME LIMIT');
+});
 
 test('continuous driving reaches a short route destination before either run budget', async ({ driver }) => {
   await driver.open();
