@@ -132,6 +132,7 @@ def test_trial_sealed_after_holdout(tmp_path):
         seal(tmp_path, session, outside)
     trial = seal(tmp_path, session, session.open_holdout(path, pinned))
     assert trial.diff == {"brake_lead_s": (1.0, 2.0)}
+    assert trial.manifest_full_sha256 == session.run.full_sha256
     with pytest.raises(HoldoutError, match="already sealed"):
         seal(tmp_path, session, session.run)
     ledger = ResultsLedger(tmp_path / "repairs.jsonl", RepairTrial)

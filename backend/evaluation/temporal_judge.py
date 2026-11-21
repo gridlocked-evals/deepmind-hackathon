@@ -222,5 +222,5 @@ class TemporalJudge:
         return {"due": len(self.windows) + len(self.skipped), "judged": len(judged),
                 "skipped": len(self.skipped), "stale": sum(w.stale for w in self.windows),
                 "failed": sum(bool(w.error) for w in self.windows),
-                "pending": len(self.in_flight), "stride": self.stride,
+                "pending": sum(not t.done() for t in self.in_flight), "stride": self.stride,
                 "covered": covered, "uncovered": uncovered}

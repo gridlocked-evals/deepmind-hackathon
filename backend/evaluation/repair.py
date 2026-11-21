@@ -146,6 +146,7 @@ class RepairTrial(BaseModel):
     regressions: dict[Literal["dev", "holdout"], list[str]]  # hazard types that got worse
     unsuccessful_fixes: list[str]  # targeted hazard types that did not improve on holdout
     manifest_sha256: str
+    manifest_full_sha256: str  # core + additions, as pinned by the FinalRun
     suite_sha256: str
 
 
@@ -247,4 +248,4 @@ class RepairSession:
             regressions={"dev": [k for k, d in dev_delta.items() if d is not None and d < 0],
                          "holdout": [k for k, d in holdout_delta.items() if d is not None and d < 0]},
             unsuccessful_fixes=[k for k in targeted if (holdout_delta.get(k) or 0) <= 0],
-            manifest_sha256=locked.sha256, suite_sha256=suite_hash(suite))
+            manifest_sha256=locked.sha256, manifest_full_sha256=locked.full_sha256, suite_sha256=suite_hash(suite))
