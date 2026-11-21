@@ -168,7 +168,7 @@ class RepairSession:
         self.failures, self.test_suite = failures, test_suite
         self.packet = build_packet(failures, test_suite)
         self.lock_path, self.run, self.sealed = Path(lock_path), None, False
-        self.max_rounds, self.proposals = max_rounds, []
+        self.max_rounds, self.proposals, self.rounds = max_rounds, [], 0  # rounds: reserved before the Carbon await
 
     def open_holdout(self, lock_path: str | Path, pinned_sha256: str) -> FinalRun:
         """The session's only way to the holdout; tuning ends here."""
@@ -178,16 +178,20 @@ class RepairSession:
             self.run = FinalRun(lock_path, pinned_sha256)
         return self.run
 
+    def holdout_opened(self) -> bool:
+        return self.run is not None or opened_marker(self.lock_path).exists()
+
     async def propose(self, gateway, context: CallContext) -> ProposalRecord:
-        if self.run is not None or opened_marker(self.lock_path).exists():
+        if self.holdout_opened():
             raise HoldoutError("no tuning after the holdout is opened")
-        if len(self.proposals) >= self.max_rounds:
+        if self.rounds >= self.max_rounds:
             raise RuntimeError(f"repair attempt cap of {self.max_rounds} reached")
         body = {"surface": self.surface.model_dump(mode="json"), "values": self.values, "failures": self.packet}
         check_packet(body, [f.score.record for f in self.failures], self.test_suite)
         prompt = ("You repair a driving defender policy. Below are its development failures and its editable "
                   "parameters with bounds. Propose changes to declared fields only, within bounds.\n" + json.dumps(body))
-        round_ = len(self.proposals) + 1
+        self.rounds += 1
+        round_ = self.rounds
         request_id = output = None
         try:
             result = await gateway.generate(Service.CARBON, stage="repair", context=context,
@@ -203,8 +207,12 @@ class RepairSession:
             record = ProposalRecord(round=round_, request_id=request_id, output=output if isinstance(output, dict) else None,
                                     accepted=False, reason=str(exc)[:500])
         else:
-            self.values = updated
-            record = ProposalRecord(round=round_, request_id=request_id, output=output, accepted=True)
+            if self.holdout_opened():  # opened while Carbon was answering
+                record = ProposalRecord(round=round_, request_id=request_id, output=output, accepted=False,
+                                        reason="holdout opened before the proposal could be applied")
+            else:
+                self.values = updated
+                record = ProposalRecord(round=round_, request_id=request_id, output=output, accepted=True)
         self.proposals.append(record)
         return record
 

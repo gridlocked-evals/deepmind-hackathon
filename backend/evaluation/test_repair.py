@@ -176,3 +176,45 @@ def test_dev_before_after_must_be_paired(tmp_path):
     run = session.open_holdout(*locked(tmp_path))
     with pytest.raises(ValueError, match="dev before/after"):  # an after-set with the failure dropped
         seal(tmp_path, session, run, dev_after=[])
+
+
+class GatedGateway(FakeGateway):
+    """Holds every call until `release` is set, so proposals overlap."""
+
+    def __init__(self, *outputs):
+        super().__init__(*outputs)
+        self.release = asyncio.Event()
+
+    async def generate(self, *args, **kwargs):
+        await self.release.wait()
+        return await super().generate(*args, **kwargs)
+
+
+def test_concurrent_proposals_respect_cap():
+    session, gateway = session_for(), GatedGateway(*[change("brake_lead_s", 2.0)] * 3)
+
+    async def run():
+        calls = [asyncio.create_task(session.propose(gateway, CONTEXT)) for _ in range(3)]
+        await asyncio.sleep(0)
+        gateway.release.set()
+        return await asyncio.gather(*calls, return_exceptions=True)
+
+    results = asyncio.run(run())
+    assert sum(isinstance(r, RuntimeError) for r in results) == 1
+    assert sorted(p.round for p in session.proposals) == [1, 2]
+
+
+def test_holdout_opened_mid_proposal_rejects_it(tmp_path):
+    path, pinned = locked(tmp_path)
+    session, gateway = session_for(path), GatedGateway(change("brake_lead_s", 2.0))
+
+    async def run():
+        call = asyncio.create_task(session.propose(gateway, CONTEXT))
+        await asyncio.sleep(0)
+        session.open_holdout(path, pinned)
+        gateway.release.set()
+        return await call
+
+    record = asyncio.run(run())
+    assert not record.accepted and "holdout" in record.reason
+    assert session.values == VALUES and session.proposals == [record]
